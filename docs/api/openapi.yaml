@@ -1,0 +1,646 @@
+openapi: 3.0.3
+info:
+  title: Sendwise Email Marketing API
+  version: 1.0.0
+  description: |
+    Versioned REST API for the Sendwise self-hosted email marketing platform.
+    All tenant-owned endpoints require authentication and enforce organization-level
+    access. Stalwart SMTP is the initial transport, abstracted behind a replaceable
+    Go interface.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.sendwise.example.com
+    description: Production
+tags:
+  - name: auth
+  - name: contacts
+  - name: audiences
+  - name: campaigns
+  - name: templates
+  - name: domains
+  - name: analytics
+  - name: public
+  - name: health
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: invalid_email }
+            message: { type: string, example: Enter a valid email address. }
+    Pagination:
+      type: object
+      properties:
+        total: { type: integer, example: 124 }
+        limit: { type: integer, example: 50 }
+        offset: { type: integer, example: 0 }
+    ListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        name: { type: string }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+    Organization:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        plan: { type: string }
+        status: { type: string }
+    Contact:
+      type: object
+      required: [email, status]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        first_name: { type: string }
+        last_name: { type: string }
+        status: { type: string, enum: [pending, subscribed, unsubscribed, bounced, complained, suppressed] }
+        custom_fields: { type: object }
+    ContactConsent:
+      type: object
+      required: [source, purpose, evidence]
+      properties:
+        source: { type: string, minLength: 1, maxLength: 128 }
+        purpose: { type: string, enum: [marketing] }
+        evidence:
+          type: object
+          minProperties: 1
+          description: Evidence provided for the contact's marketing opt-in.
+    SegmentRules:
+      type: object
+      required: [match, conditions]
+      properties:
+        match: { type: string, enum: [all, any] }
+        conditions:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+            required: [field, operator]
+            properties:
+              field:
+                type: string
+                description: Allowed values are email, first_name, last_name, status, source, created_at, or custom_fields.<key> with a safe key name.
+              operator:
+                type: string
+                enum: [equals, not_equals, contains, does_not_contain, greater_than, less_than, is_empty, is_not_empty, date_before, date_after]
+              value: { type: string }
+    ContactList:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        contact_count: { type: integer }
+    Campaign:
+      type: object
+      required: [name, subject, sender_name, sender_email, status]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string }
+        subject: { type: string }
+        preview_text: { type: string }
+        sender_name: { type: string }
+        sender_email: { type: string, format: email }
+        reply_to: { type: string, format: email }
+        status: { type: string, enum: [draft, ready, scheduled, processing, sending, paused, completed, cancelled, failed] }
+        recipient_count: { type: integer }
+        track_opens: { type: boolean }
+        track_clicks: { type: boolean }
+        scheduled_at: { type: string, format: date-time }
+    SendingDomain:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        domain: { type: string }
+        status: { type: string, enum: [pending, verified, misconfigured] }
+        spf_status: { type: string }
+        dkim_status: { type: string }
+        dmarc_status: { type: string }
+    AnalyticsOverview:
+      type: object
+      properties:
+        contacts: { type: integer }
+        subscribed: { type: integer }
+        emails_submitted: { type: integer }
+        opens: { type: integer }
+        clicks: { type: integer }
+        bounces: { type: integer }
+        complaints: { type: integer }
+        unsubscribes: { type: integer }
+        open_rate: { type: number }
+        click_rate: { type: number }
+        bounce_rate: { type: number }
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness check
+      security: []
+      responses:
+        '200': { description: OK }
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness check
+      security: []
+      responses:
+        '200': { description: Ready }
+  /metrics:
+    get:
+      tags: [health]
+      summary: Prometheus metrics
+      security: []
+      responses:
+        '200': { description: Prometheus metrics }
+
+  /api/v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Register user and create organization
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name, organization_name]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 10 }
+                name: { type: string }
+                organization_name: { type: string }
+      responses:
+        '201': { description: User and workspace created; access token returned }
+        '400': { description: Invalid registration payload }
+        '409': { description: Email in use }
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Authenticate a user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        '200': { description: Access token and workspace returned }
+        '401': { description: Invalid credentials }
+        '403': { description: Inactive user or missing workspace }
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: Get the authenticated user and active workspace
+      responses:
+        '200': { description: Current user and organization membership }
+        '401': { description: Authentication required }
+
+  /api/v1/contacts:
+    get:
+      tags: [contacts]
+      summary: List contacts for the authenticated organization
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: search, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Paginated contact results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Contact' }
+                  pagination: { $ref: '#/components/schemas/Pagination' }
+    post:
+      tags: [contacts]
+      summary: Create a contact
+      description: Contacts default to pending. Setting subscribed requires consent source, marketing purpose, and evidence; suppressed addresses cannot be subscribed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                first_name: { type: string }
+                last_name: { type: string }
+                status: { type: string, enum: [pending, subscribed], default: pending }
+                custom_fields: { type: object, additionalProperties: true }
+                source: { type: string }
+                consent: { $ref: '#/components/schemas/ContactConsent' }
+      responses:
+        '201': { description: Contact created }
+        '400': { description: Invalid contact payload }
+        '409': { description: Contact already exists in this organization }
+
+  /api/v1/contacts/import:
+    post:
+      tags: [contacts]
+      summary: Queue a contact CSV import
+      description: Uploads up to 16 MiB and 100,000 data rows. Mapping can be supplied as a JSON string form field. Every imported contact is pending; CSV status/source columns do not set consent. Duplicate emails are skipped and invalid rows are reported in job status.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                mapping:
+                  type: string
+                  description: Optional JSON CSVColumnMapping with email, first_name, last_name, and custom_fields header-to-key mappings.
+      responses:
+        '202': { description: Import job queued with an id and queued status }
+        '400': { description: Invalid upload or CSV format }
+        '413': { description: Upload exceeds the size limit }
+
+  /api/v1/contact-imports/{id}:
+    get:
+      tags: [contacts]
+      summary: Get organization-scoped contact import progress
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Current import status, counters, and up to 100 row errors
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  status: { type: string, enum: [queued, processing, completed, failed] }
+                  file_name: { type: string }
+                  total_rows: { type: integer }
+                  processed_rows: { type: integer }
+                  imported: { type: integer }
+                  skipped: { type: integer }
+                  invalid: { type: integer }
+                  errors: { type: array, items: { type: object } }
+                  last_error: { type: string }
+        '404': { description: Import not found in this organization }
+
+  /api/v1/contacts/export:
+    get:
+      tags: [contacts]
+      summary: Export organization contacts as CSV
+      responses:
+        '200':
+          description: CSV export
+          content:
+            text/csv:
+              schema: { type: string }
+
+  /api/v1/contacts/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [contacts]
+      summary: Get a contact
+      responses:
+        '200': { description: Contact details }
+        '404': { description: Contact not found }
+    patch:
+      tags: [contacts]
+      summary: Update a contact
+      description: A contact can only be moved to subscribed with explicit consent source, marketing purpose, and evidence. Suppressed addresses cannot be subscribed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email }
+                first_name: { type: string }
+                last_name: { type: string }
+                status: { type: string, enum: [pending, subscribed] }
+                custom_fields: { type: object, additionalProperties: true }
+                source: { type: string }
+                consent: { $ref: '#/components/schemas/ContactConsent' }
+      responses:
+        '200': { description: Contact updated }
+        '400': { description: Invalid contact payload }
+        '404': { description: Contact not found }
+    delete:
+      tags: [contacts]
+      summary: Delete a contact
+      responses:
+        '204': { description: Contact deleted }
+        '404': { description: Contact not found }
+
+  /api/v1/lists:
+    get:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: List contact lists
+      responses:
+        '200': { description: Contact lists }
+    post:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Create a contact list
+      responses:
+        '201': { description: Contact list created }
+  /api/v1/lists/{id}:
+    delete:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '204': { description: Deleted } }
+
+  /api/v1/tags:
+    get:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: List tags
+      responses:
+        '200': { description: Tags }
+    post:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Create a tag
+      responses:
+        '201': { description: Tag created }
+  /api/v1/segments:
+    get:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: List segments
+      responses:
+        '200': { description: Segments }
+    post:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Create a segment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, rules]
+              properties:
+                name: { type: string }
+                description: { type: string }
+                rules: { $ref: '#/components/schemas/SegmentRules' }
+      responses:
+        '201': { description: Segment created }
+        '400': { description: Invalid segment rules }
+      responses:
+        '201': { description: Segment created }
+
+  /api/v1/segments/{id}:
+    delete:
+      tags: [audiences]
+      summary: Delete a segment
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Segment deleted }
+
+  /api/v1/templates:
+    get:
+      tags: [templates]
+      security: [{ BearerAuth: [] }]
+      summary: List templates
+      responses:
+        '200': { description: Templates }
+    post:
+      tags: [templates]
+      security: [{ BearerAuth: [] }]
+      summary: Create a template
+      responses:
+        '201': { description: Template created }
+
+  /api/v1/campaigns:
+    get:
+      tags: [campaigns]
+      security: [{ BearerAuth: [] }]
+      summary: List campaigns
+      responses:
+        '200': { description: Campaign page }
+    post:
+      tags: [campaigns]
+      security: [{ BearerAuth: [] }]
+      summary: Create a campaign
+      responses:
+        '201': { description: Campaign created }
+  /api/v1/campaigns/{id}:
+    get:
+      tags: [campaigns]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Campaign details }
+    patch:
+      tags: [campaigns]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Campaign updated }
+    delete:
+      tags: [campaigns]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Campaign deleted }
+  /api/v1/campaigns/{id}/validate:
+    post:
+      tags: [campaigns]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Campaign validation result }
+  /api/v1/campaigns/{id}/schedule:
+    post:
+      tags: [campaigns]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Campaign scheduled }
+  /api/v1/campaigns/{id}/send:
+    post:
+      tags: [campaigns]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Campaign queued for delivery }
+  /api/v1/campaigns/{id}/pause:
+    post:
+      tags: [campaigns]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Campaign paused }
+  /api/v1/campaigns/{id}/resume:
+    post:
+      tags: [campaigns]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Campaign resumed }
+  /api/v1/campaigns/{id}/cancel:
+    post:
+      tags: [campaigns]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Campaign cancelled }
+
+  /api/v1/domains:
+    get:
+      tags: [domains]
+      security: [{ BearerAuth: [] }]
+      summary: List sending domains
+      responses:
+        '200': { description: Sending domains }
+    post:
+      tags: [domains]
+      security: [{ BearerAuth: [] }]
+      summary: Add a sending domain
+      responses:
+        '201': { description: Sending domain created }
+  /api/v1/domains/{id}/verify:
+    post:
+      tags: [domains]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: DNS verification result }
+  /api/v1/domains/{id}/dns-records:
+    get:
+      tags: [domains]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: DNS record instructions }
+
+  /api/v1/analytics/overview:
+    get:
+      tags: [analytics]
+      security: [{ BearerAuth: [] }]
+      summary: Organization analytics overview
+      responses:
+        '200': { description: Analytics overview }
+  /api/v1/analytics/campaigns/{id}:
+    get:
+      tags: [analytics]
+      security: [{ BearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Campaign report }
+
+  /api/v1/api-keys:
+    get:
+      tags: [auth]
+      summary: List organization API keys without exposing key material
+      responses:
+        '200': { description: Active API key metadata }
+        '403': { description: Owner or admin role required }
+    post:
+      tags: [auth]
+      summary: Create an organization API key
+      description: The returned plain_key is shown once and is not stored by the server.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                scopes: { type: array, items: { type: string } }
+                expires_at: { type: string, format: date-time }
+      responses:
+        '201': { description: API key created; plain_key returned once }
+        '400': { description: Invalid request }
+        '403': { description: Owner or admin role required }
+  /api/v1/api-keys/{id}:
+    delete:
+      tags: [auth]
+      summary: Revoke an organization API key
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: API key revoked }
+        '403': { description: Owner or admin role required }
+        '404': { description: API key not found }
+
+  /api/v1/public/subscribe:
+    post:
+      tags: [public]
+      summary: Public subscription form
+      security: []
+      responses:
+        '200': { description: Subscription accepted }
+  /api/v1/public/unsubscribe:
+    get:
+      tags: [public]
+      summary: One-click unsubscribe page (signed token)
+      security: []
+      responses:
+        '200': { description: Unsubscribe confirmation page }
+    post:
+      tags: [public]
+      summary: One-click unsubscribe API (signed token)
+      security: []
+      responses:
+        '200': { description: Unsubscribe recorded }
+  /t/open/{token}:
+    get:
+      tags: [public]
+      summary: Open tracking pixel (signed token)
+      security: []
+      responses:
+        '200': { description: Tracking pixel }
+  /t/click/{token}:
+    get:
+      tags: [public]
+      summary: Click tracking redirect (signed token)
+      security: []
+      responses:
+        '302': { description: Redirect to destination }
+
+security:
+  - BearerAuth: []

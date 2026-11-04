@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  background-color: #f6f8f7;
+  color: #17251f;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background-color: #b9dfc9;
+}
+
+.card-shadow {
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+input[type="checkbox"] {
+  accent-color: #187653;
+}
+
+.email-canvas p {
+  margin: 0 0 16px;
+  line-height: 1.7;
+}
+
+.email-canvas h1 {
+  margin: 0 0 16px;
+  font-size: 28px;
+  line-height: 1.3;
+  font-weight: 700;
+}
+
+.email-canvas a {
+  color: #187653;
+}

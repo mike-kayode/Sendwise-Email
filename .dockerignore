@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+*.log
+.DS_Store
+
+apps
+node_modules
+**/node_modules
+**/.next
+**/*.tsbuildinfo
+
+bin
+dist
+data
+tmp

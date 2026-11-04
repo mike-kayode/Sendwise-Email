@@ -1,0 +1,76 @@
+flowchart LR
+    Clients[Browser and API clients] --> Gateway[API Gateway]
+    Gateway --> Identity[Identity Service]
+    Gateway --> Workspace[Workspace Service]
+    Gateway --> Audience[Audience Service]
+    Gateway --> Consent[Consent Service]
+    Gateway --> Campaign[Campaign Service]
+    Gateway --> Design[Design and Template Service]
+    Gateway --> Domain[Domain and Deliverability Service]
+    Gateway --> Delivery[Delivery Orchestration Service]
+    Gateway --> Analytics[Tracking and Analytics Service]
+    Gateway --> Automation[Automation Service]
+    Gateway --> Forms[Forms Service]
+    Gateway --> Billing[Billing and Entitlements Service]
+    Gateway --> Integrations[Integrations and Webhooks Service]
+    Gateway --> Admin[Platform Administration Service]
+
+    subgraph Async["Durable asynchronous boundary"]
+        NATS[(NATS JetStream)]
+        Outbox[Per-service transactional outbox]
+        Inbox[Per-consumer inbox / idempotency]
+    end
+    Identity --> Outbox
+    Workspace --> Outbox
+    Audience --> Outbox
+    Consent --> Outbox
+    Campaign --> Outbox
+    Delivery --> Outbox
+    Outbox --> NATS --> Inbox
+    Inbox --> Workspace
+    Inbox --> Automation
+    Inbox --> Analytics
+    Inbox --> Delivery
+    Inbox --> Integrations
+
+    Delivery --> Workers[Independently scaled delivery workers]
+    Workers --> SMTP[Provider-independent SMTP transport]
+    SMTP --> Stalwart[Stalwart node pool]
+    Stalwart --> MX[Recipient MX]
+    Bounce[Bounce and complaint ingress] --> Consent
+    Bounce --> Delivery
+
+    subgraph Data["Service-owned PostgreSQL databases or restricted schemas"]
+        DB1[(Identity DB)]
+        DB2[(Workspace DB)]
+        DB3[(Audience DB)]
+        DB4[(Consent DB)]
+        DB5[(Campaign/Design DBs)]
+        DB6[(Delivery DB)]
+        DB7[(Analytics partitions/aggregates)]
+        DB8[(Other owner databases)]
+    end
+    Identity --> DB1
+    Workspace --> DB2
+    Audience --> DB3
+    Consent --> DB4
+    Campaign --> DB5
+    Design --> DB5
+    Delivery --> DB6
+    Workers --> DB6
+    Analytics --> DB7
+    Domain --> DB8
+    Automation --> DB8
+    Forms --> DB8
+    Billing --> DB8
+    Integrations --> DB8
+    Admin --> DB8
+
+    classDef target fill:#e7f5ff,stroke:#1671a8,color:#123;
+    classDef current fill:#fff3cd,stroke:#b58900,color:#333;
+    class Gateway,Identity,Workspace,Audience,Consent,Campaign,Design,Domain,Delivery,Analytics,Automation,Forms,Billing,Integrations,Admin,Workers target;
+    class NATS,Stalwart current;
+
+    %% Target proposal only: these independently deployable services and their
+    %% per-owner databases are not present in the current deployment.
+

@@ -1,0 +1,36 @@
+sequenceDiagram
+    participant C as Campaign Service
+    participant CDB as Campaign DB
+    participant O as Campaign Outbox Relay
+    participant N as NATS JetStream
+    participant D as Delivery Orchestration
+    participant DDB as Delivery DB
+    participant A as Audience/Consent APIs
+    participant W as Delivery Worker
+    participant S as SMTP Transport
+    participant X as Analytics
+
+    C->>CDB: Commit scheduled campaign + outbox event
+    O->>CDB: Lease unpublished outbox rows
+    O->>N: Publish campaign.scheduled.v1 with stable event ID
+    N-->>O: Durable publish acknowledgement
+    O->>CDB: Mark outbox event published
+    N->>D: Deliver event at least once
+    D->>DDB: Deduplicate in inbox and persist delivery plan/outbox
+    D->>A: Request scoped eligible audience snapshot
+    A-->>D: Immutable snapshot reference + version
+    D->>DDB: Persist bounded jobs and tenant/domain policy
+    D->>N: Publish delivery.requested.v1
+    N->>W: Deliver job reference (may be duplicated)
+    W->>DDB: Claim lease and deduplicate
+    W->>A: Verify current consent/suppression decision
+    A-->>W: Eligible/blocked decision
+    W->>S: Submit immutable rendered message
+    S-->>W: SMTP reply and classified result
+    W->>DDB: Persist attempt/result and outbox event
+    W->>N: Acknowledge only after durable result
+    N->>X: Publish delivery outcome
+    X->>X: Deduplicate and aggregate event
+
+    Note over W,S: Exactly-once external SMTP delivery is not guaranteed. Uncertain replies require reconciliation, not blind resend.
+

@@ -1,0 +1,48 @@
+flowchart LR
+    Browser[Browser]
+    Web[Next.js 16 app]
+    Caddy[Caddy reverse proxy]
+    API[Go HTTP API]
+    DB[(PostgreSQL - source of truth)]
+    NATS[(NATS JetStream)]
+    Worker[Go scheduler and delivery worker]
+    SMTP[Configured SMTP relay - intended Stalwart]
+    MX[Recipient mail server]
+    Track[Open/click tracking and public unsubscribe]
+    Hooks[Inbound bounce/complaint HTTP handlers]
+    Resend[Resend HTTP API - account mail only when configured]
+    Redis[(Redis - Compose declaration only)]
+    Minio[(MinIO - Compose declaration only)]
+    Prom[Prometheus]
+    Grafana[Grafana]
+    Loki[Loki]
+
+    Browser --> Web
+    Browser --> Caddy
+    Caddy -->|default web routes| Web
+    Caddy -->|/api and /t routes| API
+    Web -->|API base URL compiled into browser bundle| API
+    API --> DB
+    API -->|publish delivery job references| NATS
+    API -.->|account verification and reset mail if configured| Resend
+    NATS -->|durable job reference| Worker
+    Worker --> DB
+    Worker --> SMTP
+    SMTP -->|SMTP relay acceptance; not inbox guarantee| MX
+    MX -.->|DSN/FBL forwarding not configured in repository| Hooks
+    Browser --> Track
+    Track --> DB
+    Hooks --> DB
+    API -.->|no runtime client found| Redis
+    Worker -.->|no runtime client found| Redis
+    Web -.->|no runtime client found| Minio
+    Prom -->|scrape API| API
+    Prom -->|scrape worker| Worker
+    Grafana --> Prom
+    Grafana --> Loki
+
+    classDef partial fill:#fff3cd,stroke:#b58900,color:#333;
+    classDef unused fill:#eee,stroke:#777,stroke-dasharray: 4 4,color:#333;
+    class Hooks,Resend,SMTP partial;
+    class Redis,Minio unused;
+

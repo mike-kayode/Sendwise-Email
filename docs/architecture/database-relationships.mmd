@@ -1,0 +1,248 @@
+erDiagram
+    ORGANIZATIONS ||--o{ ORGANIZATION_MEMBERS : includes
+    USERS ||--o{ ORGANIZATION_MEMBERS : joins
+    ORGANIZATIONS ||--o{ API_KEYS : owns
+    USERS o|--o{ API_KEYS : creates
+    ORGANIZATIONS ||--o{ CONTACTS : owns
+    ORGANIZATIONS ||--o{ CUSTOM_FIELDS : defines
+    ORGANIZATIONS ||--o{ CONTACT_LISTS : owns
+    ORGANIZATIONS ||--o{ CONTACT_LIST_MEMBERS : scopes
+    CONTACTS ||--o{ CONTACT_LIST_MEMBERS : joins
+    CONTACT_LISTS ||--o{ CONTACT_LIST_MEMBERS : contains
+    ORGANIZATIONS ||--o{ TAGS : owns
+    ORGANIZATIONS ||--o{ CONTACT_TAGS : scopes
+    CONTACTS ||--o{ CONTACT_TAGS : tagged
+    TAGS ||--o{ CONTACT_TAGS : applied
+    ORGANIZATIONS ||--o{ SEGMENTS : owns
+    ORGANIZATIONS ||--o{ CONSENT_EVENTS : records
+    ORGANIZATIONS ||--o{ SUPPRESSIONS : owns
+    ORGANIZATIONS ||--o{ TEMPLATES : owns
+    USERS o|--o{ TEMPLATES : creates
+    ORGANIZATIONS ||--o{ SENDING_DOMAINS : owns
+    ORGANIZATIONS ||--o{ CAMPAIGNS : owns
+    USERS o|--o{ CAMPAIGNS : creates
+    CONTACT_LISTS o|--o{ CAMPAIGNS : audience_list
+    SEGMENTS o|--o{ CAMPAIGNS : audience_segment
+    TEMPLATES o|--o{ CAMPAIGNS : template
+    ORGANIZATIONS ||--o{ CAMPAIGN_RECIPIENTS : scopes
+    CAMPAIGNS ||--o{ CAMPAIGN_RECIPIENTS : snapshots
+    ORGANIZATIONS ||--o{ DELIVERY_JOBS : scopes
+    CAMPAIGNS ||--o{ DELIVERY_JOBS : queues
+    ORGANIZATIONS ||--o{ MESSAGE_EVENTS : scopes
+    ORGANIZATIONS ||--o{ AUTOMATIONS : owns
+    USERS o|--o{ AUTOMATIONS : creates
+    AUTOMATIONS ||--o{ AUTOMATION_STEPS : defines
+    ORGANIZATIONS ||--o{ AUTOMATION_STEPS : scopes
+    ORGANIZATIONS ||--o{ AUTOMATION_EXECUTIONS : scopes
+    AUTOMATIONS ||--o{ AUTOMATION_EXECUTIONS : runs
+    ORGANIZATIONS ||--o{ WEBHOOKS : owns
+    ORGANIZATIONS ||--o{ USAGE_RECORDS : meters
+    ORGANIZATIONS o|--o{ AUDIT_LOGS : records
+    USERS o|--o{ AUDIT_LOGS : acts
+    ORGANIZATIONS ||--o{ CONTACT_IMPORTS : imports
+    USERS o|--o{ CONTACT_IMPORTS : creates
+    ORGANIZATIONS ||--o{ DEAD_LETTER_QUEUE : scopes
+    CAMPAIGNS o|--o{ DEAD_LETTER_QUEUE : dead_letters
+    DELIVERY_JOBS o|--o{ DEAD_LETTER_QUEUE : references
+    ORGANIZATIONS ||--o| ORGANIZATION_SETTINGS : configures
+    USERS ||--o{ VERIFICATION_TOKENS : verifies
+
+    ORGANIZATIONS {
+        uuid id PK
+        text name
+        text slug UK
+        text plan
+        text status
+    }
+    USERS {
+        uuid id PK
+        text email UK
+        text password_hash
+        text status
+        timestamptz email_verified_at
+    }
+    ORGANIZATION_MEMBERS {
+        uuid organization_id PK,FK
+        uuid user_id PK,FK
+        text role
+    }
+    API_KEYS {
+        uuid id PK
+        uuid organization_id FK
+        text key_prefix UK
+        text key_hash
+        text_array scopes
+        timestamptz expires_at
+    }
+    CONTACTS {
+        uuid id PK
+        uuid organization_id FK
+        text email
+        text status
+        jsonb custom_fields
+    }
+    CUSTOM_FIELDS {
+        uuid id PK
+        uuid organization_id FK
+        text key
+        text field_type
+    }
+    CONTACT_LISTS {
+        uuid id PK
+        uuid organization_id FK
+        text name
+    }
+    CONTACT_LIST_MEMBERS {
+        uuid organization_id FK
+        uuid contact_id PK,FK
+        uuid list_id PK,FK
+        timestamptz unsubscribed_at
+    }
+    TAGS {
+        uuid id PK
+        uuid organization_id FK
+        text name
+    }
+    CONTACT_TAGS {
+        uuid organization_id FK
+        uuid contact_id PK,FK
+        uuid tag_id PK,FK
+    }
+    SEGMENTS {
+        uuid id PK
+        uuid organization_id FK
+        jsonb rules
+    }
+    CONSENT_EVENTS {
+        bigint id PK
+        uuid organization_id FK
+        uuid contact_id
+        text event_type
+        jsonb metadata
+    }
+    SUPPRESSIONS {
+        uuid id PK
+        uuid organization_id FK
+        text email
+        text reason
+    }
+    TEMPLATES {
+        uuid id PK
+        uuid organization_id FK
+        uuid created_by FK
+        jsonb design
+        text html
+    }
+    SENDING_DOMAINS {
+        uuid id PK
+        uuid organization_id FK
+        text domain
+        text spf_status
+        text dkim_status
+        text dmarc_status
+    }
+    CAMPAIGNS {
+        uuid id PK
+        uuid organization_id FK
+        uuid list_id FK
+        uuid segment_id FK
+        uuid template_id FK
+        text status
+        jsonb content
+    }
+    CAMPAIGN_RECIPIENTS {
+        uuid id PK
+        uuid organization_id FK
+        uuid campaign_id FK
+        uuid contact_id
+        text email
+        text status
+    }
+    DELIVERY_JOBS {
+        uuid id PK
+        uuid organization_id FK
+        uuid campaign_id FK
+        uuid contact_id
+        text message_id UK
+        text status
+        integer attempts
+    }
+    MESSAGE_EVENTS {
+        bigint id PK
+        uuid organization_id FK
+        uuid campaign_id
+        uuid contact_id
+        uuid delivery_job_id
+        text event_type
+        timestamptz occurred_at
+    }
+    AUTOMATIONS {
+        uuid id PK
+        uuid organization_id FK
+        text status
+        jsonb trigger
+    }
+    AUTOMATION_STEPS {
+        uuid id PK
+        uuid organization_id FK
+        uuid automation_id FK
+        integer position
+        text step_type
+    }
+    AUTOMATION_EXECUTIONS {
+        uuid id PK
+        uuid organization_id FK
+        uuid automation_id FK
+        uuid contact_id
+        text status
+        timestamptz next_run_at
+    }
+    WEBHOOKS {
+        uuid id PK
+        uuid organization_id FK
+        text url
+        text secret_hash
+        text_array events
+    }
+    USAGE_RECORDS {
+        bigint id PK
+        uuid organization_id FK
+        text metric
+        bigint quantity
+    }
+    AUDIT_LOGS {
+        bigint id PK
+        uuid organization_id FK
+        uuid actor_user_id FK
+        text action
+    }
+    CONTACT_IMPORTS {
+        uuid id PK
+        uuid organization_id FK
+        uuid created_by FK
+        bytea source_data
+        text status
+    }
+    DEAD_LETTER_QUEUE {
+        uuid id PK
+        uuid organization_id FK
+        uuid campaign_id FK
+        uuid delivery_job_id FK
+        text reason
+    }
+    ORGANIZATION_SETTINGS {
+        uuid organization_id PK,FK
+        integer max_daily_emails
+        timestamptz paused_until
+    }
+    VERIFICATION_TOKENS {
+        uuid id PK
+        uuid user_id FK
+        text token UK
+        timestamptz expires_at
+        timestamptz used_at
+    }
+
+    %% contact_id in campaign_recipients is intentionally snapshot-only. Several
+    %% event/contact references have no FK; relationship lines above show only
+    %% declared foreign keys. No tenant-composite FKs or PostgreSQL RLS exist.

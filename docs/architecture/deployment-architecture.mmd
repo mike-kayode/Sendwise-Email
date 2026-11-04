@@ -1,0 +1,43 @@
+flowchart TB
+    Internet[Browser / Internet]
+    subgraph Host["Single Docker Compose host - declared topology"]
+        Caddy[Caddy :80 default; hostname enables automatic HTTPS]
+        Web[Next.js web loopback :3000]
+        API[Go API loopback :8080]
+        Worker[Go worker loopback :9091 metrics]
+        Migrate[One-shot migration container]
+        PG[(PostgreSQL 16 loopback :5432)]
+        Redis[(Redis 7 loopback :6379)]
+        NATS[(NATS 2.10 JetStream loopback :4222 / 8222)]
+        Stalwart[Stalwart latest :25 / 465 / 587; admin loopback :8081]
+        Minio[(MinIO loopback :9000 / 9001)]
+        Prom[Prometheus loopback :9090]
+        Grafana[Grafana loopback :3001]
+        Loki[Loki loopback :3100]
+    end
+    MX[External recipient MX]
+
+    Internet --> Caddy
+    Caddy -->|web fallback| Web
+    Caddy -->|/api/* and /t/*| API
+    Web -->|API URL passed as Next.js build argument| API
+    Migrate --> PG
+    API --> PG
+    Worker --> PG
+    API --> NATS
+    Worker --> NATS
+    API -.->|Redis URL declared; no Go client| Redis
+    Worker -.->|Redis URL declared; no Go client| Redis
+    Web -.->|MinIO declared; no app client| Minio
+    Worker --> Stalwart --> MX
+    Prom --> API
+    Prom --> Worker
+    Grafana --> Prom
+    Grafana --> Loki
+
+    Migrate -.->|Compose dependency: must exit successfully| API
+    Migrate -.->|Compose dependency: must exit successfully| Worker
+    classDef issue fill:#f8d7da,stroke:#a00,color:#333;
+    classDef declared fill:#eee,stroke:#777,stroke-dasharray: 4 4,color:#333;
+    class Caddy,Migrate issue;
+    class Redis,Minio declared;

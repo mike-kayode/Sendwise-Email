@@ -1,0 +1,77 @@
+flowchart TB
+    User[Customer browser / API client] --> Edge[TLS edge proxy]
+    Edge --> Gateway[API Gateway]
+    Gateway --> IAM[Identity]
+    Gateway --> Org[Workspace]
+    Gateway --> Audience[Audience]
+    Gateway --> Consent[Consent and Compliance]
+    Gateway --> Campaign[Campaign Management]
+    Gateway --> Design[Template and Design]
+    Gateway --> Domain[Domain and Deliverability]
+    Gateway --> Forms[Forms]
+    Gateway --> Billing[Billing and Entitlements]
+    Gateway --> Automation[Automation]
+    Gateway --> Analytics[Tracking and Analytics]
+    Gateway --> Integrations[Integrations and Webhooks]
+    Gateway --> Admin[Platform Admin]
+
+    IAM --> E[(NATS JetStream)]
+    Org --> E
+    Audience --> E
+    Consent --> E
+    Campaign --> E
+    Design --> E
+    Domain --> E
+    Forms --> E
+    Billing --> E
+    Automation --> E
+    E --> Delivery[Delivery Orchestration]
+    Delivery --> E
+    E --> Workers[Independent Delivery Workers]
+    Workers --> Transport[SMTP Transport Service]
+    Transport --> Stalwart[Stalwart SMTP cluster]
+    Stalwart --> Internet[Recipient mail systems]
+    Internet --> Bounce[Bounce and Complaint Processing]
+    Bounce --> E
+    E --> Analytics
+    E --> Automation
+    E --> Integrations
+    E --> Notification[Notification Service]
+    Notification --> TransactionalSMTP[Transactional SMTP transport]
+
+    subgraph Isolated["Service-owned Postgres data and credentials"]
+        D1[(Identity)]
+        D2[(Workspace)]
+        D3[(Audience)]
+        D4[(Consent)]
+        D5[(Campaign and Design)]
+        D6[(Delivery)]
+        D7[(Analytics/event store)]
+        D8[(Automation/Billing/Forms/Integrations)]
+    end
+    IAM --> D1
+    Org --> D2
+    Audience --> D3
+    Consent --> D4
+    Campaign --> D5
+    Design --> D5
+    Delivery --> D6
+    Workers --> D6
+    Analytics --> D7
+    Automation --> D8
+    Billing --> D8
+    Forms --> D8
+    Integrations --> D8
+
+    Secrets[Secret manager] -.-> IAM
+    Secrets -.-> Transport
+    OTel[OpenTelemetry collector] -.-> Gateway
+    OTel -.-> Workers
+    OTel -.-> Delivery
+    OTel --> Metrics[Prometheus / Grafana / Loki / tracing]
+
+    classDef proposed fill:#e7f5ff,stroke:#1671a8,color:#123;
+    class Gateway,IAM,Org,Audience,Consent,Campaign,Design,Domain,Forms,Billing,Automation,Analytics,Integrations,Admin,Delivery,Workers,Transport,Bounce,Notification proposed;
+
+    %% Proposed target; this is not the current one-API/one-worker deployment.
+

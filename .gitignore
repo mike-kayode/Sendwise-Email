@@ -1,0 +1,26 @@
+.env
+.env.local
+*.log
+
+# Go
+bin/
+dist/
+coverage.out
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+
+# Editors
+.DS_Store
+.idea/
+.vscode/
+
+# Local data
+data/
+tmp/

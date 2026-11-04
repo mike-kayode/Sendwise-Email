@@ -1,0 +1,205 @@
+name: email-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-email}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-email}
+      POSTGRES_DB: ${POSTGRES_DB:-email}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-email} -d ${POSTGRES_DB:-email}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data"]
+    ports:
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
+    volumes:
+      - nats-data:/data
+
+  stalwart:
+    image: stalwartlabs/stalwart:latest
+    hostname: mail.localhost
+    ports:
+      - "127.0.0.1:25:25"
+      - "127.0.0.1:465:465"
+      - "127.0.0.1:587:587"
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - stalwart-data:/opt/stalwart
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-data:/data
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-email}:${POSTGRES_PASSWORD:-email}@postgres:5432/${POSTGRES_DB:-email}?sslmode=disable
+      MIGRATIONS_DIR: /app/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: api
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: postgres://${POSTGRES_USER:-email}:${POSTGRES_PASSWORD:-email}@postgres:5432/${POSTGRES_DB:-email}?sslmode=disable
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_ISSUER: ${JWT_ISSUER:-email-platform}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost}
+      API_BASE_URL: ${API_BASE_URL:-http://localhost}
+      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost}
+      SMTP_ADDR: stalwart:587
+      SMTP_HOST: stalwart
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-newsletter@example.com}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+      REQUIRE_VERIFIED_DOMAIN: ${REQUIRE_VERIFIED_DOMAIN:-true}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  worker:
+    build:
+      context: .
+      target: worker
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgres://${POSTGRES_USER:-email}:${POSTGRES_PASSWORD:-email}@postgres:5432/${POSTGRES_DB:-email}?sslmode=disable
+      NATS_URL: nats://nats:4222
+      JWT_SECRET: ${JWT_SECRET:-}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost}
+      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost}
+      SMTP_ADDR: stalwart:587
+      SMTP_HOST: stalwart
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-newsletter@example.com}
+      WORKER_METRICS_ADDR: ":9091"
+      SENDING_RATE_PER_SECOND: ${SENDING_RATE_PER_SECOND:-20}
+      MAX_DELIVERY_ATTEMPTS: ${MAX_DELIVERY_ATTEMPTS:-5}
+      REQUIRE_VERIFIED_DOMAIN: ${REQUIRE_VERIFIED_DOMAIN:-true}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_started
+    ports:
+      - "127.0.0.1:9091:9091"
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_API_URL: ${API_BASE_URL:-http://localhost}
+    environment:
+      NEXT_PUBLIC_API_URL: ${API_BASE_URL:-http://localhost}
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      API_UPSTREAM: api
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+      - api
+
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+
+  loki:
+    image: grafana/loki:latest
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:3100:3100"
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - ./infrastructure/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+
+volumes:
+  postgres-data:
+  redis-data:
+  nats-data:
+  stalwart-data:
+  minio-data:
+  caddy-data:
+  caddy-config:
+  prometheus-data:
+  grafana-data:
+  loki-data:

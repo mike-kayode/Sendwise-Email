@@ -1,0 +1,48 @@
+flowchart TD
+    Send[Campaign send or scheduler claims due campaign]
+    Snapshot[Select subscribed eligible contacts and exclude suppressions]
+    DB[(PostgreSQL)]
+    Recipients[Insert campaign_recipients snapshot and delivery_jobs]
+    Publish[Publish job reference to delivery.jobs]
+    NATS[(NATS JetStream durable stream)]
+    Consumer[Worker consumes with explicit ACK]
+    Reload[Reload job/campaign/contact state from PostgreSQL]
+    Guard[Check job terminal state, campaign/contact, suppression, domain, quota]
+    Render[Render personalized message and add tracking/unsubscribe tokens]
+    SMTP[Submit via generic SMTP transport with STARTTLS in production]
+    Stalwart[Configured SMTP relay; intended Stalwart]
+    MX[Recipient MX]
+    Submitted[Persist submitted/result event]
+    Retry[Defer with backoff and NAK]
+    DLQ[Mark failed and insert dead_letter_queue]
+    Reconcile[Startup republish of due queued/deferred DB jobs]
+    Tracking[Open pixel/click endpoints]
+    Event[Insert message_events]
+    Unsub[Signed unsubscribe link or RFC 8058 POST]
+    Suppress[Update contact/suppression and cancel pending jobs]
+    Bounce[Unauthenticated bounce/complaint HTTP endpoint]
+    WebhookBug[No signature verification; bounce ID/email association defect]
+    EventAnalytics[Analytics API reads event and job tables]
+
+    Send --> Snapshot --> Recipients
+    Recipients --> DB
+    Recipients --> Publish --> NATS --> Consumer --> Reload
+    Reload --> DB
+    Reload --> Guard
+    Guard -->|eligible| Render --> SMTP --> Stalwart
+    Stalwart -->|relay accepted; not proof of inbox delivery| MX
+    Stalwart -->|successful SMTP submission| Submitted --> DB
+    SMTP -->|temporary failure| Retry --> DB
+    SMTP -->|permanent/exhausted/aged failure| DLQ --> DB
+    DB --> Reconcile --> NATS
+    Render --> Tracking --> Event --> DB
+    Render --> Unsub --> Suppress --> DB
+    MX -.->|DSN/FBL forwarding not configured here| Bounce
+    Bounce --> WebhookBug --> Suppress
+    DB --> EventAnalytics
+
+    classDef warning fill:#f8d7da,stroke:#a00,color:#333;
+    classDef external fill:#dbeafe,stroke:#2563eb,color:#333;
+    class Bounce,WebhookBug warning;
+    class Stalwart,MX external;
+

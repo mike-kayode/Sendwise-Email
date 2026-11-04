@@ -1,0 +1,42 @@
+sequenceDiagram
+    actor User
+    participant Browser as Next.js browser app
+    participant API as Go API
+    participant DB as PostgreSQL
+    participant Mail as Resend API (optional)
+    participant Middleware as JWT/role middleware
+
+    User->>Browser: Submit registration form
+    Browser->>API: POST /api/v1/auth/register
+    API->>DB: Transaction: pending user + organization + owner membership
+    API->>DB: Store verification token
+    API->>Mail: Send verification email when configured
+    Note over API,Mail: Mail failure is logged; registration still returns a success-shaped response.
+    Mail-->>User: Link points to /auth/verify?token=...
+    Note over User,Browser: No frontend /auth/verify page exists.
+    Note over API: The registered verification route is GET /api/v1/auth/verify.
+
+    User->>Browser: Submit login form
+    Browser->>API: POST /api/v1/auth/login (email/password JSON body)
+    API->>DB: Load user/password hash/status
+    API->>API: Verify Argon2id password and require active status
+    API->>DB: Load first organization membership
+    API-->>Browser: JWT + user + organization
+    Browser->>Browser: Persist token/user/org in Zustand localStorage
+
+    User->>Browser: Call protected resource
+    Browser->>API: Request with Authorization: Bearer JWT
+    API->>Middleware: Verify signature, issuer, expiration, role
+    Middleware->>Middleware: Put user/org/role claims in request context
+    Middleware->>DB: Handler query is expected to scope by organization_id
+    Note over Middleware,DB: No PostgreSQL RLS or composite tenant-aware FKs are configured.
+    API-->>Browser: Resource response
+
+    User->>Browser: Request password reset
+    Browser->>API: POST /api/v1/auth/forgot-password
+    API->>DB: Store reset-purpose token
+    API->>Mail: Send reset link when configured
+    User->>Browser: Open /auth/reset-password?token=...
+    Browser->>API: POST /api/v1/auth/reset-password
+    API->>DB: Validate token and update password
+

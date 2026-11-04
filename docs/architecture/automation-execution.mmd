@@ -1,0 +1,33 @@
+stateDiagram-v2
+    [*] --> Draft
+    Draft --> Active: Publish version
+    Active --> Triggered: Consume versioned business event
+    Triggered --> Deduplicate: Persist inbox and execution atomically
+    Deduplicate --> Running: New event
+    Deduplicate --> Completed: Duplicate event
+    Running --> Evaluate: Load immutable workflow version/current policy
+    Evaluate --> Action: Condition true
+    Evaluate --> NextStep: Condition false
+    Action --> Wait: Delay step
+    Action --> NextStep: Immediate action succeeds
+    Action --> Retry: Transient API/queue failure
+    Action --> Failed: Permanent validation/policy failure
+    Wait --> Due: Durable next_run_at reached
+    Due --> Evaluate: Lease execution and continue
+    Retry --> Running: Bounded retry succeeds
+    Retry --> Failed: Retry budget exhausted
+    NextStep --> Evaluate: More steps
+    NextStep --> Completed: No more steps
+    Active --> Paused: Operator pauses
+    Paused --> Active: Operator resumes
+    Running --> Cancelled: Suppression, deletion, or explicit exit policy
+    Failed --> Running: Authorized manual retry
+    Completed --> [*]
+    Cancelled --> [*]
+
+    note right of Running
+      Durable execution state and owner DB.
+      Actions call owner APIs; no cross-service
+      table reads or direct writes.
+    end note
+
