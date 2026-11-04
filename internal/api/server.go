@@ -43,7 +43,7 @@ func New(
 		tokens:    tokens,
 		campaigns: campaignService,
 		apiKeys:   apiKeyService,
-		delivery:  NewDeliveryHandler(pool, tokens, logger, nil, publisher),
+		delivery:  NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret),
 		logger:    logger,
 	}
 }
@@ -126,9 +126,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/suppressions", protect(s.delivery.createSuppression, audienceManagers...))
 	mux.Handle("DELETE /api/v1/suppressions/{email}", protect(s.delivery.deleteSuppression, audienceManagers...))
 
-	// Inbound bounce / feedback-loop webhooks (no auth: called by the SMTP relay).
-	mux.HandleFunc("POST /api/v1/webhooks/bounce", s.delivery.bounceWebhook)
-	mux.HandleFunc("POST /api/v1/webhooks/complaint", s.delivery.complaintWebhook)
+	// Inbound bounce / feedback-loop webhooks (HMAC-secured, idempotent).
+	mux.Handle("POST /api/v1/webhooks/bounce", s.delivery.requireWebhookAuth(s.delivery.bounceWebhook))
+	mux.Handle("POST /api/v1/webhooks/complaint", s.delivery.requireWebhookAuth(s.delivery.complaintWebhook))
 
 	mux.Handle("GET /api/v1/analytics/overview", protect(s.analyticsOverview))
 	mux.Handle("GET /api/v1/analytics/campaigns/{id}", protect(s.campaignReport))

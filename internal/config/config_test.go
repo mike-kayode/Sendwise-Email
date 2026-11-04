@@ -114,6 +114,12 @@ func TestLoadProductionRequiresSecureConfiguration(t *testing.T) {
 			},
 		},
 		{
+			name: "missing webhook secret",
+			mutate: func(values map[string]string) {
+				delete(values, "WEBHOOK_SECRET")
+			},
+		},
+		{
 			name: "long token lifetime",
 			mutate: func(values map[string]string) {
 				values["ACCESS_TOKEN_TTL"] = "2h"
@@ -161,6 +167,7 @@ func productionConfig() map[string]string {
 		"SMTP_USERNAME":           "mailer",
 		"SMTP_PASSWORD":           "smtp-secret",
 		"REQUIRE_VERIFIED_DOMAIN": "true",
+		"WEBHOOK_SECRET":          strings.Repeat("b", 32),
 	}
 }
 

@@ -45,6 +45,7 @@ type Config struct {
 	ResendFromEmail       string
 	ResendFromName        string
 	SuperAdminEmails      []string
+	WebhookSecret         string
 }
 
 func Load() (Config, error) {
@@ -109,6 +110,7 @@ func load(lookup func(string) string) (Config, error) {
 	resendFromEmail := getenv(lookup, "RESEND_FROM_EMAIL", "activate@pipsleague.com")
 	resendFromName := getenv(lookup, "RESEND_FROM_NAME", "Sendwise")
 	superAdminEmails := splitCSV(getenv(lookup, "SUPER_ADMIN_EMAILS", ""))
+	webhookSecret := getenv(lookup, "WEBHOOK_SECRET", "")
 
 	cfg := Config{
 		Env:                   env,
@@ -145,6 +147,7 @@ func load(lookup func(string) string) (Config, error) {
 		ResendFromEmail:       resendFromEmail,
 		ResendFromName:        resendFromName,
 		SuperAdminEmails:      superAdminEmails,
+		WebhookSecret:         webhookSecret,
 	}
 
 	if cfg.JWTSecret == "" {
@@ -165,6 +168,9 @@ func load(lookup func(string) string) (Config, error) {
 		}
 		if cfg.SMTPUsername == "" || cfg.SMTPPassword == "" {
 			return cfg, fmt.Errorf("SMTP_USERNAME and SMTP_PASSWORD are required in staging and production")
+		}
+		if cfg.WebhookSecret == "" {
+			return cfg, fmt.Errorf("WEBHOOK_SECRET is required in staging and production")
 		}
 	}
 	if cfg.AccessTokenTTL <= 0 || (secureEnv && cfg.AccessTokenTTL > time.Hour) {

@@ -1,11 +1,19 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -62,24 +70,28 @@ type complaintWebhook struct {
 }
 
 type DeliveryHandler struct {
-	pool      *pgxpool.Pool
-	tokens    *auth.Manager
-	logger    *slog.Logger
-	replayer  deliveryService
-	publisher publisher
+	pool           *pgxpool.Pool
+	tokens         *auth.Manager
+	logger         *slog.Logger
+	replayer       deliveryService
+	publisher      publisher
+	webhookSecret  string
+	idempotency    *idempotencyStore
 }
 
 type publisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
 }
 
-func NewDeliveryHandler(pool *pgxpool.Pool, tokens *auth.Manager, logger *slog.Logger, replayer deliveryService, publisher publisher) *DeliveryHandler {
+func NewDeliveryHandler(pool *pgxpool.Pool, tokens *auth.Manager, logger *slog.Logger, replayer deliveryService, publisher publisher, webhookSecret string) *DeliveryHandler {
 	return &DeliveryHandler{
-		pool:      pool,
-		tokens:    tokens,
-		logger:    logger,
-		replayer:  replayer,
-		publisher: publisher,
+		pool:           pool,
+		tokens:         tokens,
+		logger:         logger,
+		replayer:       replayer,
+		publisher:      publisher,
+		webhookSecret:  webhookSecret,
+		idempotency:    newIdempotencyStore(),
 	}
 }
 
@@ -378,4 +390,166 @@ func (h *DeliveryHandler) organizationID(r *http.Request) string {
 		return ""
 	}
 	return claims.OrganizationID
+}
+
+// ------------------------------------------------------------
+// Webhook security: HMAC signature verification, replay prevention,
+// idempotency keys.
+// ------------------------------------------------------------
+
+// webhookSignature parses the X-Webhook-Signature header of the form:
+//   t=<timestamp>, v1=<hmac_hex>
+type webhookSignature struct {
+	Timestamp int64
+	HMAC      string
+}
+
+func parseWebhookSignature(header string) (webhookSignature, bool) {
+	var sig webhookSignature
+	parts := strings.Split(header, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		kv := strings.SplitN(p, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(kv[0])
+		val := strings.TrimSpace(kv[1])
+		switch key {
+		case "t":
+			if ts, err := strconv.ParseInt(val, 10, 64); err == nil {
+				sig.Timestamp = ts
+			}
+		case "v1":
+			sig.HMAC = val
+		}
+	}
+	return sig, sig.HMAC != "" && sig.Timestamp > 0
+}
+
+// verifyWebhookSignature returns true when the request body is authentic
+// according to the shared webhook secret. The expected signature scheme is:
+//
+//	signature = HMAC-SHA256(secret, fmt.Sprintf("%d.%s", timestamp, body))
+//
+// A tolerance of 5 minutes is applied to the timestamp to prevent replay
+// attacks while allowing for clock skew.
+func (h *DeliveryHandler) verifyWebhookSignature(body []byte, signatureHeader string) error {
+	if h.webhookSecret == "" {
+		return fmt.Errorf("webhook secret not configured")
+	}
+
+	sig, ok := parseWebhookSignature(signatureHeader)
+	if !ok {
+		return fmt.Errorf("missing or malformed webhook signature")
+	}
+
+	// Replay prevention: reject timestamps older than 5 minutes.
+	if time.Since(time.Unix(sig.Timestamp, 0)) > 5*time.Minute {
+		return fmt.Errorf("webhook timestamp outside tolerance window")
+	}
+	if time.Unix(sig.Timestamp, 0).After(time.Now().Add(5 * time.Minute)) {
+		return fmt.Errorf("webhook timestamp in the future")
+	}
+
+	// Compute expected HMAC over "timestamp.body".
+	payload := fmt.Sprintf("%d.%s", sig.Timestamp, string(body))
+	mac := hmac.New(sha256.New, []byte(h.webhookSecret))
+	mac.Write([]byte(payload))
+	expected := hex.EncodeToString(mac.Sum(nil))
+
+	if !hmac.Equal([]byte(sig.HMAC), []byte(expected)) {
+		return fmt.Errorf("webhook signature mismatch")
+	}
+
+	return nil
+}
+
+// idempotencyEntry records a single processed webhook idempotency key with expiry.
+type idempotencyEntry struct {
+	key      string
+	expires  time.Time
+}
+
+// idempotencyStore is a small in-memory store with TTL-based expiration.
+// Suitable for single-instance deployments. Multi-instance deployments should
+// replace this with Redis or a database-backed store.
+type idempotencyStore struct {
+	mu     sync.RWMutex
+	items  map[string]idempotencyEntry
+	ttl    time.Duration
+}
+
+func newIdempotencyStore() *idempotencyStore {
+	s := &idempotencyStore{
+		items: make(map[string]idempotencyEntry),
+		ttl:   1 * time.Hour,
+	}
+	go s.sweep()
+	return s
+}
+
+func (s *idempotencyStore) sweep() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.mu.Lock()
+		now := time.Now()
+		for k, v := range s.items {
+			if now.After(v.expires) {
+				delete(s.items, k)
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+// checkAndMark returns true when the key is new (first sighting) and records it.
+// Returns false when the key was already seen (duplicate request).
+func (s *idempotencyStore) checkAndMark(key string) bool {
+	if key == "" {
+		return true // no idempotency key provided; always process
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.items[key]; exists {
+		return false
+	}
+	s.items[key] = idempotencyEntry{key: key, expires: time.Now().Add(s.ttl)}
+	return true
+}
+
+// requireWebhookAuth is middleware that verifies HMAC signatures and idempotency
+// for inbound webhook requests. It reads the raw body, verifies the signature,
+// checks the idempotency key, then hands the (unmodified) body and request to
+// the inner handler.
+func (h *DeliveryHandler) requireWebhookAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Read raw body for signature verification.
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			h.logger.Error("read webhook body", "error", err)
+			httpx.Error(w, http.StatusBadRequest, "invalid_body", "Could not read request body.")
+			return
+		}
+		// Restore body so downstream JSON decoding works.
+		r.Body = io.NopCloser(bytes.NewReader(body))
+
+		// Verify HMAC signature.
+		sigHeader := r.Header.Get("X-Webhook-Signature")
+		if err := h.verifyWebhookSignature(body, sigHeader); err != nil {
+			h.logger.Warn("webhook signature verification failed", "error", err)
+			httpx.Error(w, http.StatusUnauthorized, "invalid_signature", "Invalid webhook signature.")
+			return
+		}
+
+		// Idempotency check.
+		idemKey := r.Header.Get("Idempotency-Key")
+		if !h.idempotency.checkAndMark(idemKey) {
+			httpx.Error(w, http.StatusConflict, "duplicate_request", "This webhook event has already been processed.")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	}
 }
