@@ -1,37 +1,18 @@
+"use client";
+
 import Link from "next/link";
 import type { Metadata } from "next";
-import {
-  AlignLeft,
-  ArrowLeft,
-  Eye,
-  GripVertical,
-  Image as ImageIcon,
-  Minus,
-  MousePointerClick,
-  Plus,
-  Send,
-  Type,
-} from "lucide-react";
+import { useEffect, useState } from "react";
+import { PageHeader } from "@/components/page-header";
+import { AlignLeft, ArrowLeft, Eye, GripVertical, Image as ImageIcon, Minus, MousePointerClick, Plus, Send, Type } from "lucide-react";
 import { EmailPreview } from "@/components/email-preview";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input, Select } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-
-const campaigns = [
-  { id: "cmp_01", name: "Spring launch", subject: "Launch day is here", audience: "Newsletter subscribers" },
-  { id: "cmp_02", name: "Product digest", subject: "This week’s product updates", audience: "Product users" },
-  { id: "cmp_03", name: "Lifecycle refresh", subject: "Your onboarding checklist", audience: "Trial accounts" },
-];
-
-const templateBlocks = [
-  { id: "b-1", type: "heading", content: "Hi there," },
-  { id: "b-2", type: "paragraph", content: "Here’s what’s new this week." },
-  { id: "b-3", type: "button", content: "Read now" },
-  { id: "b-4", type: "divider", content: "" },
-  { id: "b-5", type: "footer", content: "Thanks for reading," },
-];
+import { apiFetch, type Campaign } from "@/lib/auth";
+import { useToast } from "@/components/ui/use-toast";
 
 export const metadata: Metadata = { title: "Campaign editor" };
 
@@ -47,7 +28,91 @@ const blockIcons: Record<string, React.ComponentType<{ className?: string }>> = 
 
 export default async function CampaignEditorPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const campaign = campaigns.find((item) => item.id === id) ?? campaigns[0];
+  const [campaign, setCampaign] = useState<Campaign | null>(null);
+  const [blocks, setBlocks] = useState<any[]>([]);
+  const [subject, setSubject] = useState("");
+  const [previewText, setPreviewText] = useState("");
+  const [senderName, setSenderName] = useState("");
+  const [senderEmail, setSenderEmail] = useState("");
+  const [replyTo, setReplyTo] = useState("");
+  const [audience, setAudience] = useState("");
+  const [tags, setTags] = useState("");
+  const [trackOpens, setTrackOpens] = useState(true);
+  const [trackClicks, setTrackClicks] = useState(true);
+  const [addUnsubscribe, setAddUnsubscribe] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const toast = useToast();
+
+  useEffect(() => {
+    loadCampaign();
+  }, [id]);
+
+  async function loadCampaign() {
+    try {
+      const c = await apiFetch<Campaign>(`/campaigns/${id}`);
+      setCampaign(c);
+      const parsed = typeof c.content === "string" ? JSON.parse(c.content) : c.content ?? {};
+      setBlocks(parsed.blocks ?? []);
+      setSubject(c.subject ?? "");
+      setPreviewText(c.preview_text ?? "");
+      setSenderName(c.sender_name ?? "");
+      setSenderEmail(c.sender_email ?? "");
+      setReplyTo(c.reply_to ?? "");
+      setAudience(c.list_id ?? "");
+      setTags("");
+      setTrackOpens(c.track_opens ?? true);
+      setTrackClicks(c.track_clicks ?? true);
+      setAddUnsubscribe(true);
+    } catch (err: any) {
+      toast.toast({ title: "Unable to load campaign", description: err?.message ?? "Unknown error", variant: "destructive" });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSave() {
+    if (!campaign) return;
+    setSaving(true);
+    try {
+      const content = { version: 1, blocks };
+      await apiFetch(`/campaigns/${campaign.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: campaign.name,
+          subject,
+          preview_text: previewText,
+          sender_name: senderName,
+          sender_email: senderEmail,
+          reply_to: replyTo,
+          content,
+          track_opens: trackOpens,
+          track_clicks: trackClicks,
+        }),
+      });
+      toast.toast({ title: "Saved", description: "Campaign changes saved." });
+    } catch (err: any) {
+      toast.toast({ title: "Failed to save", description: err?.message ?? "Unknown error", variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div>
+        <PageHeader title="Campaign editor" description="Loading campaign..." />
+      </div>
+    );
+  }
+
+  if (!campaign) {
+    return (
+      <div>
+        <PageHeader title="Campaign editor" description="Campaign not found." />
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -59,24 +124,19 @@ export default async function CampaignEditorPage({ params }: { params: Promise<{
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-semibold text-slate-900">{campaign.name}</h1>
-              <Badge variant="neutral">Draft</Badge>
+              <Badge variant="neutral">{campaign.status}</Badge>
             </div>
             <p className="text-xs text-slate-500">Saved just now · all changes stored</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Link
-            href={`/campaigns/${campaign.id}/preview`}
-            className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-white px-4 text-sm font-medium text-slate-900 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-500 disabled:opacity-60"
           >
-            <Eye className="h-4 w-4" /> Preview
-          </Link>
-          <Link
-            href={`/campaigns/${campaign.id}/preview`}
-            className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-500"
-          >
-            <Send className="h-4 w-4" /> Continue
-          </Link>
+            {saving ? "Saving..." : <><Send className="h-4 w-4" /> Save</>}
+          </button>
         </div>
       </div>
 
@@ -87,26 +147,32 @@ export default async function CampaignEditorPage({ params }: { params: Promise<{
             <CardDescription>Drag to reorder</CardDescription>
           </CardHeader>
           <CardContent className="space-y-1.5">
-            {templateBlocks.map((block, index) => {
-              const Icon = blockIcons[block.type] ?? AlignLeft;
-              return (
-                <div
-                  key={block.id}
-                  className={cn(
-                    "flex items-center gap-2 rounded-lg border px-2.5 py-2 text-sm",
-                    index === 0
-                      ? "border-indigo-200 bg-indigo-50 text-indigo-900"
-                      : "border-transparent text-slate-600 hover:border-slate-200 hover:bg-slate-50",
-                  )}
+            {blocks.map((block, index) => (
+              <div
+                key={block.id}
+                className={cn(
+                  "flex items-center gap-2 rounded-lg border px-2.5 py-2 text-sm",
+                  index === 0
+                    ? "border-indigo-200 bg-indigo-50 text-indigo-900"
+                    : "border-transparent text-slate-600 hover:border-slate-200 hover:bg-slate-50",
+                )}
+              >
+                <GripVertical className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                <span className="truncate capitalize">{block.type}</span>
+                <button
+                  onClick={() => setBlocks(blocks.filter((_, i) => i !== index))}
+                  className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 ml-auto"
+                  aria-label="Remove block"
                 >
-                  <GripVertical className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                  <Icon className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate capitalize">{block.type}</span>
-                </div>
-              );
-            })}
+                  <Minus className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
             <div className="pt-2">
-              <button className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-slate-300 py-2 text-xs font-medium text-slate-600 hover:border-indigo-300 hover:text-indigo-600">
+              <button
+                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-slate-300 py-2 text-xs font-medium text-slate-600 hover:border-indigo-300 hover:text-indigo-600"
+                onClick={() => setBlocks([...blocks, { id: Date.now().toString(), type: "paragraph", content: "New paragraph", align: "left" }])}
+              >
                 <Plus className="h-3.5 w-3.5" /> Add block
               </button>
             </div>
@@ -117,15 +183,15 @@ export default async function CampaignEditorPage({ params }: { params: Promise<{
           <div className="mb-3 grid gap-2 rounded-xl border border-slate-200 bg-white p-3 sm:grid-cols-2">
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-500">Subject</label>
-              <Input defaultValue={campaign.subject} />
+              <Input value={subject} onChange={(e) => setSubject(e.target.value)} />
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-500">Preview text</label>
-              <Input defaultValue="Automations, faster imports, and a refreshed template library." />
+              <Input value={previewText} onChange={(e) => setPreviewText(e.target.value)} />
             </div>
           </div>
           <div className="rounded-xl bg-slate-100 p-4 sm:p-8">
-            <EmailPreview subject={campaign.subject} />
+            <EmailPreview subject={subject} />
           </div>
         </div>
 
@@ -137,26 +203,23 @@ export default async function CampaignEditorPage({ params }: { params: Promise<{
             <CardContent className="space-y-3">
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-500">Sender</label>
-                <Select defaultValue="hello">
-                  <option value="hello">Acme Studio &lt;hello@acme.studio&gt;</option>
-                  <option value="news">Acme Studio &lt;news@acme.studio&gt;</option>
+                <Select value={senderName} onChange={(e) => setSenderName(e.target.value)}>
+                  <option value={senderName}>{senderName} at {senderEmail}</option>
                 </Select>
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-500">Reply-to</label>
-                <Input defaultValue="support@acme.studio" />
+                <Input value={replyTo} onChange={(e) => setReplyTo(e.target.value)} placeholder="support@yourdomain.com" />
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-500">Audience</label>
-                <Select defaultValue="newsletter">
-                  <option value="newsletter">Newsletter subscribers · 18,420</option>
-                  <option value="customers">Customers · 6,420</option>
-                  <option value="trials">Trial accounts · 1,280</option>
+                <Select value={audience} onChange={(e) => setAudience(e.target.value)}>
+                  <option value="">Select audience</option>
                 </Select>
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-500">Tags</label>
-                <Input defaultValue="newsletter, product" />
+                <Input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="newsletter, product" />
               </div>
             </CardContent>
           </Card>
@@ -168,13 +231,13 @@ export default async function CampaignEditorPage({ params }: { params: Promise<{
             </CardHeader>
             <CardContent className="space-y-2.5 text-sm text-slate-700">
               <label className="flex items-center gap-2">
-                <input type="checkbox" defaultChecked /> Track opens
+                <input type="checkbox" checked={trackOpens} onChange={(e) => setTrackOpens(e.target.checked)} /> Track opens
               </label>
               <label className="flex items-center gap-2">
-                <input type="checkbox" defaultChecked /> Track clicks
+                <input type="checkbox" checked={trackClicks} onChange={(e) => setTrackClicks(e.target.checked)} /> Track clicks
               </label>
               <label className="flex items-center gap-2">
-                <input type="checkbox" defaultChecked /> Add unsubscribe link
+                <input type="checkbox" checked={addUnsubscribe} onChange={(e) => setAddUnsubscribe(e.target.checked)} /> Add unsubscribe link
               </label>
               <p className="pt-1 text-xs text-slate-500">
                 Unsubscribe and one-click headers are always included for compliance.
@@ -182,7 +245,9 @@ export default async function CampaignEditorPage({ params }: { params: Promise<{
             </CardContent>
           </Card>
 
-          <Button className="w-full">Save changes</Button>
+          <Button onClick={handleSave} disabled={saving} className="w-full">
+            {saving ? "Saving..." : "Save changes"}
+          </Button>
         </div>
       </div>
     </div>

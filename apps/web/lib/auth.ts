@@ -253,3 +253,34 @@ export type SuppressionItem = {
   organization_id: string;
   created_at: string;
 };
+
+export type Organization = {
+  id: string;
+  name: string;
+  slug: string;
+  created_at: string;
+};
+
+export type Membership = {
+  user_id: string;
+  organization_id: string;
+  role: string;
+  created_at: string;
+};
+
+export type MembershipWithOrganization = {
+  membership: Membership;
+  organization: Organization;
+};
+
+export type Invitation = {
+  id: string;
+  organization_id: string;
+  email: string;
+  role: string;
+  status: string;
+  invited_by?: string;
+  expires_at: string;
+  accepted_at?: string;
+  created_at: string;
+};

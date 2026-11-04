@@ -1,0 +1,40 @@
+            <CardContent className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-slate-700">Workspace name</label>
+                <Input value={orgName} onChange={(e) => setOrgName(e.target.value)} disabled={saving} />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-slate-700">Workspace slug</label>
+                <Input value={orgSlug} onChange={(e) => setOrgSlug(e.target.value)} disabled={saving} />
+              </div>
+              <div className="col-span-2">
+                <label className="mb-1.5 block text-sm font-medium text-slate-700">Timezone</label>
+                <Select defaultValue="lagos" disabled={saving}>
+                  <option value="lagos">Africa/Lagos (WAT)</option>
+                  <option value="london">Europe/London (GMT)</option>
+                  <option value="ny">America/New_York (EST)</option>
+                </Select>
+              </div>
+              <div className="col-span-2">
+                <label className="mb-1.5 block text-sm font-medium text-slate-700">Default sender email</label>
+                <Input
+                  placeholder="hello@yourdomain.com"
+                  disabled={saving}
+                  className="text-slate-500"
+                />
+                <p className="mt-1 text-xs text-slate-500">Add and verify a sending domain in Domains to use it here.</p>
+              </div>
+              <div className="col-span-2 flex items-center gap-2">
+                <Button onClick={handleSaveOrg} disabled={saving} className="w-auto">
+                  {saving ? "Saving..." : "Save changes"}
+                </Button>
+                <button
+                  onClick={loadData}
+                  disabled={saving}
+                  className="rounded p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+                  aria-label="Refresh"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                </button>
+              </div>
+            </CardContent>

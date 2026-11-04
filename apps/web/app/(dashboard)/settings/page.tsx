@@ -1,14 +1,17 @@
 "use client";
 
-import { Plus, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Plus, Trash2, RefreshCw } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
-import { Input, Select, Textarea } from "@/components/ui/input";
+import { Input, Select } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, Thead, Tbody, Tr, Th, Td } from "@/components/ui/table";
 import { useAuthStore } from "@/stores/auth";
+import { apiFetch, type Organization, type Membership, type Invitation } from "@/lib/auth";
 import { initials } from "@/lib/utils";
+import { useToast } from "@/components/ui/use-toast";
 
 const sections = [
   { id: "workspace", label: "Workspace" },
@@ -22,13 +25,64 @@ const sections = [
 export default function SettingsPage() {
   const user = useAuthStore((state) => state.user);
   const organization = useAuthStore((state) => state.organization);
-  const team = [
-    { name: user?.name ?? "Workspace owner", email: user?.email ?? "owner@example.com", role: organization?.role ?? "Owner", status: "active" },
-    { name: "Tola Adeyemi", email: "tola@acme.studio", role: "Admin", status: "active" },
-    { name: "Maya Chen", email: "maya@acme.studio", role: "Marketer", status: "active" },
-    { name: "Sam Rivera", email: "sam@acme.studio", role: "Analyst", status: "active" },
-    { name: "Ifeoma Nwosu", email: "ifeoma@acme.studio", role: "Marketer", status: "invited" },
-  ];
+  const { toast } = useToast();
+
+  const [org, setOrg] = useState<Organization | null>(null);
+  const [members, setMembers] = useState<Membership[]>([]);
+  const [invitations, setInvitations] = useState<Invitation[]>([]);
+  const [orgName, setOrgName] = useState("");
+  const [orgSlug, setOrgSlug] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  async function loadData() {
+    setLoading(true);
+    try {
+      const [orgData, membersData, invitationsData] = await Promise.all([
+        apiFetch<Organization>(`/organizations/${organization?.id ?? ""}`),
+        apiFetch<Membership[]>(`/members`),
+        apiFetch<Invitation[]>(`/invitations`),
+      ]);
+      setOrg(orgData);
+      setMembers(membersData);
+      setInvitations(invitationsData);
+      setOrgName(orgData.name);
+      setOrgSlug(orgData.slug);
+    } catch (err: any) {
+      toast({ title: "Unable to load settings", description: err?.message ?? "Unknown error", variant: "destructive" });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSaveOrg() {
+    if (!org?.id) return;
+    setSaving(true);
+    try {
+      await apiFetch(`/organizations/${org.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: orgName, slug: orgSlug }),
+      });
+      setOrg({ ...org, name: orgName, slug: orgSlug });
+      toast({ title: "Workspace updated", description: "Your organization details have been saved." });
+    } catch (err: any) {
+      toast({ title: "Failed to save", description: err?.message ?? "Unknown error", variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div>
+        <PageHeader title="Settings" description="Loading your workspace settings..." />
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -63,35 +117,37 @@ export default function SettingsPage() {
             <CardContent className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-slate-700">Workspace name</label>
-                <Input defaultValue={organization?.name ?? "Sendwise"} />
+                <Input value={orgName} onChange={(e) => setOrgName(e.target.value)} disabled={saving} />
               </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-slate-700">Workspace slug</label>
-                <Input defaultValue={organization?.slug ?? "sendwise"} />
+                <Input value={orgSlug} onChange={(e) => setOrgSlug(e.target.value)} disabled={saving} />
               </div>
-              <div>
+              <div className="col-span-2">
                 <label className="mb-1.5 block text-sm font-medium text-slate-700">Timezone</label>
-                <Select defaultValue="lagos">
+                <Select defaultValue="lagos" disabled={saving}>
                   <option value="lagos">Africa/Lagos (WAT)</option>
                   <option value="london">Europe/London (GMT)</option>
                   <option value="ny">America/New_York (EST)</option>
                 </Select>
               </div>
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-700">Default language</label>
-                <Select defaultValue="en">
-                  <option value="en">English</option>
-                  <option value="fr">French</option>
-                  <option value="pt">Portuguese</option>
-                </Select>
+              <div className="col-span-2">
+                <label className="mb-1.5 block text-sm font-medium text-slate-700">Default sender email</label>
+                <Input placeholder="hello@yourdomain.com" disabled={saving} className="text-slate-500" />
+                <p className="mt-1 text-xs text-slate-500">Add and verify a sending domain in Domains to use it here.</p>
               </div>
-              <div className="sm:col-span-2">
-                <label className="mb-1.5 block text-sm font-medium text-slate-700">Mailing address</label>
-                <Textarea rows={2} defaultValue="12 Marina Road, Lagos, Nigeria" />
-                <p className="mt-1 text-xs text-slate-500">Included in the footer of every marketing email.</p>
-              </div>
-              <div className="sm:col-span-2">
-                <Button>Save workspace</Button>
+              <div className="col-span-2 flex items-center gap-2">
+                <Button onClick={handleSaveOrg} disabled={saving} className="w-auto">
+                  {saving ? "Saving..." : "Save changes"}
+                </Button>
+                <button
+                  onClick={loadData}
+                  disabled={saving}
+                  className="rounded p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+                  aria-label="Refresh"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                </button>
               </div>
             </CardContent>
           </Card>
@@ -104,36 +160,37 @@ export default function SettingsPage() {
             <CardContent className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-slate-700">Default sender name</label>
-                <Input defaultValue="Acme Studio" />
+                <Input defaultValue={org?.name ?? ""} disabled />
+                <p className="mt-1 text-xs text-slate-500">Set in Workspace settings.</p>
               </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-slate-700">Default sender email</label>
-                <Input defaultValue="hello@acme.studio" />
+                <Select defaultValue="none" disabled>
+                  <option value="none">No verified domain — add one in Domains</option>
+                </Select>
               </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-slate-700">Reply-to</label>
-                <Input defaultValue="support@acme.studio" />
+                <Input placeholder="reply@yourdomain.com" disabled />
               </div>
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-700">Sending domain</label>
-                <Select defaultValue="acme">
-                  <option value="acme">acme.studio · verified</option>
-                  <option value="news">news.acme.studio · needs attention</option>
-                </Select>
-              </div>
-              <div className="sm:col-span-2 space-y-2 rounded-lg bg-slate-50 p-4 text-sm">
+              <div className="col-span-2 space-y-2 rounded-lg bg-slate-50 p-4 text-sm">
                 <label className="flex items-center gap-2 text-slate-700">
-                  <input type="checkbox" defaultChecked /> Enable open tracking by default
+                  <input type="checkbox" defaultChecked disabled />
+                  Enable open tracking by default
                 </label>
                 <label className="flex items-center gap-2 text-slate-700">
-                  <input type="checkbox" defaultChecked /> Enable click tracking by default
+                  <input type="checkbox" defaultChecked disabled />
+                  Enable click tracking by default
                 </label>
                 <label className="flex items-center gap-2 text-slate-700">
-                  <input type="checkbox" defaultChecked /> Include unsubscribe footer
+                  <input type="checkbox" defaultChecked disabled />
+                  Include unsubscribe footer
                 </label>
               </div>
-              <div className="sm:col-span-2">
-                <Button>Save defaults</Button>
+              <div className="col-span-2">
+                <Button variant="outline" disabled>
+                  Save defaults
+                </Button>
               </div>
             </CardContent>
           </Card>
@@ -159,16 +216,16 @@ export default function SettingsPage() {
                   </Tr>
                 </Thead>
                 <Tbody>
-                  {team.map((member) => (
-                    <Tr key={member.email}>
+                  {members.map((member) => (
+                    <Tr key={member.user_id}>
                       <Td>
                         <div className="flex items-center gap-2.5">
                           <span className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
-                            {initials(member.name)}
+                            {initials(member.user_id)}
                           </span>
                           <div>
-                            <p className="font-medium text-slate-900">{member.name}</p>
-                            <p className="text-xs text-slate-500">{member.email}</p>
+                            <p className="font-medium text-slate-900">{member.user_id}</p>
+                            <p className="text-xs text-slate-500">{member.organization_id}</p>
                           </div>
                         </div>
                       </Td>
@@ -176,15 +233,50 @@ export default function SettingsPage() {
                         <Badge variant="outline">{member.role}</Badge>
                       </Td>
                       <Td>
-                        <Badge variant={member.status === "active" ? "success" : "warning"}>{member.status}</Badge>
+                        <Badge variant="outline">Active</Badge>
                       </Td>
                       <Td>
-                        <button className="text-xs font-medium text-slate-500 hover:text-slate-900">Manage</button>
+                        <button className="text-xs font-medium text-slate-500 hover:text-slate-900 disabled:opacity-50" disabled>
+                          Manage
+                        </button>
                       </Td>
                     </Tr>
                   ))}
+                  {members.length === 0 && (
+                    <Tr>
+                      <Td colSpan={4} className="text-center text-sm text-slate-500 py-4">
+                        No team members yet.
+                      </Td>
+                    </Tr>
+                  )}
                 </Tbody>
               </Table>
+
+              <div className="mt-4 border-t border-slate-100 pt-4">
+                <h3 className="text-sm font-semibold text-slate-900 mb-3">Pending invitations</h3>
+                {invitations.length === 0 ? (
+                  <p className="text-sm text-slate-500">No pending invitations.</p>
+                ) : (
+                  <Table className="mt-2">
+                    <Tbody>
+                      {invitations.map((inv) => (
+                        <Tr key={inv.id}>
+                          <Td className="font-medium text-slate-900 text-sm">{inv.email}</Td>
+                          <Td className="text-sm text-slate-600">{inv.role}</Td>
+                          <Td className="text-sm">
+                            <Badge variant="outline">{inv.status}</Badge>
+                          </Td>
+                          <Td className="text-right">
+                            <button className="text-xs font-medium text-rose-600 hover:text-rose-500 disabled:opacity-50" disabled>
+                              Revoke
+                            </button>
+                          </Td>
+                        </Tr>
+                      ))}
+                    </Tbody>
+                  </Table>
+                )}
+              </div>
             </CardContent>
           </Card>
 
