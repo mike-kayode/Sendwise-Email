@@ -4,12 +4,12 @@
 
 ## Blocking gates
 
-- [ ] All migrations apply reliably from empty and supported prior versions; migration history reconciled. Migrations exited successfully in an isolated baseline stack after test-only Compose fixes; unmodified PostgreSQL provisioning and supported-version upgrades remain unverified.
+- [ ] All migrations apply reliably from empty and supported prior versions; migration history reconciled. **T0:** all three migration sets exit 0 from empty on the canonical Compose stack (fresh volume); supported prior versions and unmodified server provisioning remain unverified.
 - [ ] Registration outbox/inbox migration and relay are validated against PostgreSQL and JetStream; consumer idempotency, retention/cleanup, NATS permissions, and replay operations are implemented and tested.
-- [ ] Compose/local integration environment starts; corrected port bindings and build-time frontend API URL are validated with Docker.
-- [ ] Production web image is rebuilt with the same-origin API URL default and login is verified in browser DevTools. Source defaults are corrected; no production image rebuild was performed.
+- [x] Compose/local integration environment starts; corrected port bindings and build-time frontend API URL are validated with Docker. **T0:** canonical two-file stack starts on a fresh volume; health/ready 200; web image builds; all pages serve 200 through Caddy. (Port bindings verified only on local loopback; production server not inspected.)
+- [ ] Production web image is rebuilt with the same-origin API URL default and login is verified in browser DevTools. **T0:** production image builds; no production host or browser DevTools check.
 - [ ] Login requests and URLs are checked for credential leakage in browser history, referrers, proxy/access logs, and monitoring. Source no longer reads login credentials from query parameters and posts them as JSON; production browser verification is pending.
-- [ ] Account registration, verified activation, login, reset and revocation work end to end.
+- [ ] Account registration, verified activation, login, reset and revocation work end to end. **T0:** API-level journeys pass (identity incl. refresh rotation/reuse/logout revocation; legacy auth on the loopback port); real email delivery and browser flows are open (T5/T6).
 - [ ] Production TLS terminates correctly; internal services are private and secrets are managed externally. Caddy is hostname-configurable in source, but certificate issuance/renewal has not been tested.
 - [ ] Tenant authorization and database isolation are tested with restricted roles and adversarial cross-tenant fixtures.
 - [ ] Inbound bounces/complaints are authenticated, correlated, replay-protected and idempotent.
@@ -21,21 +21,22 @@
 - [ ] Customer-facing workflows do not misrepresent demo data as live functionality.
 - [ ] Load/fault results establish supported limits and service SLOs.
 
-## Current blockers verified from source
+## Current blockers verified from source and T0 run
 
-1. Fresh migrations exited 0 in the isolated baseline stack after test-only Compose fixes; unmodified provisioning and supported-version upgrades remain unverified.
-2. The current working tree does not build because the pre-existing uncommitted `internal/api/contact_imports.go` declares package `main` inside the `api` package. The committed baseline stack required test-only fixes to the init-script permission, PostgreSQL init environment, and Gateway legacy upstream; the checked-in full stack has not passed startup.
-3. Production DNS/TLS issuance and renewal are unverified; local Caddy defaults to HTTP on `:80`.
-4. The refresh-cookie and frontend refresh lifecycle have handler tests and typecheck coverage, but no live browser-to-API flow has been exercised.
-5. Registration verification, workspace projection, and other database-backed auth journeys remain unverified end to end.
-6. Tenant isolation, inbound bounce/complaint authentication, delivery recovery, backups/restore, and operational incident response are not production-validated. The import API tenant-scope test passed, but the worker integration test failed its row-number assertion.
-7. Baseline containers reported HTTP 200 on health/readiness endpoints only in the overridden local test stack; Gateway readiness remained 200 while Legacy API was stopped. This is not a clean deployment or readiness pass.
-8. Major UI sections are static or have inert actions.
-9. The frontend build previously defaulted `NEXT_PUBLIC_API_URL` to `http://localhost:8080`, causing deployed browser requests to target the visitor's own machine. Dockerfile and Compose defaults now use same-origin paths; a fresh production image and browser request are not yet verified.
-10. The login page previously accepted legacy credential query parameters for cleanup and could retain unrelated search parameters. It now reads only a safe `callbackUrl` and replaces the address with the path before submission. A previously received URL may already have reached upstream request logs before browser-side cleanup.
-11. The login handler returns `email_not_verified` only after a correct password. `401 invalid_credentials` means the email lookup failed or the password did not match in the currently running Identity service; it does not establish that the account is unverified.
+1. Migrations exit 0 from empty on the canonical two-file Compose stack (T0, fresh volume); supported-version upgrades and unmodified server provisioning remain unverified.
+2. The working tree builds again (T0 fixed the package mismatch in `internal/api/contact_imports.go`); the canonical Compose stack starts after the committed T0 fixes (init-script exec bit, postgres DB env vars, gateway `LEGACY_API_URL`, MinIO profiled out). The two files must be invoked together — neither standalone mode serves `/api/*` (documented in README).
+3. Production DNS/TLS issuance and renewal are unverified; local Caddy runs HTTP on `:80` (`.env.local` override).
+4. The refresh-cookie lifecycle is live-verified at the API level (rotation, reuse detection, logout revocation); no browser-to-API refresh flow has been exercised (T6).
+5. Identity register→verify→login→reset journeys are live-verified (via the development log mailer); legacy auth register/verify/login/reset are live-verified on the loopback port. Real mail delivery is broken: Stalwart is in bootstrap mode (no SMTP listener) and the legacy Resend key is absent — the system from-address is now `hello@pipsleague.com` (T5 owns delivery).
+6. Tenant isolation (no RLS), inbound bounce/complaint authentication (forged webhook accepted and wrote a suppression in T0), delivery recovery, backups/restore, and incident response are not production-validated. The import API tenant-scope test passed; the worker import integration test fails its row-number assertion (D7).
+7. Gateway readiness does not gate on upstreams: `/readyz` returned 200 with the Legacy API stopped (re-tested in T0). This is not a readiness pass (T1).
+8. Major UI sections are static (settings/billing/editor/preview/automations/forms confirmed zero fetches in T0), and the working contacts import/export UI is toast stubs despite a verified backend (T2/T4).
+9. Frontend production image builds with same-origin defaults (T0 image build passed); no production image or browser request verified against a real hostname.
+10. The login page no longer reads credential query parameters (source-level); browser history/referrer behavior is pending T6.
+11. The login handler returns `email_not_verified` only after a correct password (live-verified in T0). `401 invalid_credentials` does not establish that the account is unverified.
+12. Newly verified route defects are open: api-key creation panics (D1), campaign resume 500 on unverified domain (D2), unknown campaign FK → 500 (D3), analytics invalid uuid → 500 (D4), `DELETE /tags/{id}` missing (D11), GET unsubscribe mutates (D9), unauthenticated webhooks (D10), `npm test` 1/4 fail (D5), legacy API integration group 6/6 fail on the register response contract (D6).
 
-See the [verification report](./quality/verification-report.md) for command-level evidence and blocked checks. T0 remains unsigned-off; no implementation phase beyond T0 has started.
+See the [verification report](./quality/verification-report.md) for command-level evidence and blocked checks. T0 (run + docs reconciliation) is complete; no implementation phase beyond T0 has started.
 
 ## Evidence policy
 

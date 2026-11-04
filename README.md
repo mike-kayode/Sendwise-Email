@@ -63,19 +63,56 @@ curl -s http://localhost:8080/api/v1/auth/register \
 
 Use the returned `access_token` as `Authorization: Bearer <token>`.
 
-## Full stack
+## Full stack (two compose files — use them combined)
+
+There are two Compose files and **neither one alone runs the full product**:
+
+| File | What it contains |
+|---|---|
+| `docker-compose.yml` | Legacy monolith: api, worker, migrate, web, caddy, postgres, redis, nats, stalwart |
+| `docker-compose.microservices.yml` | Identity, workspace, gateway (+ shared infra and web/caddy) |
+
+The Caddyfile always routes `/api/*` to `gateway:8080` and `/t/*` to the legacy
+api, so the canonical stack **merges both files**:
 
 ```bash
-make up       # builds and starts everything, including Caddy on :80
-make logs
-make down
+# full stack (canonical)
+docker compose --env-file .env --env-file .env.local \
+  -f docker-compose.yml -f docker-compose.microservices.yml up -d
+
+docker compose --env-file .env --env-file .env.local \
+  -f docker-compose.yml -f docker-compose.microservices.yml logs -f
+
+docker compose --env-file .env --env-file .env.local \
+  -f docker-compose.yml -f docker-compose.microservices.yml down
 ```
 
-Observability stack (Prometheus, Grafana, Loki):
+Notes:
+
+- Both files declare project name `email-platform`; Compose merges services and
+  env files (later `--env-file` wins on duplicate keys).
+- `.env` holds secrets/shared settings; `.env.local` (gitignored) holds
+  localhost-only overrides (`APP_ENV=development`, `SITE_ADDRESS=:80`,
+  `APP_BASE_URL`, `CORS_ORIGINS`, `API_BASE_URL`, `NEXT_PUBLIC_API_URL`,
+  `MAIL_PROVIDER=log`).
+- Running `-f docker-compose.yml` alone leaves `/api/*` pointing at a missing
+  gateway; running only the microservices file leaves non-auth routes pointing
+  at a missing legacy api. Both standalone modes are unsupported.
+- MinIO is behind Compose profile `storage` (`--profile storage`) and is unused
+  by application code.
+- Observability (optional): `docker compose --profile observability up -d`
+  (Prometheus :9090, Grafana :3001, Loki :3100).
+
+Local verification commands used in the T0 audit (see
+`docs/SYSTEM_STATE.md` for results):
 
 ```bash
-docker compose --profile observability up -d
-# Prometheus :9090, Grafana :3001, Loki :3100
+docker compose --env-file .env --env-file .env.local \
+  -f docker-compose.yml -f docker-compose.microservices.yml ps
+curl -fsS http://127.0.0.1:8080/readyz   # legacy api (loopback)
+curl -fsS http://127.0.0.1:8084/readyz   # gateway
+curl -fsS http://127.0.0.1:3000/         # web
+curl -fsS http://127.0.0.1:80/           # caddy edge
 ```
 
 ## API surface

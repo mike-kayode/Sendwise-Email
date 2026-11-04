@@ -1,68 +1,78 @@
 # Verification Report
 
-**Assessment:** NOT READY for production  
-**Scope:** Authentication/browser API routing, login URL handling, extracted identity/workspace/gateway services, and `docker-compose.microservices.yml`.
+**Assessment:** NOT READY for production
+**T0 run:** 2026-11-04, local Docker (Compose canonical two-file invocation), evidence in [SYSTEM_STATE](../SYSTEM_STATE.md).
 
-## Evidence
+## Evidence (T0 run, 2026-11-04)
 
 | Area | Status | Evidence |
 |---|---|---|
-| Go tests, current working tree | FAIL | `go test ./...` fails with mixed `api`/`main` packages in the pre-existing uncommitted `internal/api/contact_imports.go`. |
-| Go tests, committed baseline `2066258` | PASS | `go test ./...`; DB-backed tests were not enabled in this run. |
-| Go static analysis | PASS, PRIOR RUN | `CGO_ENABLED=0 go vet ./...`; not rerun in T0. |
-| Web TypeScript | PASS, PRIOR RUN | `cd apps/web && npm run typecheck`; not rerun in T0. |
-| Web unit tests | PASS, PRIOR RUN | `cd apps/web && npm test`; not rerun in T0. |
-| Web production build | PASS, PRIOR RUN | `cd apps/web && npm run build`; not rerun in T0. |
-| API URL and login request helpers | PASS | Tests confirm same-origin URL construction, POST JSON credentials with `credentials: include`, and safe URL cleanup. |
-| Network error handling | PASS | Tests confirm fetch `TypeError` maps to “Cannot reach the server. Please try again.” and HTTP errors retain their server message. |
-| Production browser API URL | PARTIALLY VERIFIED | Dockerfile and Compose defaults use an empty API base, producing same-origin `/api/v1/...` paths in source; production web image was not rebuilt. |
-| Credential query handling | PARTIALLY VERIFIED | Login reads only `callbackUrl` and replaces the current URL with its pathname. Unit tests cover stripping all query data; browser/history/referrer/log audit was not run. |
-| Login verification distinction | PASS | Identity handler source and unit test distinguish wrong credentials (`401 invalid_credentials`) from correct-password unverified accounts (`403 email_not_verified`). |
-| PostgreSQL init script syntax | PASS, PRIOR RUN | `sh -n infrastructure/postgres/init-databases.sh`; runtime execution failed in T0. |
-| Compose YAML syntax | PASS | `docker compose -f docker-compose.yml -f docker-compose.microservices.yml config -q` |
-| Identity refresh behavior | PARTIALLY VERIFIED | Handler tests cover HttpOnly refresh-cookie issuance, rotation, and response token omission. No live browser/API/database journey was run. |
-| Frontend refresh behavior | PARTIALLY VERIFIED | Typecheck passed; concurrent requests share one refresh attempt in source. No browser-to-service test was run. |
-| Compose deployment as checked in | BLOCKED | Compose parses, but the full stack did not start: MinIO pull was denied; PostgreSQL init failed on script permissions and missing DB variables; Gateway lacks `LEGACY_API_URL`. |
-| Baseline containers with test-only overrides | PARTIAL | The non-MinIO services started after a temporary Compose override and a permission change in the isolated snapshot. All three migration containers exited 0; this is not a pass for checked-in Compose. |
-| Health/readiness endpoints | PARTIAL | `/healthz` and `/readyz` returned 200 on API, Identity, Workspace, and Gateway in the overridden baseline stack. Caddy port 80 returned 308; redirect was not followed. |
-| Gateway Legacy API readiness | FAIL | Gateway `/readyz` returned 200 while the Legacy API container was stopped. |
-| Authenticated route behavior | NOT VERIFIED | Unauthenticated route sweep confirmed dispatch/auth boundaries only; most protected paths returned 401. `DELETE /api/v1/tags/{id}` returned 404 and has no handler registration. |
-| Contact import API | PASS, PARTIAL SCOPE | `TestContactImportAPIQueuesAndScopesProgress` passed against an isolated PostgreSQL schema. This does not verify the UI or full worker path. |
-| Contact import worker | FAIL | `TestContactImportWorkerPersistsPendingContactsAndResults` failed because the reported invalid row is 3 while the test expects 4. |
-| Legacy API DB integration group | FAIL | Registration returned only message/email while tests expect an access token; following protected requests used an empty token and returned 401. |
-| PostgreSQL provisioning and migrations | PARTIAL | Fresh migrations exited 0 only after test-only Compose fixes; unmodified init, supported upgrades, and production roles remain unverified. |
-| NATS event delivery/recovery | NOT VERIFIED | NATS container started, but publish/consume/recovery checks were not run. |
-| TLS, SMTP, and email-provider delivery | NOT VERIFIED | Stalwart container started, but no controlled verification/reset message or DNS/TLS check was completed. |
+| Go build / vet / unit tests, current tree | **PASS** | `go build ./...`, `go vet ./...`, `go test ./...` after restoring `internal/api/contact_imports.go` to `package api` |
+| Compose config (combined) | **PASS** | `docker compose -f docker-compose.yml -f docker-compose.microservices.yml config -q` |
+| Compose stack start (combined, fresh volume) | **PASS (with committed T0 fixes)** | Init script exec bit, postgres DB env vars, gateway `LEGACY_API_URL`, MinIO profiled out. All migration containers exited 0; `api`/`identity`/`workspace`/`gateway` `/healthz`+`/readyz` 200; `web` 200; Caddy `:80` proxies `/api/*` and `/t/*` |
+| Base-only / microservices-only compose | **NOT STANDALONE** | Caddy hard-routes `/api/*` to `gateway:8080`; base-only lacks gateway, micro-only lacks legacy api. Combined invocation is the documented stack |
+| Identity auth journeys (via gateway) | **PASS** | register 201 → verify 200 → login 200 → me 200; refresh rotation 200 + old-cookie replay 401; logout revokes (refresh 401); forgot→reset→login 200; reset-token reuse 400 |
+| Workspace journeys (via gateway) | **PASS** | orgs list/get/patch, members, invitations create/list/accept/revoke — 200/201/204 as designed; internal endpoints 200 with service token, 401 with wrong token |
+| Legacy API authenticated routes | **PASS (most), see failures** | Contacts CRUD+export+consent, lists, segments, templates, domains, campaigns lifecycle (send→409 state guard), suppressions, analytics overview/report, dead-letter, public subscribe — all exercised live with results in SYSTEM_STATE §B |
+| Contact import end-to-end | **PASS (backend)** | multipart CSV → 202 → **worker completed**: 3 rows, 2 imported, 1 invalid (row 3); API tenant-scope test PASS. **No UI**; storage is PostgreSQL `bytea` |
+| `DELETE /api/v1/tags/{id}` | **FAIL** | 404 live; route not registered |
+| `POST /api/v1/api-keys` | **FAIL** | panic in `auth.randomHex` (base64 slice `[:64]` on 43 chars) → 500 |
+| `POST /campaigns/{id}/resume` (domain unverified) | **FAIL** | 500 `internal_error`; queue error not mapped |
+| `POST /campaigns` with unknown `list_id` | **FAIL** | 500 FK violation instead of 400 |
+| `GET /analytics/campaigns/{invalid-uuid}` | **FAIL** | 500 instead of 400/404 |
+| Bounce/complaint webhooks | **FAIL (security)** | Unauthenticated forged bounce → 204 **and created a suppression row** |
+| `GET /public/unsubscribe` with valid token | **FAIL (safety)** | Contact flipped `subscribed` → `unsubscribed` on GET |
+| Gateway readiness with Legacy API stopped | **FAIL** | `/readyz` still 200 (re-tested in T0) |
+| Contact import worker integration test | **FAIL** | `TestContactImportWorkerPersistsPendingContactsAndResults`: row 3 reported, test expects 4 |
+| Legacy API integration group | **FAIL (6/6)** | Fresh DB: tests expect register to return `access_token`/`user`/`organization`; handler returns `{message,email}`. API-key test would additionally hit D1 |
+| Frontend typecheck | **PASS** | `npm run typecheck` exit 0 |
+| Frontend unit tests | **FAIL (3/4)** | `npm test` exit 1. PASS: `apiUrl uses same-origin paths…`, `login location removes all query values…`, `login submits credentials only in a POST JSON body…`. FAIL: `network fetch failures become a clear login message…` — test expects “Cannot reach the server. Please try again.” but the code returns “…Please check your connection and try again.” (stale expectation, D5) |
+| Frontend production build | **PASS** | Next.js production build inside the `web` image build |
+| Mail delivery (verification/reset) | **FAIL** | Stalwart bootstrap mode (no SMTP listener; identity dial refused → 503); legacy Resend key absent. Journeys completed only via `MAIL_PROVIDER=log` links / DB-read legacy tokens |
+| System from-address | **PASS (changed)** | `noreply@pipsleague.com` → `hello@pipsleague.com` in `.env`, compose defaults, `.env.example`; confirmed inside restarted containers |
+| `auth_audit` writes | **PASS (fresh schema)** | 21 rows written live (register/login/verify/reset/refresh/reuse); forward migration for pre-default schemas still owed |
+| Web unit/browser API URL helpers | PASS (prior unit runs) | Same-origin construction tests; not re-run beyond full `npm test` above |
+| PostgreSQL provisioning (fresh) | **PASS (fresh volume)** | Init script creates identity/workspace roles+dbs; three migration sets exit 0 |
+| NATS event delivery/recovery | NOT VERIFIED | Containers up; publish/consume/recovery checks not run |
+| TLS / SMTP / provider delivery | NOT VERIFIED | Local Caddy HTTP only; Stalwart unusable in bootstrap mode |
+| CI workflow | NOT EXECUTED | `.github/workflows/ci.yml` present, not run |
+| Production server parity | NOT INSPECTED | No server access in T0 |
 
 ## Source observations (not runtime passes)
 
-- Identity login and refresh issue refresh tokens only in a `HttpOnly`, `SameSite=Lax` cookie scoped to `/api/v1/auth`; production configuration forces `Secure`.
-- Refresh tokens rotate in the identity store; frontend requests include credentials and retry a 401 once after a shared refresh request.
-- Logout sends the refresh cookie for revocation and clears both the server cookie and client session.
-- Compose source routes Caddy `/api/*` to Gateway, but the local port-80 request returned 308 and proxy routing was not confirmed. PostgreSQL init did not run as checked in because the mounted script lacked execute permission and its required DB variables were not passed to the container.
-- Gateway source validates presence of the three upstream URLs in production, but does not validate `SERVICE_TOKEN`; the Compose gateway environment omits `LEGACY_API_URL` and `SERVICE_TOKEN`.
-- Identity verification mail source supports SMTP/Resend configuration, but no verification or reset delivery was established. The legacy API integration log reported that no Resend API key was configured.
-- The microservices Compose file still supplies a default PostgreSQL password when unset. No secret scan or production-secret review was run in T0.
-- Caddy source routes `/api/*` to Gateway, `/t/*` to the Legacy API, and other paths to Web. The local Caddy request redirected; no API response through Caddy was verified.
-- A development-only Identity seed command is guarded by `APP_ENV=development`; it accepts credentials only through environment variables and does not print the password or email.
-
-To run it locally, first apply the identity migrations, then set `APP_ENV=development`, `DATABASE_URL`, `DEV_SEED_EMAIL`, `DEV_SEED_PASSWORD`, `DEV_SEED_NAME`, and `DEV_SEED_ORGANIZATION` in the environment and run `go run ./services/identity/cmd/devseed`. Use a unique local-only password; the command refuses to run under any other `APP_ENV`.
+- Gateway production fail-fast requires the three upstream URLs (`services/gateway/config.go`); `SERVICE_TOKEN` is passed by compose but not validated by gateway config.
+- Identity login/refresh issue refresh tokens only in `HttpOnly; SameSite=Lax` cookie scoped to `/api/v1/auth`; production forces `Secure`.
+- Legacy auth routes are not gateway-reachable (gateway maps `/api/v1/auth/*` to identity); they remain on the loopback-bound legacy port as a rollback path.
+- `List-Unsubscribe` and one-click `List-Unsubscribe-Post` headers are set in `internal/worker/worker.go`; not observed in a delivered message (no delivery).
+- The log mailer now prints the message link (development only; `MAIL_PROVIDER=log` must never be set in production).
+- Compose files still supply default PostgreSQL/MinIO passwords when unset (e.g. `POSTGRES_PASSWORD:-email`); no secret scan or production-secret review was run in T0.
 
 ## Login error interpretation
 
-The current Identity handler checks the password before checking email verification. An existing account with a wrong password returns the same `401 invalid_credentials` as an unknown email. Only a correct password on an unverified account returns `403 email_not_verified`, after which the login UI links to the verification/resend page. Registration already returns `409 email_in_use`, which reveals account existence. No additional pre-password verification disclosure was introduced.
+The Identity handler checks the password before checking email verification. An
+existing account with a wrong password returns the same `401 invalid_credentials`
+as an unknown email. Only a correct password on an unverified account returns
+`403 email_not_verified` (live-verified in T0), after which the login UI links to
+the verification/resend page. Registration returns `409 email_in_use`, which
+reveals account existence. No additional pre-password verification disclosure was
+introduced.
 
-## T0 release blockers
+## Development seed command (local only)
 
-- Fix the current working-tree package mismatch and make the unmodified combined Compose stack start; then repeat checks without a test-only override.
-- Exercise every authenticated API route with valid tenant-scoped credentials. Current no-auth probes and a subset of integration tests are not sufficient.
-- Fix or explicitly remove the missing `DELETE /api/v1/tags/{id}` route and rerun the route sweep.
-- Make Gateway readiness fail when Legacy API is unavailable and validate required `SERVICE_TOKEN`.
-- Rebuild and restart the production web image, then inspect browser DevTools to verify login uses `https://campaign.pipsleague.com/api/v1/auth/login` with credentials only in the POST JSON body.
-- Validate browser history/referrer and edge/application logging behavior for any legacy credential-bearing login URL; client cleanup cannot undo logs from its original request.
-- Apply all migration sets to fresh and supported upgrade databases; test the runtime roles with least privilege.
-- Run browser-driven registration, email verification, login, refresh-after-expiry, concurrent refresh, logout, and password reset against PostgreSQL and JetStream.
-- Verify event delivery after NATS restart and confirm the workspace projection is idempotent.
-- Complete tenant-isolation, bounce/complaint authentication, delivery recovery, backups/restore, TLS, SMTP, abuse/security, and capacity testing as listed in [production readiness](../PRODUCTION_READINESS.md).
+A development-only Identity seed command is guarded by `APP_ENV=development` and
+accepts credentials only through environment variables (it does not print the
+password or email). To use it: apply identity migrations, then set
+`APP_ENV=development`, `DATABASE_URL`, `DEV_SEED_EMAIL`, `DEV_SEED_PASSWORD`,
+`DEV_SEED_NAME`, `DEV_SEED_ORGANIZATION` and run
+`go run ./services/identity/cmd/devseed` with a unique local-only password; the
+command refuses to run under any other `APP_ENV`.
+
+## T0 release blockers → carried into T1+
+
+- Gateway `/readyz` must fail when Legacy API (and other upstreams) are unreachable; validate `SERVICE_TOKEN`; verify fail-fast at runtime.
+- `deploy.sh` currently builds only identity/workspace/gateway — it must operate on the combined stack with backup/migrate/smoke/rollback.
+- Fix or remove: D1 api-key panic, D2 resume mapping, D3 FK validation, D4 analytics uuid, D5 web test, D6 integration-test contract, D7 row assertion, D11 tag DELETE, D9 GET unsubscribe, D10 webhook auth (T3), D12 mail (T5).
+- Browser-driven e2e (T6): register, verify, login, refresh-after-expiry, logout, reset, import, campaign, test send, tracking.
+- Production server inspection, TLS issuance, backups/restore, CI execution, secret scan remain open.
 
 No skipped or unavailable integration check is counted as a pass.

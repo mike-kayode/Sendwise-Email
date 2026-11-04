@@ -79,12 +79,34 @@ func (m *LogMailer) Provider() string { return "log" }
 
 func (m *LogMailer) Send(_ context.Context, message MailMessage) error {
 	m.sent = append(m.sent, message)
+	// The log mailer exists for development and tests: it must surface the
+	// verification/reset link so the journey can be completed without a live
+	// provider. Never configure MAIL_PROVIDER=log in production.
 	m.logger.Info("dev mail delivery",
 		"provider", "log",
 		"to", message.To,
 		"subject", message.Subject,
+		"link", firstLink(message.Text),
 	)
 	return nil
+}
+
+// firstLink extracts the first http(s) link from a plain-text message body.
+func firstLink(text string) string {
+	const http = "http"
+	i := strings.Index(text, http)
+	if i < 0 {
+		return ""
+	}
+	rest := text[i:]
+	end := len(rest)
+	for j, r := range rest {
+		if r == ' ' || r == '\n' || r == '\r' || r == '"' || r == '\'' {
+			end = j
+			break
+		}
+	}
+	return rest[:end]
 }
 
 // Sent returns a copy of recorded messages (test helper).
