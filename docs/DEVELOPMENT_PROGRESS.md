@@ -1,6 +1,6 @@
 # Development Progress
 
-**Last updated:** 2026-11-03
+**Last updated:** 2026-11-04
 
 ## Completed foundation work
 
@@ -30,7 +30,7 @@
 
 1. [x] Architecture and data/event ownership design.
 2. [x] Repair the duplicate contact-import migration and verification-token trigger with additive/idempotent SQL. [ ] Validate all migrations against PostgreSQL when available.
-3. [~] Fix local deployment blockers and establish repeatable integration environment. Source configuration fixes are made; Docker Compose/container/migration validation is unavailable.
+3. [~] Fix local deployment blockers and establish repeatable integration environment. Compose syntax parses, but the unmodified combined stack failed startup. Baseline migrations and health checks only passed with temporary local test overrides; see [verification report](./quality/verification-report.md).
 4. [~] Implement transactional outbox for registration in the monolith; independently deployable service extraction still requires PostgreSQL-backed verification and restricted owner DB credentials.
 5. [ ] Continue service extraction only after parity, contract, and rollback criteria pass.
 
@@ -41,4 +41,4 @@
 - Latest auth/deployment follow-up: `CGO_ENABLED=0 go test ./...`, `CGO_ENABLED=0 go vet ./...`, and `cd apps/web && npm run typecheck` passed. Identity handler tests cover refresh-cookie issuance/rotation. Compose YAML parses and `sh -n infrastructure/postgres/init-databases.sh` passes; Docker/PostgreSQL runtime validation remains blocked.
 - Uncached API/worker run: unit tests passed; Postgres-backed tests skipped because no DB URL/database was available.
 - `apps/web`: typecheck and production build passed in the prior audit work.
-- Docker, Podman, and PostgreSQL executables are unavailable in this environment. Source/migration checks are not a substitute for an applied migration run. Compose startup, Caddy certificate management, and image builds remain unverified. Next.js build reports an existing warning about root selection due to lockfiles at the repository root and under `apps/web`.
+- T0 on 2026-11-04: current working-tree Go tests and Docker build fail on the pre-existing mixed package declaration in `internal/api/contact_imports.go`. A clean snapshot at `2066258` passed `go test ./...`; DB-backed API tests failed stale response assertions, the contact-import API tenant test passed, and the worker integration test failed its row-number assertion. The combined Compose stack required temporary local-only fixes and did not verify Caddy routing or all authenticated routes. See [verification report](./quality/verification-report.md).

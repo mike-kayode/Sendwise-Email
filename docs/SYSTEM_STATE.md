@@ -1,18 +1,25 @@
 # System State Audit — Sendwise
 
-**Status:** Phase 0 — Reconcile docs (evidence-based status)
+**Status:** T0 verification incomplete; no production-readiness claim
 **Date:** 2026-11-04
 **Repo:** /Users/iam_khayode/email-platform
 **Server:** 72.61.144.73 (/opt/email-platform), https://campaign.pipsleague.com
 
-## Evidence baseline
+## T0 verification record
 
-All claims below are verified by reading source code and running tests. No claim is made without code evidence.
+The local working tree is not buildable at this audit: `go test ./...` and the Docker build fail because the existing uncommitted `internal/api/contact_imports.go` declares package `main` while the rest of `internal/api` declares package `api`. This file and the other pre-existing working-tree changes were left untouched.
 
-- `go build ./...` — PASS
-- `go test ./...` — PASS (all 23 packages)
-- `npm --prefix apps/web run typecheck` — PASS
-- `git status` — clean except working-tree edits
+To gather baseline evidence without altering those changes, the committed snapshot at `2066258` was tested in an isolated temporary checkout:
+
+- `go test ./...` — PASS; this run did not enable database-backed integration tests.
+- Combined Compose YAML (`docker-compose.yml` then `docker-compose.microservices.yml`) parses, but the unmodified stack did not start. The MinIO pull was denied; after omitting MinIO, PostgreSQL init failed because the mounted script was not executable, then because the PostgreSQL service did not receive the identity/workspace DB credentials required by that script. The gateway definition also omitted `LEGACY_API_URL` and `SERVICE_TOKEN`.
+- The baseline services did start only after temporary, uncommitted test overrides supplied the missing DB variables and gateway upstream, and made the init script executable. The MinIO service was omitted. The three migration containers exited 0. This is not a pass for the checked-in full-stack deployment.
+- API, Identity, Workspace, and Gateway `/healthz` and `/readyz` returned HTTP 200 in that overridden local stack. Caddy returned HTTP 308 to a request on port 80; the redirect was not followed.
+- An unauthenticated route sweep reached the registered protected routes (401) and request handlers for public/webhook paths. `DELETE /api/v1/tags/{id}` returned 404 and has no registered route. These probes are dispatch checks, not successful business-operation tests.
+- `TestContactImportAPIQueuesAndScopesProgress` — PASS against an isolated PostgreSQL schema. `TestContactImportWorkerPersistsPendingContactsAndResults` — FAIL: the processor reported the invalid CSV row as row 3 while the test expects row 4. The DB-backed API integration group also failed: its registration assertions expect an access token, while the legacy registration handler returns only a message and email; subsequent protected requests therefore used an empty token.
+- With the Legacy API stopped, Gateway `/readyz` still returned HTTP 200. Legacy reachability is not a readiness gate.
+
+No untested route or skipped integration test is counted as passing. The complete full-stack and authenticated route verification requested for T0 remains open.
 
 ## A. Architecture Map
 
@@ -34,9 +41,9 @@ All claims below are verified by reading source code and running tests. No claim
 | PostgreSQL | postgres:16-alpine | 127.0.0.1:5432 | Databases: `email`, `identity`, `workspace` |
 | Redis | redis:7-alpine | 127.0.0.1:6379 | Caching, rate limiting |
 | NATS JetStream | nats:2.10-alpine | 127.0.0.1:4222, 8222 | Event bus; business events stream |
-| Stalwart SMTP | stalwartlabs/stalwart:latest | 127.0.0.1:25/465/587/8081 | SMTP in/out; bootstrap mode, no real domain/DKIM |
+| Stalwart SMTP | stalwartlabs/stalwart:latest | 127.0.0.1:25/465/587/8081 | Local bootstrap service; no successful verification/reset delivery was established |
 | MinIO | minio/minio:latest | 127.0.0.1:9000/9001 | Object storage (unused by code) |
-| Caddy | caddy:2-alpine | 80, 443 | Edge proxy; routes /api/* and /t/* to legacy api, rest to web |
+| Caddy | caddy:2-alpine | 80, 443 | Edge proxy; routes /api/* to Gateway, /t/* to Legacy API, and other paths to Web |
 
 ### Inter-service communication
 
@@ -46,7 +53,7 @@ All claims below are verified by reading source code and running tests. No claim
 - **Identity → Workspace:** Service-to-service via `GET /internal/users/{userID}/memberships` and `GET /internal/organizations/{organizationID}`, authenticated with `X-Service-Token` (SERVICE_TOKEN env)
 - **All → NATS JetStream:** Business events published (identity.user_registered.v1 etc.)
 - **Legacy API → Stalwart:** SMTP submission on `stalwart:587`
-- **Caddy → Gateway:** `/api/*` (currently misconfigured — see gap #8)
+- **Caddy → Gateway:** `/api/*` (configured in source; live proxy response was not verified)
 - **Caddy → Legacy API:** `/t/*` tracking pixel/click redirect
 - **Caddy → Web:** all other routes
 
@@ -115,96 +122,99 @@ flowchart TD
 
 ## B. Route Inventory
 
+Status values below describe the source inventory, not blanket runtime passes. The T0 route sweep only confirmed dispatch/auth boundaries; successful authenticated business behavior is unverified unless a specific passing test is cited above.
+
 ### Identity service (`services/identity/handlers.go`)
 
 | Path | Method | Auth | Status | Notes |
 |------|--------|------|--------|-------|
-| /auth/register | POST | rate-limited | WORKING | Requires email, password, name, organization_name |
-| /auth/login | POST | rate-limited | WORKING | Returns access_token; no refresh token cookie |
-| /auth/refresh | POST | rate-limited | PARTIAL | Expects JSON body `{}`; no cookie rotation |
-| /auth/verify | POST | rate-limited | WORKING | Verifies email token |
-| /auth/resend-verification | POST | rate-limited | WORKING | Resends verification email |
-| /auth/forgot-password | POST | rate-limited | WORKING | Sends reset link |
-| /auth/reset-password | POST | rate-limited | WORKING | Resets password from token |
-| /auth/logout | POST | none | WORKING | Revokes session |
-| /auth/me | GET | JWT | WORKING | Returns user + organization |
-| /healthz | GET | none | WORKING | |
-| /readyz | GET | none | WORKING | DB ping |
+| /auth/register | POST | rate-limited | SOURCE-ONLY | Requires email, password, name, organization_name |
+| /auth/login | POST | rate-limited | SOURCE-ONLY | Returns access token and sets HttpOnly refresh cookie; live journey not tested |
+| /auth/refresh | POST | rate-limited | PARTIAL | Accepts refresh cookie (JSON fallback exists) and rotates cookie; handler tests only |
+| /auth/verify | POST | rate-limited | SOURCE-ONLY | Verifies email token |
+| /auth/resend-verification | POST | rate-limited | SOURCE-ONLY | Resends verification email |
+| /auth/forgot-password | POST | rate-limited | SOURCE-ONLY | Sends reset link |
+| /auth/reset-password | POST | rate-limited | SOURCE-ONLY | Resets password from token |
+| /auth/logout | POST | none | SOURCE-ONLY | Revokes session |
+| /auth/me | GET | JWT | SOURCE-ONLY | Returns user + organization |
+| /healthz | GET | none | SOURCE-ONLY | |
+| /readyz | GET | none | SOURCE-ONLY | DB ping |
 
 ### Workspace service (`services/workspace/handlers.go`)
 
 | Path | Method | Auth | Status | Notes |
 |------|--------|------|--------|-------|
-| /internal/users/{userID}/memberships | GET | SERVICE_TOKEN | WORKING | Service-to-service |
-| /internal/organizations/{organizationID} | GET | SERVICE_TOKEN | WORKING | Service-to-service |
-| /organizations | GET | JWT | WORKING | List orgs for user |
-| /organizations/{organizationID} | GET | JWT | WORKING | Get org |
-| /organizations/{organizationID} | PATCH | JWT + owner/admin | WORKING | Update org |
-| /members | GET | JWT | WORKING | List members |
-| /invitations | GET | JWT | WORKING | List invitations |
-| /invitations | POST | JWT + owner/admin | WORKING | Create invitation |
-| /invitations/{invitationID} | DELETE | JWT + owner/admin | WORKING | Revoke invitation |
-| /invitations/accept | POST | JWT | WORKING | Accept invitation |
-| /healthz | GET | none | WORKING | |
-| /readyz | GET | none | WORKING | DB ping |
+| /internal/users/{userID}/memberships | GET | SERVICE_TOKEN | SOURCE-ONLY | Service-to-service |
+| /internal/organizations/{organizationID} | GET | SERVICE_TOKEN | SOURCE-ONLY | Service-to-service |
+| /organizations | GET | JWT | SOURCE-ONLY | List orgs for user |
+| /organizations/{organizationID} | GET | JWT | SOURCE-ONLY | Get org |
+| /organizations/{organizationID} | PATCH | JWT + owner/admin | SOURCE-ONLY | Update org |
+| /members | GET | JWT | SOURCE-ONLY | List members |
+| /invitations | GET | JWT | SOURCE-ONLY | List invitations |
+| /invitations | POST | JWT + owner/admin | SOURCE-ONLY | Create invitation |
+| /invitations/{invitationID} | DELETE | JWT + owner/admin | SOURCE-ONLY | Revoke invitation |
+| /invitations/accept | POST | JWT | SOURCE-ONLY | Accept invitation |
+| /healthz | GET | none | SOURCE-ONLY | |
+| /readyz | GET | none | SOURCE-ONLY | DB ping |
 
 ### Legacy API (`internal/api/server.go`)
 
 | Path | Method | Auth | Status | Notes |
 |------|--------|------|--------|-------|
-| /api/v1/auth/register | POST | none | WORKING | Legacy; duplicates Identity |
-| /api/v1/auth/login | POST | none | WORKING | Legacy; duplicates Identity |
-| /api/v1/auth/verify | GET | none | WORKING | Legacy verification (GET, not POST) |
-| /api/v1/auth/forgot-password | POST | none | WORKING | Uses Resend |
-| /api/v1/auth/reset-password | POST | none | WORKING | Uses Resend |
-| /api/v1/auth/me | GET | JWT | WORKING | |
-| /api/v1/contacts | GET/POST | JWT | WORKING | CRUD |
-| /api/v1/contacts/import | POST | JWT | PARTIAL | Import job creation; no file upload handling |
-| /api/v1/contact-imports/{id} | GET | JWT | WORKING | Import status |
-| /api/v1/contacts/export | GET | JWT | WORKING | CSV export |
-| /api/v1/contacts/{id} | GET/PATCH/DELETE | JWT | WORKING | |
-| /api/v1/lists | GET/POST | JWT | WORKING | |
-| /api/v1/lists/{id} | DELETE | JWT | WORKING | |
-| /api/v1/tags | GET/POST | JWT | WORKING | |
-| /api/v1/tags/{id} | DELETE | JWT | WORKING | |
-| /api/v1/segments | GET/POST | JWT | WORKING | |
-| /api/v1/segments/{id} | DELETE | JWT | WORKING | |
-| /api/v1/templates | GET/POST | JWT | WORKING | No update/delete |
-| /api/v1/campaigns | GET/POST | JWT | WORKING | No duplication/approval |
-| /api/v1/campaigns/{id} | GET/PATCH/DELETE | JWT | WORKING | |
-| /api/v1/campaigns/{id}/validate | POST | JWT | WORKING | |
-| /api/v1/campaigns/{id}/schedule | POST | JWT | WORKING | |
-| /api/v1/campaigns/{id}/send | POST | JWT | WORKING | |
-| /api/v1/campaigns/{id}/pause | POST | JWT | WORKING | |
-| /api/v1/campaigns/{id}/resume | POST | JWT | WORKING | |
-| /api/v1/campaigns/{id}/cancel | POST | JWT | WORKING | |
-| /api/v1/domains | GET/POST | JWT | WORKING | DNS checks are presence-level only |
-| /api/v1/domains/{id}/verify | POST | JWT | WORKING | |
-| /api/v1/domains/{id}/dns-records | GET | JWT | WORKING | Returns static placeholder DKIM key |
-| /api/v1/domains/{id}/dkim-key | POST | JWT | WORKING | |
-| /api/v1/delivery/dead-letter | GET | JWT | WORKING | |
+| /api/v1/auth/register | POST | none | SOURCE-ONLY | Legacy; duplicates Identity |
+| /api/v1/auth/login | POST | none | SOURCE-ONLY | Legacy; duplicates Identity |
+| /api/v1/auth/verify | GET | none | SOURCE-ONLY | Legacy verification (GET, not POST) |
+| /api/v1/auth/forgot-password | POST | none | SOURCE-ONLY | Uses Resend |
+| /api/v1/auth/reset-password | POST | none | SOURCE-ONLY | Uses Resend |
+| /api/v1/auth/me | GET | JWT | SOURCE-ONLY | |
+| /api/v1/contacts | GET/POST | JWT | SOURCE-ONLY | CRUD |
+| /api/v1/contacts/import | POST | JWT | PARTIAL | Multipart CSV upload (16 MiB limit) and import-job creation; API queue/progress tenant-isolation test passed; UI and full worker pipeline are incomplete/unverified |
+| /api/v1/contact-imports/{id} | GET | JWT | SOURCE-ONLY | Import status |
+| /api/v1/contacts/export | GET | JWT | SOURCE-ONLY | CSV export |
+| /api/v1/contacts/{id} | GET/PATCH/DELETE | JWT | SOURCE-ONLY | |
+| /api/v1/lists | GET/POST | JWT | SOURCE-ONLY | |
+| /api/v1/lists/{id} | DELETE | JWT | SOURCE-ONLY | |
+| /api/v1/tags | GET/POST | JWT | SOURCE-ONLY | |
+| /api/v1/tags/{id} | DELETE | JWT | BROKEN | 404 in local route sweep; no DELETE route is registered in `internal/api/server.go` |
+| /api/v1/segments | GET/POST | JWT | SOURCE-ONLY | |
+| /api/v1/segments/{id} | DELETE | JWT | SOURCE-ONLY | |
+| /api/v1/templates | GET/POST | JWT | SOURCE-ONLY | No update/delete |
+| /api/v1/campaigns | GET/POST | JWT | SOURCE-ONLY | No duplication/approval |
+| /api/v1/campaigns/{id} | GET/PATCH/DELETE | JWT | SOURCE-ONLY | |
+| /api/v1/campaigns/{id}/validate | POST | JWT | SOURCE-ONLY | |
+| /api/v1/campaigns/{id}/schedule | POST | JWT | SOURCE-ONLY | |
+| /api/v1/campaigns/{id}/send | POST | JWT | SOURCE-ONLY | |
+| /api/v1/campaigns/{id}/pause | POST | JWT | SOURCE-ONLY | |
+| /api/v1/campaigns/{id}/resume | POST | JWT | SOURCE-ONLY | |
+| /api/v1/campaigns/{id}/cancel | POST | JWT | SOURCE-ONLY | |
+| /api/v1/domains | GET/POST | JWT | SOURCE-ONLY | DNS checks are presence-level only |
+| /api/v1/domains/{id}/verify | POST | JWT | SOURCE-ONLY | |
+| /api/v1/domains/{id}/dns-records | GET | JWT | SOURCE-ONLY | Returns static placeholder DKIM key |
+| /api/v1/domains/{id}/dkim-key | POST | JWT | SOURCE-ONLY | |
+| /api/v1/delivery/dead-letter | GET | JWT | SOURCE-ONLY | |
 | /api/v1/delivery/dead-letter/{id}/replay | POST | JWT | PARTIAL | Broken DLQ replay mapping |
-| /api/v1/suppressions | GET/POST | JWT | WORKING | |
-| /api/v1/suppressions/{email} | DELETE | JWT | WORKING | |
+| /api/v1/suppressions | GET/POST | JWT | SOURCE-ONLY | |
+| /api/v1/suppressions/{email} | DELETE | JWT | SOURCE-ONLY | |
 | /api/v1/webhooks/bounce | POST | none | BROKEN | Unauthenticated; forged events possible |
 | /api/v1/webhooks/complaint | POST | none | BROKEN | Unauthenticated |
-| /api/v1/analytics/overview | GET | JWT | WORKING | |
-| /api/v1/analytics/campaigns/{id} | GET | JWT | WORKING | |
-| /api/v1/api-keys | GET/POST/DELETE | JWT + owner/admin | PARTIAL | Key auth/scopes not enforced |
-| /api/v1/public/subscribe | POST | none | WORKING | |
+| /api/v1/analytics/overview | GET | JWT | SOURCE-ONLY | |
+| /api/v1/analytics/campaigns/{id} | GET | JWT | SOURCE-ONLY | |
+| /api/v1/api-keys | GET/POST | JWT + owner/admin | PARTIAL | Key authentication/scopes are not enforced |
+| /api/v1/api-keys/{id} | DELETE | JWT + owner/admin | SOURCE-ONLY | |
+| /api/v1/public/subscribe | POST | none | SOURCE-ONLY | |
 | /api/v1/public/unsubscribe | GET/POST | none | PARTIAL | GET mutates (link scanners can unsubscribe) |
-| /t/open/{token} | GET | none | WORKING | Tracking pixel |
-| /t/click/{token} | GET | none | WORKING | Click redirect |
-| /healthz | GET | none | WORKING | |
-| /readyz | GET | none | WORKING | DB ping |
-| /metrics | GET | none | WORKING | Prometheus |
+| /t/open/{token} | GET | none | SOURCE-ONLY | Tracking pixel |
+| /t/click/{token} | GET | none | SOURCE-ONLY | Click redirect |
+| /healthz | GET | none | SOURCE-ONLY | |
+| /readyz | GET | none | SOURCE-ONLY | DB ping |
+| /metrics | GET | none | SOURCE-ONLY | Prometheus |
 **Web** (`apps/web/`): NEXT_PUBLIC_API_URL (build-time + runtime)
 ### Frontend pages (`apps/web/app/`)
 
 | Page | Route | Buttons/Forms/Actions | API endpoint | Status |
 |------|-------|----------------------|--------------|--------|
-| Login | /login | Sign in form (email, password) | POST /auth/login | WORKING |
-| Register | /register | Create workspace form (email, password, name, org name) | POST /auth/register | WORKING |
+| Login | /login | Sign in form (email, password) | POST /auth/login | SOURCE-ONLY |
+| Register | /register | Create workspace form (email, password, name, org name) | POST /auth/register | SOURCE-ONLY |
 | Verify | /auth/verify | Resend verification link | POST /auth/verify | PARTIAL |
 | Reset password | /auth/reset-password | Reset form (token, password) | POST /auth/reset-password | PARTIAL |
 | Forgot password | /forgot-password | Email form | POST /auth/forgot-password | PARTIAL |
@@ -269,58 +279,26 @@ All tenant-owned tables carry `organization_id`:
   - No composite FKs (e.g., `campaign_recipients` referencing `(organization_id, campaign_id)` composite)
   - Webhook handlers (bounce/complaint) have no auth and can write suppressions for any org
   - API keys exist but key authentication/scopes are not wired into request middleware
-## E. Prioritized Gap List
+## E. Verified gaps and status
 
-| # | Gap | Effort | Dependencies | Phase | Status |
-|---|-----|--------|--------------|-------|--------|
-| 1 | NEXT_PUBLIC_API_URL defaults to http://localhost:8080; not same-origin | S | None | 1 | **DONE** |
-| 2 | Login page accepted credentials in URL query string (?email=&password=) | S | None | 2 | **DONE** |
-| 3 | SERVICE_TOKEN not required; localhost defaults for LEGACY_API_URL/WORKSPACE_URL | M | None | 1 | **DONE** |
-| 4 | auth_audit.metadata NOT NULL but writes pass nil; needs migration | S | None | 1 | **DONE** |
-| 5 | identity-db-migrate fails (MIGRATIONS_DIR wrong path in image) | S | None | 1 | **DONE** |
-| 6 | Refresh flow: no refresh token on login, /auth/refresh expects JSON body | M | Identity cookie changes | 2 | **DONE** |
-| 7 | Verification/password reset email delivery broken (Stalwart bootstrap, no real SMTP) | M | Stalwart config | 2 | **PARTIAL** (log mailer works; SMTP+STARTTLS implemented but Stalwart not listening on SMTP ports) |
-| 8 | Caddy routes /api/* to legacy API, not gateway | S | Gateway routing | 1 | **DONE** |
-| 9 | Server code lags local repo (no single deploy path) | M | CI/CD | 1 | **DONE** |
-| 10 | Redis, api, web, worker published on 0.0.0.0 | S | Compose | 1 | **DONE** |
-| 11 | Secrets leaked in chat/logs; .env not gitignored | S | None | 1 | **DONE** |
-| 12 | Contact import does not work (no file upload UI, async job not connected) | L | MinIO, import worker | 3 | Pending |
-| 13 | Most dashboard pages static/inert (automations, forms, billing, settings, editor) | L | Backend services | 3-6 | Pending |
-| 14 | No RLS on PostgreSQL tables | M | DB migration | 6 | Pending |
-| 15 | No CI/CD pipeline | L | None | 1 | **DONE** |
-| 16 | No billing/subscription service | L | None | 6 | Pending |
-| 17 | No automation service | L | None | 6 | Pending |
-| 18 | No separate tracking/analytics service | L | Legacy tracking | 5 | Pending |
-| 19 | No separate bounce/complaint processing service | L | Legacy webhooks | 5 | Pending |
-| 20 | No separate domain/deliverability service | L | Legacy domains | 4 | Pending |
-| 21 | No separate delivery orchestration service | L | Legacy worker | 4 | Pending |
-| 22 | Bounce/complaint webhooks unauthenticated (security) | M | Webhook signing | 5 | Pending |
-| 23 | GET /api/v1/public/unsubscribe mutates state | S | None | 2 | Pending |
-| 24 | API key auth/scopes not enforced | M | Gateway middleware | 2 | Pending |
-| 25 | No email editor (drag-and-drop) | L | Frontend component | 4 | Pending |
+| # | Finding | T0 evidence | Status |
+|---|---------|-------------|--------|
+| 1 | Current working tree build | `go test ./...` and Docker build fail on the existing uncommitted `internal/api/contact_imports.go` package mismatch | **BLOCKED** |
+| 2 | Combined Compose startup | Compose syntax parses, but the unmodified stack fails on MinIO pull, PostgreSQL init script permissions/missing DB variables, and Gateway configuration | **BLOCKED** |
+| 3 | Gateway configuration/readiness | Production config requires the three upstream URLs, Compose omits `LEGACY_API_URL`; `SERVICE_TOKEN` is not validated; `/readyz` stayed 200 with Legacy API stopped | **OPEN** |
+| 4 | `auth_audit.metadata` upgrade safety | Fresh schema has `NOT NULL DEFAULT '{}'::jsonb` and writer marshals metadata; no forward migration or upgrade application was verified | **OPEN** |
+| 5 | Tag deletion route | `DELETE /api/v1/tags/{id}` returned 404 and has no handler registration | **BROKEN** |
+| 6 | Contact import | Multipart queue/progress and tenant-isolation test passed; worker integration test fails its row-number assertion; no UI; database `bytea` storage, MinIO unused | **PARTIAL** |
+| 7 | Bounce/complaint webhooks | Route sweep and source show unauthenticated handlers; no signature/replay protection | **OPEN** |
+| 8 | GET unsubscribe | Source invokes the mutating unsubscribe operation from GET | **OPEN** |
+| 9 | Verification/reset email | Integration log reported no Resend API key; no successful delivery was confirmed | **OPEN** |
+| 10 | Customer-facing static pages | Settings, billing, automations, forms, editor, and preview remain static/mock | **STATIC-MOCK** |
+| 11 | Tenant isolation/RLS | No PostgreSQL RLS was verified; application-level tenant tests are not a substitute | **OPEN** |
+| 12 | CI | `.github/workflows/ci.yml` exists but was not run in T0 | **PRESENT; NOT EXECUTED** |
+| 13 | Production deployment parity | No production server inspection or deployment was performed | **UNVERIFIED** |
 
-### Top 20 gaps (summary for approval)
+T0 is not signed off. The source inventory and partial local evidence above do not establish that the full stack or all authenticated routes work.
 
-1. **NEXT_PUBLIC_API_URL** — defaults to `http://localhost:8080`, not same-origin
-2. **Login query-string credentials** — `?email=...&password=...` accepted
-3. **SERVICE_TOKEN not required** — localhost defaults for upstream URLs
-4. **auth_audit.metadata NULL violation** — NOT NULL column, nil writes
-5. **identity-db-migrate broken** — MIGRATIONS_DIR path doesn't exist in image
-6. **Refresh flow broken** — no refresh token, JSON body instead of cookie
-7. **Email verification broken** — no real SMTP/Stalwart delivery
-8. **Caddy misrouted** — /api/* goes to legacy API, not gateway
-9. **Code drift** — server != local repo
-10. **Public ports** — Redis/API/Web/Worker on 0.0.0.0
-11. **Secret leakage** — real passwords in logs/chat; .env not gitignored
-12. **Contact import non-functional** — no upload UI, no async job pipeline
-13. **Static/inert pages** — automations, forms, billing, settings, editor, campaigns editor
-14. **No RLS** — database tenant isolation not enforced at PG level
-15. **No CI/CD** — no GitHub Actions workflows
-16. **Missing services** — billing, automation, tracking, bounce, domain, delivery orchestration
-17. **Unauthenticated webhooks** — bounce/complaint can forge suppressions
-18. **GET unsubscribe mutates** — link scanners can unsubscribe users
-19. **API key scopes unenforced** — keys created but not authenticated
-20. **No email editor** — no drag-and-drop builder
 ## F. Mock/Hardcoded Data in Customer-Facing Screens
 
 | Location | What | Status |
@@ -330,10 +308,7 @@ All tenant-owned tables carry `organization_id`:
 
 ## Next Steps
 
-This audit is complete. I am waiting for your approval before proceeding to Phase 1 (Foundation). The top 20 gaps above are prioritized with effort estimates (S=small, M=medium, L=large) and dependencies.
-
-Please confirm approval to proceed, or let me know if you want me to adjust any gap priorities before starting implementation.
-| Billing | /(dashboard)/billing | Plans, invoices, usage | — | STATIC-MOCK (demo-data.ts) |
+T0 remains open. Do not start T1 until the current build blocker is resolved and the full-stack and authenticated-route checks are completed or explicitly scoped out.
 
 ## Phase status (evidence-based)
 
@@ -343,33 +318,30 @@ Please confirm approval to proceed, or let me know if you want me to adjust any 
 
 | # | Gap | Evidence | Status |
 |---|-----|----------|--------|
-| 1 | `NEXT_PUBLIC_API_URL` defaults | `apps/web/lib/api-url.ts` uses `process.env.NEXT_PUBLIC_API_URL` directly; not same-origin by default | **OPEN** |
-| 2 | Login query-string credentials | `apps/web/app/login/page.tsx` uses `prepareLoginLocation` which reads query params | **OPEN** |
-| 3 | `SERVICE_TOKEN` not required in Gateway | `services/gateway/config.go` has no validation for `IDENTITY_URL`, `WORKSPACE_URL`, `LEGACY_API_URL`; all default to localhost | **OPEN** |
-| 4 | `auth_audit.metadata` NOT NULL | `services/identity/store_pgx.go` already marshals metadata with `{}` fallback; migration `0001_init.sql` has `NOT NULL DEFAULT '{}'::jsonb` | **FIXED** |
-| 5 | `identity-db-migrate` path | `Dockerfile` copies `services/identity/migrations` to `/app/migrations`; compose uses `/app/services/identity/migrations` — MISMATCH | **OPEN** |
-| 8 | Caddy routes `/api/*` to legacy | `infrastructure/caddy/Caddyfile` routes `/api/*` to legacy API, not gateway | **OPEN** |
-| 9 | Server code lags repo | Last git commit `4db6c93` reverted prior changes; server at `/opt/email-platform` may not match | **OPEN** |
-| 10 | Public ports | `docker-compose.yml` publishes Redis 6379, API 8080, web 3000, worker 9091 on `0.0.0.0` | **OPEN** |
-| 11 | Secret leakage | `.env` contains real-looking values (`JWT_SECRET=AmazingVendor45...`, `SMTP_PASSWORD=AmazingVendor45...`) | **OPEN** |
-| 15 | No CI/CD | `.github/workflows/ci.yml` does not exist | **OPEN** |
-
-**FIXED items (verified in code):**
-- `auth_audit.metadata` — `WriteAuthAudit` marshals metadata and falls back to `{}`; migration has `NOT NULL DEFAULT '{}'::jsonb`
+| 1 | `NEXT_PUBLIC_API_URL` defaults | Source config is present; live browser routing was not tested in T0 | **NOT LIVE-VERIFIED** |
+| 2 | Login query-string credentials | Source cleanup exists; browser/history/referrer behavior was not tested in T0 | **NOT LIVE-VERIFIED** |
+| 3 | Gateway production configuration | Checks three upstream URLs, not `SERVICE_TOKEN`; Compose omits `LEGACY_API_URL` and `SERVICE_TOKEN` | **OPEN** |
+| 4 | `auth_audit.metadata` | Fresh-install migration has a default and writer marshals metadata; no forward migration or upgrade application was verified | **OPEN** |
+| 5 | Identity/workspace migration paths | Migration containers exited 0 only in the overridden baseline stack | **PARTIAL** |
+| 8 | Caddy routes `/api/*` to Gateway | Source is configured correctly; local HTTP request redirected with 308, so proxy routing remains unverified | **NOT LIVE-VERIFIED** |
+| 9 | Server code parity | No production server inspection was performed | **UNVERIFIED** |
+| 10 | Public ports | Compose source binds most local services to loopback; Caddy binds ports 80/443 on all interfaces | **SOURCE-ONLY** |
+| 11 | Secret handling | `.env` is ignored and untracked; no secret scan or log exposure check was performed | **PARTIAL** |
+| 15 | CI/CD | `.github/workflows/ci.yml` exists; CI was not executed in T0 | **PRESENT; NOT EXECUTED** |
 
 ### Phase 2 — Auth and Accounts: PARTIAL
 
 | # | Gap | Evidence | Status |
 |---|-----|----------|--------|
-| 2 | Login query-string credentials | `apps/web/app/login/page.tsx` reads `callbackUrl` from query params | **OPEN** |
-| 6 | Refresh flow | Identity `/auth/refresh` handler exists; frontend `lib/auth.ts` has `refreshAccessToken` using cookie-based refresh | **PARTIAL** — handler exists, cookie rotation in handlers.go, but frontend cookie storage not confirmed |
-| 7 | Email verification | Identity `/auth/verify` exists, but Stalwart SMTP not listening on ports 25/465/587 (only admin API on 8081); `MAIL_PROVIDER=log` in `.env` | **OPEN** — email not delivered |
+| 2 | Login query-string credentials | Source reads a safe callback URL; browser/history/referrer behavior was not tested in T0 | **NOT LIVE-VERIFIED** |
+| 6 | Refresh flow | Handler tests cover refresh-cookie behavior; no live browser/API journey was run | **PARTIAL** |
+| 7 | Email verification | Routes exist; integration logs reported no Resend API key and no verification/reset delivery was confirmed | **OPEN** |
 
 ### Phase 3 — Audience: PARTIAL
 
 | # | Gap | Evidence | Status |
 |---|-----|----------|--------|
-| 12 | Contact import | `internal/api/contact_imports.go` handler exists with multipart upload (16MiB limit); `internal/worker/imports.go` processes imports; no frontend UI; MinIO unused (data stored in DB `bytea`) | **PARTIAL** |
+| 12 | Contact import | Multipart upload and worker loop exist; API queue/progress tenant-scope test passed; worker integration test fails its row-number assertion; no UI; data is stored in PostgreSQL `bytea`, not MinIO | **PARTIAL** |
 
 ### Phase 4 — Sending: PARTIAL
 
@@ -406,3 +378,4 @@ Please confirm approval to proceed, or let me know if you want me to adjust any 
 | Automations | `apps/web/app/(dashboard)/automations/page.tsx` — hardcoded `fallbackAutomations` array | **STATIC-MOCK** |
 | Forms | `apps/web/app/(dashboard)/forms/page.tsx` — hardcoded `forms` array | **STATIC-MOCK** |
 | Campaign editor | `apps/web/app/(dashboard)/campaigns/[id]/editor/page.tsx` — hardcoded `campaigns`, `templateBlocks` arrays | **STATIC-MOCK** |
+| Campaign preview | `apps/web/app/(dashboard)/campaigns/[id]/preview/page.tsx` — no verified live preview workflow | **STATIC-MOCK** |
