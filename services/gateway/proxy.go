@@ -124,15 +124,24 @@ func (g *Gateway) buildHandler() http.Handler {
 func (g *Gateway) ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	// Identity and workspace are required upstreams; legacy is optional
-	// (it may run on a separate compose project). Probe all and report which
-	// are down, but only fail readiness for required services.
-	required := []string{TargetIdentity, TargetWorkspace}
+	// Every upstream in the canonical stack is required: identity and
+	// workspace for auth/tenancy, legacy for campaigns/contacts/analytics.
+	// Report each upstream's reachability so operators can see exactly what
+	// is down (including legacy).
+	upstreams := map[string]string{}
 	down := []string{}
-	for name, target := range g.upstream {
+	// Probe in a stable order for readable logs.
+	for _, name := range []string{TargetIdentity, TargetWorkspace, TargetLegacy} {
+		target, ok := g.upstream[name]
+		if !ok {
+			upstreams[name] = "unconfigured"
+			down = append(down, name)
+			continue
+		}
 		probeURL := target.Scheme + "://" + target.Host + "/healthz"
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 		if err != nil {
+			upstreams[name] = "error"
 			down = append(down, name)
 			continue
 		}
@@ -141,28 +150,18 @@ func (g *Gateway) ready(w http.ResponseWriter, r *http.Request) {
 			if resp != nil {
 				resp.Body.Close()
 			}
+			upstreams[name] = "down"
 			down = append(down, name)
 			continue
 		}
 		resp.Body.Close()
-	}
-	// Required downstreams must be healthy for the gateway to be ready.
-	requiredDown := false
-	for _, d := range down {
-		for _, req := range required {
-			if d == req {
-				requiredDown = true
-			}
-		}
-	}
-	if requiredDown {
-		kit.Error(w, http.StatusServiceUnavailable, "not_ready", "Required upstream(s) not ready: "+strings.Join(down, ", "))
-		return
+		upstreams[name] = "up"
 	}
 	if len(down) > 0 {
-		g.logger.Warn("optional upstream(s) not ready", "downstreams", strings.Join(down, ", "))
+		kit.Error(w, http.StatusServiceUnavailable, "not_ready", "Upstream(s) not ready: "+strings.Join(down, ", "))
+		return
 	}
-	kit.JSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	kit.JSON(w, http.StatusOK, map[string]any{"status": "ready", "upstreams": upstreams})
 }
 
 // ServeHTTP implements http.Handler.

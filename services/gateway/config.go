@@ -14,6 +14,7 @@ type Config struct {
 	IdentityURL  string
 	WorkspaceURL string
 	LegacyAPIURL string
+	ServiceToken string
 	CORSOrigins  []string
 
 	AuthRatePerMinute int
@@ -21,8 +22,9 @@ type Config struct {
 }
 
 // LoadConfig reads Gateway configuration from environment variables.
-// Identity, Workspace, and LegacyAPI URLs are required in production.
-// Use APP_ENV=production to enforce presence; defaults allow local dev.
+// Identity, Workspace, and LegacyAPI URLs plus the service token are required
+// in production. Use APP_ENV=production to enforce presence; defaults allow
+// local dev.
 func LoadConfig() (Config, error) {
 	base := kit.LoadBaseConfig("gateway")
 
@@ -31,6 +33,7 @@ func LoadConfig() (Config, error) {
 		IdentityURL:       strings.TrimRight(kit.Getenv("IDENTITY_URL", ""), "/"),
 		WorkspaceURL:      strings.TrimRight(kit.Getenv("WORKSPACE_URL", ""), "/"),
 		LegacyAPIURL:      strings.TrimRight(kit.Getenv("LEGACY_API_URL", ""), "/"),
+		ServiceToken:      strings.TrimSpace(kit.Getenv("SERVICE_TOKEN", "")),
 		CORSOrigins:       splitCSV(kit.Getenv("CORS_ORIGINS", "http://localhost:3000")),
 		AuthRatePerMinute: kit.GetenvInt("GATEWAY_AUTH_RATE_PER_MINUTE", 60),
 		AuthBurst:         kit.GetenvInt("GATEWAY_AUTH_BURST", 20),
@@ -40,7 +43,7 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("gateway rate limits must be positive")
 	}
 
-	// Fail fast in production when required upstream URLs are absent.
+	// Fail fast in production when required configuration is absent.
 	if base.Env == "production" {
 		if cfg.IdentityURL == "" {
 			return Config{}, fmt.Errorf("IDENTITY_URL is required in production")
@@ -50,6 +53,9 @@ func LoadConfig() (Config, error) {
 		}
 		if cfg.LegacyAPIURL == "" {
 			return Config{}, fmt.Errorf("LEGACY_API_URL is required in production")
+		}
+		if cfg.ServiceToken == "" {
+			return Config{}, fmt.Errorf("SERVICE_TOKEN is required in production")
 		}
 	}
 	return cfg, nil

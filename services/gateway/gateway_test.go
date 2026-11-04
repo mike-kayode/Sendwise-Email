@@ -217,3 +217,126 @@ func TestGatewayHealthAndCORS(t *testing.T) {
 		t.Fatalf("preflight leaked to upstreams: %d", len(identityHits)+len(workspaceHits)+len(legacyHits))
 	}
 }
+
+// setProdEnv pins every env var LoadConfig reads so ambient values cannot
+// leak into fail-fast assertions.
+func setProdEnv(t *testing.T, env string, overrides map[string]string) {
+	t.Helper()
+	base := map[string]string{
+		"APP_ENV":         env,
+		"IDENTITY_URL":    "http://identity:8080",
+		"WORKSPACE_URL":   "http://workspace:8080",
+		"LEGACY_API_URL":  "http://api:8080",
+		"SERVICE_TOKEN":   "test-service-token",
+		"CORS_ORIGINS":    "http://localhost:3000",
+		"GATEWAY_AUTH_RATE_PER_MINUTE": "60",
+		"GATEWAY_AUTH_BURST":           "20",
+	}
+	for k, v := range overrides {
+		base[k] = v
+	}
+	for k, v := range base {
+		t.Setenv(k, v)
+	}
+}
+
+func TestLoadConfigFailsFastInProduction(t *testing.T) {
+	cases := []struct {
+		name    string
+		missing string
+		wantErr string
+	}{
+		{"identity url", "IDENTITY_URL", "IDENTITY_URL"},
+		{"workspace url", "WORKSPACE_URL", "WORKSPACE_URL"},
+		{"legacy api url", "LEGACY_API_URL", "LEGACY_API_URL"},
+		{"service token", "SERVICE_TOKEN", "SERVICE_TOKEN"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setProdEnv(t, "production", map[string]string{tc.missing: ""})
+			_, err := LoadConfig()
+			if err == nil {
+				t.Fatalf("expected error when %s is missing in production", tc.missing)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadConfigProductionSucceedsWhenComplete(t *testing.T) {
+	setProdEnv(t, "production", nil)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LegacyAPIURL != "http://api:8080" || cfg.ServiceToken != "test-service-token" {
+		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+func TestLoadConfigDevelopmentAllowsMissingUpstreams(t *testing.T) {
+	setProdEnv(t, "development", map[string]string{
+		"IDENTITY_URL": "", "WORKSPACE_URL": "", "LEGACY_API_URL": "", "SERVICE_TOKEN": "",
+	})
+	if _, err := LoadConfig(); err != nil {
+		t.Fatalf("development must not fail fast: %v", err)
+	}
+}
+
+// newHealthServer serves /healthz; closed servers simulate a down upstream.
+func newHealthServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
+func TestReadyzReportsLegacyReachability(t *testing.T) {
+	identity := newHealthServer()
+	defer identity.Close()
+	workspace := newHealthServer()
+	defer workspace.Close()
+	legacy := newHealthServer()
+
+	server, _ := newTestGateway(t, Config{
+		IdentityURL:  identity.URL,
+		WorkspaceURL: workspace.URL,
+		LegacyAPIURL: legacy.URL,
+	})
+
+	// All up → 200 and every upstream reported.
+	resp, err := http.Get(server.URL + "/readyz")
+	if err != nil {
+		t.Fatalf("readyz: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("readyz status = %d body = %s", resp.StatusCode, body)
+	}
+	for _, name := range []string{"identity", "workspace", "legacy"} {
+		if !strings.Contains(string(body), `"`+name+`":"up"`) {
+			t.Errorf("readyz body missing %s: %s", name, body)
+		}
+	}
+
+	// Legacy down → 503 naming legacy (regression: legacy used to be optional).
+	legacy.Close()
+	resp, err = http.Get(server.URL + "/readyz")
+	if err != nil {
+		t.Fatalf("readyz after legacy down: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("readyz status = %d, want 503 when legacy is down; body = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "legacy") {
+		t.Errorf("503 body must name the down upstream: %s", body)
+	}
+}
