@@ -150,6 +150,22 @@ export type Contact = {
   updated_at: string;
 };
 
+export type ContactImport = {
+  id: string;
+  status: string;
+  file_name: string;
+  total_rows: number;
+  processed_rows: number;
+  imported: number;
+  skipped: number;
+  invalid: number;
+  errors: Array<{ row: number; message: string }>;
+  last_error?: string;
+  created_at: string;
+  started_at?: string;
+  completed_at?: string;
+};
+
 export type Campaign = {
   id: string;
   organization_id?: string;

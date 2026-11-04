@@ -11,6 +11,7 @@ import { Table, Thead, Tbody, Tr, Th, Td } from "@/components/ui/table";
 import { apiFetch, type Contact, type ListResponse } from "@/lib/auth";
 import { formatDate, initials } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
+import { ImportDialog } from "./import-dialog";
 
 const avatarColors = [
   "bg-indigo-100 text-indigo-700",
@@ -25,6 +26,7 @@ export default function ContactsPage() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [offset, setOffset] = useState(0);
+  const [isImportOpen, setIsImportOpen] = useState(false);
   const { toast } = useToast();
 
   const query = useQuery({
@@ -77,7 +79,7 @@ export default function ContactsPage() {
           <>
             <button
               className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-white px-3.5 text-sm font-medium text-slate-900 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
-              onClick={() => toast({ title: "Import", description: "CSV import wizard coming in Phase 2." })}
+              onClick={() => setIsImportOpen(true)}
             >
               <Upload className="h-4 w-4" /> Import
             </button>
@@ -235,6 +237,11 @@ export default function ContactsPage() {
           </div>
         </div>
       </Card>
+
+      <ImportDialog open={isImportOpen} onOpenChange={setIsImportOpen} onImportComplete={() => {
+        // Refresh contacts after import
+      }} />
+
     </div>
   );
 }
