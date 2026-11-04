@@ -1,9 +1,18 @@
 # System State Audit — Sendwise
 
-**Status:** Phase 2 — Auth and Accounts complete.
+**Status:** Phase 0 — Reconcile docs (evidence-based status)
 **Date:** 2026-11-04
 **Repo:** /Users/iam_khayode/email-platform
 **Server:** 72.61.144.73 (/opt/email-platform), https://campaign.pipsleague.com
+
+## Evidence baseline
+
+All claims below are verified by reading source code and running tests. No claim is made without code evidence.
+
+- `go build ./...` — PASS
+- `go test ./...` — PASS (all 23 packages)
+- `npm --prefix apps/web run typecheck` — PASS
+- `git status` — clean except working-tree edits
 
 ## A. Architecture Map
 
@@ -326,26 +335,74 @@ This audit is complete. I am waiting for your approval before proceeding to Phas
 Please confirm approval to proceed, or let me know if you want me to adjust any gap priorities before starting implementation.
 | Billing | /(dashboard)/billing | Plans, invoices, usage | — | STATIC-MOCK (demo-data.ts) |
 
-## Phase 1 — Foundation: COMPLETE
+## Phase status (evidence-based)
 
-**Gap items closed:** 1, 3, 4, 5, 8, 9, 10, 11, 15
+### Phase 1 — Foundation: PARTIAL
 
-### Changes
-- **Same-origin API base** (`apps/web/lib/api-url.ts`): `apiUrl()` returns a relative path when `NEXT_PUBLIC_API_URL` is unset, so the browser resolves against the current origin instead of hardcoded `http://localhost:8080`.
-- **Caddy routes `/api/*` → gateway** (`infrastructure/caddy/Caddyfile`): `/api/*` now proxies to `gateway:8080` instead of legacy API; `/t/*` still goes to legacy API for tracking; all other routes go to web.
-- **SERVICE_TOKEN required** (`services/identity/config.go`, `services/workspace/config.go`): `LoadConfig()` fails fast if `SERVICE_TOKEN` is empty. Gateway upstream URLs default to container names (`http://identity:8080`, `http://workspace:8080`), not `localhost`.
-- **auth_audit.metadata NOT NULL fix** (`services/identity/store_pgx.go`): `WriteAuthAudit` now always marshals metadata (never passes nil); falls back to `{}` if marshal produces `null`.
-- **identity-db-migrate fixed** (`Dockerfile`, `docker-compose.microservices.yml`): migrate image copies service-specific migrations into `/app/services/{identity,workspace}/migrations`; compose `MIGRATIONS_DIR` points to correct paths; `AUTO_MIGRATE=false` since migrations are pre-applied.
-- **Public ports removed** (`docker-compose.microservices.yml`): Redis, API, web, worker now bind to `127.0.0.1` only.
-- **Secrets removed from logs/chat**: `.env` is gitignored; `.env.example` contains no real values; all placeholders.
-- **CI/CD pipeline** (`.github/workflows/ci.yml`): Go vet, Go fmt check, Go test (with Postgres/Redis/NATS services), Next.js typecheck, Docker builds for all four target stages.
+**Gap items with evidence:**
 
-### Server verification
-```
-Identity  GET /healthz  → {"service":"identity","status":"ok"}
-Identity  GET /readyz   → {"status":"ready"}
-Workspace GET /healthz  → {"service":"workspace","status":"ok"}
-Workspace GET /readyz   → {"status":"ready"}
-Gateway   GET /healthz  → {"service":"gateway","status":"ok"}
-Gateway   GET /readyz   → {"status":"ready"}
-```
+| # | Gap | Evidence | Status |
+|---|-----|----------|--------|
+| 1 | `NEXT_PUBLIC_API_URL` defaults | `apps/web/lib/api-url.ts` uses `process.env.NEXT_PUBLIC_API_URL` directly; not same-origin by default | **OPEN** |
+| 2 | Login query-string credentials | `apps/web/app/login/page.tsx` uses `prepareLoginLocation` which reads query params | **OPEN** |
+| 3 | `SERVICE_TOKEN` not required in Gateway | `services/gateway/config.go` has no validation for `IDENTITY_URL`, `WORKSPACE_URL`, `LEGACY_API_URL`; all default to localhost | **OPEN** |
+| 4 | `auth_audit.metadata` NOT NULL | `services/identity/store_pgx.go` already marshals metadata with `{}` fallback; migration `0001_init.sql` has `NOT NULL DEFAULT '{}'::jsonb` | **FIXED** |
+| 5 | `identity-db-migrate` path | `Dockerfile` copies `services/identity/migrations` to `/app/migrations`; compose uses `/app/services/identity/migrations` — MISMATCH | **OPEN** |
+| 8 | Caddy routes `/api/*` to legacy | `infrastructure/caddy/Caddyfile` routes `/api/*` to legacy API, not gateway | **OPEN** |
+| 9 | Server code lags repo | Last git commit `4db6c93` reverted prior changes; server at `/opt/email-platform` may not match | **OPEN** |
+| 10 | Public ports | `docker-compose.yml` publishes Redis 6379, API 8080, web 3000, worker 9091 on `0.0.0.0` | **OPEN** |
+| 11 | Secret leakage | `.env` contains real-looking values (`JWT_SECRET=AmazingVendor45...`, `SMTP_PASSWORD=AmazingVendor45...`) | **OPEN** |
+| 15 | No CI/CD | `.github/workflows/ci.yml` does not exist | **OPEN** |
+
+**FIXED items (verified in code):**
+- `auth_audit.metadata` — `WriteAuthAudit` marshals metadata and falls back to `{}`; migration has `NOT NULL DEFAULT '{}'::jsonb`
+
+### Phase 2 — Auth and Accounts: PARTIAL
+
+| # | Gap | Evidence | Status |
+|---|-----|----------|--------|
+| 2 | Login query-string credentials | `apps/web/app/login/page.tsx` reads `callbackUrl` from query params | **OPEN** |
+| 6 | Refresh flow | Identity `/auth/refresh` handler exists; frontend `lib/auth.ts` has `refreshAccessToken` using cookie-based refresh | **PARTIAL** — handler exists, cookie rotation in handlers.go, but frontend cookie storage not confirmed |
+| 7 | Email verification | Identity `/auth/verify` exists, but Stalwart SMTP not listening on ports 25/465/587 (only admin API on 8081); `MAIL_PROVIDER=log` in `.env` | **OPEN** — email not delivered |
+
+### Phase 3 — Audience: PARTIAL
+
+| # | Gap | Evidence | Status |
+|---|-----|----------|--------|
+| 12 | Contact import | `internal/api/contact_imports.go` handler exists with multipart upload (16MiB limit); `internal/worker/imports.go` processes imports; no frontend UI; MinIO unused (data stored in DB `bytea`) | **PARTIAL** |
+
+### Phase 4 — Sending: PARTIAL
+
+| # | Gap | Evidence | Status |
+|---|-----|----------|--------|
+| 20 | No email editor | `apps/web/app/(dashboard)/campaigns/[id]/editor/page.tsx` uses hardcoded `campaigns` and `templateBlocks` arrays | **OPEN** |
+
+### Phase 5 — Tracking: PARTIAL
+
+| # | Gap | Evidence | Status |
+|---|-----|----------|--------|
+| 17 | Unauthenticated webhooks | `internal/api/delivery.go` `bounceWebhook` and `complaintWebhook` accept requests without signature verification | **OPEN** |
+| 18 | GET unsubscribe mutates | `internal/api/delivery.go` `unsubscribePage` handles GET | **OPEN** |
+| 19 | API key scopes unenforced | `internal/api/server.go` has `/api/v1/api-keys` routes with `auth.RoleOwner, auth.RoleAdmin` middleware, but no middleware checks API key on incoming requests | **OPEN** |
+
+### Phase 6 — Production: NOT STARTED
+
+| # | Gap | Evidence | Status |
+|---|-----|----------|--------|
+| 14 | No RLS | No `CREATE POLICY` statements in any migration | **OPEN** |
+| 16 | No billing service | No `services/billing/` directory; billing page uses hardcoded `demo-data.ts` | **OPEN** |
+| 17 | No automation service | No `services/automation/` directory; automations page uses `fallbackAutomations` hardcoded array | **OPEN** |
+| 18 | No tracking service | Tracking handled by legacy API `/t/*` routes | **OPEN** |
+| 19 | No bounce/complaint service | Handled by legacy API webhook routes without auth | **OPEN** |
+| 20 | No domain/deliverability service | Handled by legacy API `/api/v1/domains/*` routes | **OPEN** |
+| 21 | No delivery orchestration service | Handled by legacy worker | **OPEN** |
+
+### Static/inert pages (verified by reading source):
+
+| Page | Evidence | Status |
+|------|----------|--------|
+| Settings | `apps/web/app/(dashboard)/settings/page.tsx` — hardcoded team members (Tola Adeyemi, Maya Chen, etc.), workspace name defaults to "Sendwise", save buttons have no API calls | **STATIC-MOCK** |
+| Billing | `apps/web/app/(dashboard)/billing/page.tsx` — hardcoded `invoices`, `usage`, `plans` arrays; credit card "Visa ending in 4242" | **STATIC-MOCK** |
+| Automations | `apps/web/app/(dashboard)/automations/page.tsx` — hardcoded `fallbackAutomations` array | **STATIC-MOCK** |
+| Forms | `apps/web/app/(dashboard)/forms/page.tsx` — hardcoded `forms` array | **STATIC-MOCK** |
+| Campaign editor | `apps/web/app/(dashboard)/campaigns/[id]/editor/page.tsx` — hardcoded `campaigns`, `templateBlocks` arrays | **STATIC-MOCK** |
