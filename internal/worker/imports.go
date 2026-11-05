@@ -144,9 +144,14 @@ func (w *Worker) processContactImport(ctx context.Context, job *contactImportJob
 		return w.failContactImport(ctx, job, fmt.Sprintf("CSV imports are limited to %d rows.", contacts.MaxCSVImportRows))
 	}
 	job.TotalRows = totalRows
-	reader, _, err := contacts.NewCSVReader(bytes.NewReader(job.SourceData), &mapping)
+	reader, resolved, err := contacts.NewCSVReader(bytes.NewReader(job.SourceData), &mapping)
 	if err != nil {
 		return w.failContactImport(ctx, job, "The saved CSV or column mapping is invalid.")
+	}
+	// Account for header row in row numbering
+	headerOffset := 0
+	if resolved.HasHeader != nil && *resolved.HasHeader {
+		headerOffset = 1
 	}
 
 	rowNumber := 0
@@ -178,7 +183,7 @@ func (w *Worker) processContactImport(ctx context.Context, job *contactImportJob
 		rowsInCheckpoint++
 		if readErr != nil {
 			job.Invalid++
-			appendImportError(&rowErrors, rowNumber, "Invalid CSV row.")
+			appendImportError(&rowErrors, rowNumber+headerOffset, "Invalid CSV row.")
 		} else {
 			batch = append(batch, row)
 		}
