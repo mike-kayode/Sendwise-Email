@@ -38,7 +38,10 @@ export default function CampaignPreviewPage() {
   });
   const listsQuery = useQuery({
     queryKey: ["lists"],
-    queryFn: async () => apiFetch<ContactList[]>("/lists"),
+    queryFn: async () => {
+      const res = await apiFetch<{ data: ContactList[] | null }>("/lists");
+      return res.data ?? [];
+    },
   });
 
   const campaign = campaignQuery.data;

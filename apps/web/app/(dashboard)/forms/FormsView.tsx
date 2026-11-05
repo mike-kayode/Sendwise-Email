@@ -9,7 +9,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { apiFetch, type ContactImport } from "@/lib/auth";
-import { formatNumber } from "@/lib/utils";
+import { formatNumber, formatDate } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
 
 export default function FormsView() {
@@ -18,13 +18,13 @@ export default function FormsView() {
   const formsQuery = useQuery({
     queryKey: ["contact-lists"],
     queryFn: async () => {
-      const res = await apiFetch<{ data: any[] }>("/lists");
+      const res = await apiFetch<{ data: any[] | null }>("/lists");
       return res.data ?? [];
     },
   });
 
   const forms = formsQuery.data ?? [];
-  const totalSubmissions = forms.reduce((sum: number, f: any) => sum + (f.subscriber_count ?? 0), 0);
+  const totalSubmissions = forms.reduce((sum: number, f: any) => sum + (f.contact_count ?? 0), 0);
 
   if (formsQuery.isLoading) {
     return (
@@ -83,11 +83,11 @@ export default function FormsView() {
                 <div className="grid grid-cols-2 gap-4 rounded-lg bg-slate-50 p-4 text-sm">
                   <div>
                     <p className="text-xs text-slate-500">Subscribers</p>
-                    <p className="text-lg font-semibold text-slate-900">{formatNumber(form.subscriber_count ?? 0)}</p>
+                    <p className="text-lg font-semibold text-slate-900">{formatNumber(form.contact_count ?? 0)}</p>
                   </div>
                   <div>
                     <p className="text-xs text-slate-500">Created</p>
-                    <p className="text-sm font-medium text-slate-900">{form.created_at}</p>
+                    <p className="text-sm font-medium text-slate-900">{formatDate(form.created_at)}</p>
                   </div>
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">

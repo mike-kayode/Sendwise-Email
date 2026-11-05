@@ -27,7 +27,10 @@ export default function DomainsPage() {
 
   const domainsQuery = useQuery({
     queryKey: ["domains"],
-    queryFn: async () => apiFetch<SendingDomain[]>("/domains"),
+    queryFn: async () => {
+      const res = await apiFetch<{ data: SendingDomain[] | null }>("/domains");
+      return res.data ?? [];
+    },
   });
 
   const domains = domainsQuery.data ?? [];

@@ -46,11 +46,17 @@ export default function NewCampaignPage() {
 
   const listsQuery = useQuery({
     queryKey: ["lists"],
-    queryFn: async () => apiFetch<ContactList[]>("/lists"),
+    queryFn: async () => {
+      const res = await apiFetch<{ data: ContactList[] | null }>("/lists");
+      return res.data ?? [];
+    },
   });
   const domainsQuery = useQuery({
     queryKey: ["domains"],
-    queryFn: async () => apiFetch<SendingDomain[]>("/domains"),
+    queryFn: async () => {
+      const res = await apiFetch<{ data: SendingDomain[] | null }>("/domains");
+      return res.data ?? [];
+    },
   });
 
   const lists = listsQuery.data ?? [];

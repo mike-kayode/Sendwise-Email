@@ -77,6 +77,12 @@ func (s *Server) loadCampaign(ctx context.Context, id, organizationID string) (*
 func (s *Server) listCampaigns(w http.ResponseWriter, r *http.Request) {
 	orgID := s.organizationID(r)
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	// Clients use status=all to mean "no status filter" (campaigns tabs,
+	// automations view). Without this the filter matches nothing and every
+	// unfiltered list renders empty.
+	if strings.EqualFold(status, "all") {
+		status = ""
+	}
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	limit, offset := pagination(r)
 

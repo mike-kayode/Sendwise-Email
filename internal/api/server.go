@@ -72,6 +72,9 @@ func (s *Server) Handler() http.Handler {
 		if len(roles) > 0 {
 			next = auth.RequireRoles(roles...)(next)
 		}
+		// Order matters: tokens middleware runs first (validates the JWT and
+		// stores claims), then the FK self-heal sees those claims, then roles.
+		next = s.ensureActorMiddleware(next)
 		return s.tokens.Middleware(next)
 	}
 	audienceManagers := []string{auth.RoleOwner, auth.RoleAdmin, auth.RoleManager}

@@ -27,7 +27,10 @@ export default function SegmentsPage() {
 
   const segmentsQuery = useQuery({
     queryKey: ["segments"],
-    queryFn: async () => apiFetch<Segment[]>("/segments"),
+    queryFn: async () => {
+      const res = await apiFetch<{ data: Segment[] | null }>("/segments");
+      return res.data ?? [];
+    },
   });
 
   const segments = segmentsQuery.data ?? [];
@@ -42,14 +45,6 @@ export default function SegmentsPage() {
         />
       </div>
     );
-  }
-
-  if (segmentsQuery.error) {
-    toast({
-      title: "Unable to load segments",
-      description: segmentsQuery.error.message,
-      variant: "destructive",
-    });
   }
 
   const handleCreateSegment = async () => {
@@ -86,6 +81,12 @@ export default function SegmentsPage() {
           </button>
         }
       />
+
+      {segmentsQuery.error ? (
+        <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+          Unable to load segments: {(segmentsQuery.error as Error).message}
+        </div>
+      ) : null}
 
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">

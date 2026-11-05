@@ -25,7 +25,10 @@ export default function TagsPage() {
 
   const tagsQuery = useQuery({
     queryKey: ["tags"],
-    queryFn: async () => apiFetch<ContactTag[]>("/tags"),
+    queryFn: async () => {
+      const res = await apiFetch<{ data: ContactTag[] | null }>("/tags");
+      return res.data ?? [];
+    },
   });
 
   const tags = tagsQuery.data ?? [];
@@ -40,14 +43,6 @@ export default function TagsPage() {
         />
       </div>
     );
-  }
-
-  if (tagsQuery.error) {
-    toast({
-      title: "Unable to load tags",
-      description: tagsQuery.error.message,
-      variant: "destructive",
-    });
   }
 
   const handleCreateTag = async () => {
@@ -86,6 +81,12 @@ export default function TagsPage() {
           </button>
         }
       />
+
+      {tagsQuery.error ? (
+        <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+          Unable to load tags: {(tagsQuery.error as Error).message}
+        </div>
+      ) : null}
 
       <div className="grid gap-5 lg:grid-cols-3">
         <div className="space-y-3 lg:col-span-2">

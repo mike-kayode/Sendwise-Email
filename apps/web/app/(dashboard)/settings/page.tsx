@@ -10,7 +10,8 @@ import { Badge } from "@/components/ui/badge";
 import { Table, Thead, Tbody, Tr, Th, Td } from "@/components/ui/table";
 import { useAuthStore } from "@/stores/auth";
 import { apiFetch, type Organization, type Membership, type Invitation } from "@/lib/auth";
-import { initials } from "@/lib/utils";
+import { formatDate, initials } from "@/lib/utils";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
 const sections = [
@@ -34,28 +35,73 @@ export default function SettingsPage() {
   const [orgSlug, setOrgSlug] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState("viewer");
+  const [inviting, setInviting] = useState(false);
 
   useEffect(() => {
     loadData();
   }, []);
 
-  async function loadData() {
-    setLoading(true);
+  async function loadData(showSpinner = true) {
+    if (showSpinner) setLoading(true);
     try {
-      const [orgData, membersData, invitationsData] = await Promise.all([
-        apiFetch<Organization>(`/organizations/${organization?.id ?? ""}`),
-        apiFetch<Membership[]>(`/members`),
-        apiFetch<Invitation[]>(`/invitations`),
+      // The token is scoped to one organization; fall back to the membership
+      // list when the auth store has not hydrated the org id yet.
+      const orgPromise = organization?.id
+        ? apiFetch<Organization>(`/organizations/${organization.id}`)
+        : apiFetch<{ data: { organization_id: string; name: string; slug: string }[] | null }>(
+            "/organizations",
+          ).then((res) => {
+            const first = (res.data ?? [])[0];
+            if (!first) throw new Error("No workspace found for this account.");
+            return { id: first.organization_id, name: first.name, slug: first.slug } as Organization;
+          });
+      const [orgData, membersRes, invitationsRes] = await Promise.all([
+        orgPromise,
+        apiFetch<{ data: Membership[] | null }>("/members"),
+        apiFetch<{ data: Invitation[] | null }>("/invitations"),
       ]);
       setOrg(orgData);
-      setMembers(membersData);
-      setInvitations(invitationsData);
+      setMembers(membersRes.data ?? []);
+      setInvitations(invitationsRes.data ?? []);
       setOrgName(orgData.name);
       setOrgSlug(orgData.slug);
     } catch (err: any) {
       toast({ title: "Unable to load settings", description: err?.message ?? "Unknown error", variant: "destructive" });
     } finally {
-      setLoading(false);
+      if (showSpinner) setLoading(false);
+    }
+  }
+
+  async function handleInvite() {
+    const email = inviteEmail.trim();
+    if (!email || inviting) return;
+    setInviting(true);
+    try {
+      await apiFetch("/invitations", {
+        method: "POST",
+        body: JSON.stringify({ email, role: inviteRole }),
+      });
+      setInviteEmail("");
+      setInviteOpen(false);
+      toast({ title: "Invitation sent", description: `An invitation was sent to ${email}.` });
+      await loadData(false);
+    } catch (err: any) {
+      toast({ title: "Could not send invitation", description: err?.message ?? "Unknown error", variant: "destructive" });
+    } finally {
+      setInviting(false);
+    }
+  }
+
+  async function handleRevoke(id: string) {
+    try {
+      await apiFetch(`/invitations/${id}`, { method: "DELETE" });
+      toast({ title: "Invitation revoked" });
+      await loadData(false);
+    } catch (err: any) {
+      toast({ title: "Could not revoke invitation", description: err?.message ?? "Unknown error", variant: "destructive" });
     }
   }
 
@@ -141,7 +187,7 @@ export default function SettingsPage() {
                   {saving ? "Saving..." : "Save changes"}
                 </Button>
                 <button
-                  onClick={loadData}
+                  onClick={() => void loadData()}
                   disabled={saving}
                   className="rounded p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
                   aria-label="Refresh"
@@ -201,7 +247,7 @@ export default function SettingsPage() {
                 <CardTitle>Team</CardTitle>
                 <CardDescription>Invite teammates and control their access.</CardDescription>
               </div>
-              <Button size="sm">
+              <Button size="sm" onClick={() => setInviteOpen(true)}>
                 <Plus className="h-3.5 w-3.5" /> Invite
               </Button>
             </CardHeader>
@@ -220,12 +266,14 @@ export default function SettingsPage() {
                     <Tr key={member.user_id}>
                       <Td>
                         <div className="flex items-center gap-2.5">
-                          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
-                            {initials(member.user_id)}
+                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
+                            {initials(member.user_id.slice(0, 8))}
                           </span>
                           <div>
-                            <p className="font-medium text-slate-900">{member.user_id}</p>
-                            <p className="text-xs text-slate-500">{member.organization_id}</p>
+                            <p className="font-medium text-slate-900" title={member.user_id}>
+                              {member.user_id.slice(0, 8)}…
+                            </p>
+                            <p className="text-xs text-slate-500">Joined {formatDate(member.created_at)}</p>
                           </div>
                         </div>
                       </Td>
@@ -267,7 +315,10 @@ export default function SettingsPage() {
                             <Badge variant="outline">{inv.status}</Badge>
                           </Td>
                           <Td className="text-right">
-                            <button className="text-xs font-medium text-rose-600 hover:text-rose-500 disabled:opacity-50" disabled>
+                            <button
+                              onClick={() => void handleRevoke(inv.id)}
+                              className="text-xs font-medium text-rose-600 hover:text-rose-500 disabled:opacity-50"
+                            >
                               Revoke
                             </button>
                           </Td>
@@ -346,6 +397,52 @@ export default function SettingsPage() {
           </Card>
         </div>
       </div>
+
+      <Dialog open={inviteOpen} onOpenChange={setInviteOpen}>
+        <DialogContent>
+          <DialogTitle className="text-base font-semibold text-slate-900">Invite teammate</DialogTitle>
+          <DialogDescription>
+            They will receive an email invitation to join {org?.name ?? "your workspace"}.
+          </DialogDescription>
+          <div className="space-y-3">
+            <div>
+              <label htmlFor="invite-email" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Email address <span className="text-rose-500">*</span>
+              </label>
+              <Input
+                id="invite-email"
+                type="email"
+                placeholder="teammate@company.com"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleInvite();
+                }}
+              />
+            </div>
+            <div>
+              <label htmlFor="invite-role" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Role
+              </label>
+              <Select id="invite-role" value={inviteRole} onChange={(e) => setInviteRole(e.target.value)}>
+                <option value="admin">Admin — full access</option>
+                <option value="manager">Manager — manage campaigns and audience</option>
+                <option value="author">Author — create and edit campaigns</option>
+                <option value="analyst">Analyst — read-only plus reports</option>
+                <option value="viewer">Viewer — read-only</option>
+              </Select>
+            </div>
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="secondary" onClick={() => setInviteOpen(false)} disabled={inviting}>
+              Cancel
+            </Button>
+            <Button onClick={() => void handleInvite()} disabled={!inviteEmail.trim() || inviting}>
+              {inviting ? "Sending..." : "Send invitation"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

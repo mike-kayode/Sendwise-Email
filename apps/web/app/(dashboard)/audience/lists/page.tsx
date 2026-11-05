@@ -7,6 +7,9 @@ import { PageHeader } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, Thead, Tbody, Tr, Th, Td } from "@/components/ui/table";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { Input, Textarea } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/auth";
 import { formatNumber } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
@@ -23,11 +26,16 @@ type ContactList = {
 export default function ListsPage() {
   const [newListName, setNewListName] = useState("");
   const [newListDesc, setNewListDesc] = useState("");
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
   const { toast } = useToast();
 
   const listsQuery = useQuery({
     queryKey: ["lists"],
-    queryFn: async () => apiFetch<ContactList[]>("/lists"),
+    queryFn: async () => {
+      const res = await apiFetch<{ data: ContactList[] | null }>("/lists");
+      return res.data ?? [];
+    },
   });
 
   const lists = listsQuery.data ?? [];
@@ -44,16 +52,9 @@ export default function ListsPage() {
     );
   }
 
-  if (listsQuery.error) {
-    toast({
-      title: "Unable to load lists",
-      description: listsQuery.error.message,
-      variant: "destructive",
-    });
-  }
-
   const handleCreateList = async () => {
-    if (!newListName.trim()) return;
+    if (!newListName.trim() || creating) return;
+    setCreating(true);
     try {
       await apiFetch("/lists", {
         method: "POST",
@@ -61,6 +62,7 @@ export default function ListsPage() {
       });
       setNewListName("");
       setNewListDesc("");
+      setIsCreateOpen(false);
       void listsQuery.refetch();
       toast({ title: "List created", description: "Your audience list is ready." });
     } catch (err: any) {
@@ -69,6 +71,8 @@ export default function ListsPage() {
         description: err?.message ?? "Unknown error",
         variant: "destructive",
       });
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -81,12 +85,18 @@ export default function ListsPage() {
         actions={
           <button
             className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-500"
-            onClick={() => toast({ title: "Create list", description: "Use the form below." })}
+            onClick={() => setIsCreateOpen(true)}
           >
             <Plus className="h-4 w-4" /> Create list
           </button>
         }
       />
+
+      {listsQuery.error ? (
+        <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+          Unable to load lists: {(listsQuery.error as Error).message}
+        </div>
+      ) : null}
 
       <div className="mb-5 flex flex-col gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-start gap-2 text-sm text-indigo-900">
@@ -97,7 +107,7 @@ export default function ListsPage() {
         </div>
         <button
           className="text-sm font-medium text-indigo-900 underline-offset-2 hover:underline"
-          onClick={() => toast({ title: "Create list", description: "Use the form below." })}
+          onClick={() => setIsCreateOpen(true)}
         >
           Create new list
         </button>
@@ -180,6 +190,51 @@ export default function ListsPage() {
           </Table>
         </Card>
       </div>
+
+      <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+        <DialogContent>
+          <DialogTitle className="text-base font-semibold text-slate-900">Create list</DialogTitle>
+          <DialogDescription>
+            Lists group contacts so campaigns and automations can target them.
+          </DialogDescription>
+          <div className="space-y-3">
+            <div>
+              <label htmlFor="list-name" className="mb-1.5 block text-sm font-medium text-slate-700">
+                List name <span className="text-rose-500">*</span>
+              </label>
+              <Input
+                id="list-name"
+                placeholder="e.g. Newsletter subscribers"
+                value={newListName}
+                onChange={(e) => setNewListName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleCreateList();
+                }}
+              />
+            </div>
+            <div>
+              <label htmlFor="list-desc" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Description <span className="font-normal text-slate-400">(optional)</span>
+              </label>
+              <Textarea
+                id="list-desc"
+                placeholder="Who belongs in this list?"
+                value={newListDesc}
+                onChange={(e) => setNewListDesc(e.target.value)}
+                rows={3}
+              />
+            </div>
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="secondary" onClick={() => setIsCreateOpen(false)} disabled={creating}>
+              Cancel
+            </Button>
+            <Button onClick={() => void handleCreateList()} disabled={!newListName.trim() || creating}>
+              {creating ? "Creating..." : "Create list"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
