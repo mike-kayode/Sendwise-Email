@@ -11,22 +11,22 @@ import (
 )
 
 type apiKeyInput struct {
-	Name       string   `json:"name"`
-	Scopes     []string `json:"scopes"`
-	ExpiresAt  string   `json:"expires_at,omitempty"`
+	Name      string   `json:"name"`
+	Scopes    []string `json:"scopes"`
+	ExpiresAt string   `json:"expires_at,omitempty"`
 }
 
 type apiKeyResponse struct {
-	ID             string     `json:"id"`
-	OrganizationID string     `json:"organization_id"`
-	Name           string     `json:"name"`
-	KeyPrefix      string     `json:"key_prefix"`
-	Scopes         []string   `json:"scopes"`
-	LastUsedAt     *string    `json:"last_used_at,omitempty"`
-	ExpiresAt      *string    `json:"expires_at,omitempty"`
-	RevokedAt      *string    `json:"revoked_at,omitempty"`
-	CreatedAt      string     `json:"created_at"`
-	PlainKey       string     `json:"plain_key,omitempty"`
+	ID             string   `json:"id"`
+	OrganizationID string   `json:"organization_id"`
+	Name           string   `json:"name"`
+	KeyPrefix      string   `json:"key_prefix"`
+	Scopes         []string `json:"scopes"`
+	LastUsedAt     *string  `json:"last_used_at,omitempty"`
+	ExpiresAt      *string  `json:"expires_at,omitempty"`
+	RevokedAt      *string  `json:"revoked_at,omitempty"`
+	CreatedAt      string   `json:"created_at"`
+	PlainKey       string   `json:"plain_key,omitempty"`
 }
 
 func (s *Server) listAPIKeys(w http.ResponseWriter, r *http.Request) {

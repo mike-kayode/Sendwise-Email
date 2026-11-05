@@ -34,8 +34,8 @@ type Worker struct {
 	logger    *slog.Logger
 	limiter   *rate.Limiter
 
-	domainMu         sync.Mutex
-	domainInFlight   map[string]int
+	domainMu       sync.Mutex
+	domainInFlight map[string]int
 }
 
 type jobRow struct {

@@ -11,41 +11,41 @@ import (
 )
 
 type Config struct {
-	Env                   string
-	HTTPAddr              string
-	WorkerMetricsAddr     string
-	AppBaseURL            string
-	APIBaseURL            string
-	TrackingBaseURL       string
-	DatabaseURL           string
-	RedisURL              string
-	NATSURL               string
-	MigrationsDir         string
-	AutoMigrate           bool
-	JWTSecret             string
-	JWTIssuer             string
-	AccessTokenTTL        time.Duration
-	SMTPAddr              string
-	SMTPHost              string
-	SMTPUsername          string
-	SMTPPassword          string
-	SMTPFrom              string
-	DKIMSelector          string
-	SendingRate           int
-	MaxDeliveryAttempts   int
-	SchedulerInterval     time.Duration
-	MaxMessageAge         time.Duration
-	MaxDailyEmails        int
-	MaxBounceRate         float64
-	MaxComplaintRate      float64
+	Env                    string
+	HTTPAddr               string
+	WorkerMetricsAddr      string
+	AppBaseURL             string
+	APIBaseURL             string
+	TrackingBaseURL        string
+	DatabaseURL            string
+	RedisURL               string
+	NATSURL                string
+	MigrationsDir          string
+	AutoMigrate            bool
+	JWTSecret              string
+	JWTIssuer              string
+	AccessTokenTTL         time.Duration
+	SMTPAddr               string
+	SMTPHost               string
+	SMTPUsername           string
+	SMTPPassword           string
+	SMTPFrom               string
+	DKIMSelector           string
+	SendingRate            int
+	MaxDeliveryAttempts    int
+	SchedulerInterval      time.Duration
+	MaxMessageAge          time.Duration
+	MaxDailyEmails         int
+	MaxBounceRate          float64
+	MaxComplaintRate       float64
 	DomainConcurrencyLimit int
-	CORSOrigins           []string
-	RequireVerifiedDomain bool
-	ResendAPIKey          string
-	ResendFromEmail       string
-	ResendFromName        string
-	SuperAdminEmails      []string
-	WebhookSecret         string
+	CORSOrigins            []string
+	RequireVerifiedDomain  bool
+	ResendAPIKey           string
+	ResendFromEmail        string
+	ResendFromName         string
+	SuperAdminEmails       []string
+	WebhookSecret          string
 }
 
 func Load() (Config, error) {
@@ -113,41 +113,41 @@ func load(lookup func(string) string) (Config, error) {
 	webhookSecret := getenv(lookup, "WEBHOOK_SECRET", "")
 
 	cfg := Config{
-		Env:                   env,
-		HTTPAddr:              getenv(lookup, "HTTP_ADDR", ":8080"),
-		WorkerMetricsAddr:     getenv(lookup, "WORKER_METRICS_ADDR", ":9091"),
-		AppBaseURL:            getenv(lookup, "APP_BASE_URL", "http://localhost:3000"),
-		APIBaseURL:            getenv(lookup, "API_BASE_URL", "http://localhost:8080"),
-		TrackingBaseURL:       getenv(lookup, "TRACKING_BASE_URL", "http://localhost:8080"),
-		DatabaseURL:           getenv(lookup, "DATABASE_URL", "postgres://email:email@localhost:5432/email?sslmode=disable"),
-		RedisURL:              getenv(lookup, "REDIS_URL", "redis://localhost:6379/0"),
-		NATSURL:               getenv(lookup, "NATS_URL", "nats://localhost:4222"),
-		MigrationsDir:         getenv(lookup, "MIGRATIONS_DIR", "./migrations"),
-		AutoMigrate:           autoMigrate,
-		JWTSecret:             getenv(lookup, "JWT_SECRET", ""),
-		JWTIssuer:             getenv(lookup, "JWT_ISSUER", "email-platform"),
-		AccessTokenTTL:        accessTokenTTL,
-		SMTPAddr:              getenv(lookup, "SMTP_ADDR", "localhost:587"),
-		SMTPHost:              getenv(lookup, "SMTP_HOST", "localhost"),
-		SMTPUsername:          getenv(lookup, "SMTP_USERNAME", ""),
-		SMTPPassword:          getenv(lookup, "SMTP_PASSWORD", ""),
-		SMTPFrom:              getenv(lookup, "SMTP_FROM", "newsletter@example.com"),
-		DKIMSelector:          getenv(lookup, "DKIM_SELECTOR", "mail"),
-		SendingRate:           sendingRate,
-		MaxDeliveryAttempts:   maxDeliveryAttempts,
-		SchedulerInterval:     schedulerInterval,
-		MaxMessageAge:         maxMessageAge,
-		MaxDailyEmails:        maxDailyEmails,
-		MaxBounceRate:         maxBounceRate,
-		MaxComplaintRate:      maxComplaintRate,
+		Env:                    env,
+		HTTPAddr:               getenv(lookup, "HTTP_ADDR", ":8080"),
+		WorkerMetricsAddr:      getenv(lookup, "WORKER_METRICS_ADDR", ":9091"),
+		AppBaseURL:             getenv(lookup, "APP_BASE_URL", "http://localhost:3000"),
+		APIBaseURL:             getenv(lookup, "API_BASE_URL", "http://localhost:8080"),
+		TrackingBaseURL:        getenv(lookup, "TRACKING_BASE_URL", "http://localhost:8080"),
+		DatabaseURL:            getenv(lookup, "DATABASE_URL", "postgres://email:email@localhost:5432/email?sslmode=disable"),
+		RedisURL:               getenv(lookup, "REDIS_URL", "redis://localhost:6379/0"),
+		NATSURL:                getenv(lookup, "NATS_URL", "nats://localhost:4222"),
+		MigrationsDir:          getenv(lookup, "MIGRATIONS_DIR", "./migrations"),
+		AutoMigrate:            autoMigrate,
+		JWTSecret:              getenv(lookup, "JWT_SECRET", ""),
+		JWTIssuer:              getenv(lookup, "JWT_ISSUER", "email-platform"),
+		AccessTokenTTL:         accessTokenTTL,
+		SMTPAddr:               getenv(lookup, "SMTP_ADDR", "localhost:587"),
+		SMTPHost:               getenv(lookup, "SMTP_HOST", "localhost"),
+		SMTPUsername:           getenv(lookup, "SMTP_USERNAME", ""),
+		SMTPPassword:           getenv(lookup, "SMTP_PASSWORD", ""),
+		SMTPFrom:               getenv(lookup, "SMTP_FROM", "newsletter@example.com"),
+		DKIMSelector:           getenv(lookup, "DKIM_SELECTOR", "mail"),
+		SendingRate:            sendingRate,
+		MaxDeliveryAttempts:    maxDeliveryAttempts,
+		SchedulerInterval:      schedulerInterval,
+		MaxMessageAge:          maxMessageAge,
+		MaxDailyEmails:         maxDailyEmails,
+		MaxBounceRate:          maxBounceRate,
+		MaxComplaintRate:       maxComplaintRate,
 		DomainConcurrencyLimit: domainConcurrencyLimit,
-		CORSOrigins:           splitCSV(getenv(lookup, "CORS_ORIGINS", "http://localhost:3000")),
-		RequireVerifiedDomain: requireVerifiedDomain,
-		ResendAPIKey:          resendAPIKey,
-		ResendFromEmail:       resendFromEmail,
-		ResendFromName:        resendFromName,
-		SuperAdminEmails:      superAdminEmails,
-		WebhookSecret:         webhookSecret,
+		CORSOrigins:            splitCSV(getenv(lookup, "CORS_ORIGINS", "http://localhost:3000")),
+		RequireVerifiedDomain:  requireVerifiedDomain,
+		ResendAPIKey:           resendAPIKey,
+		ResendFromEmail:        resendFromEmail,
+		ResendFromName:         resendFromName,
+		SuperAdminEmails:       superAdminEmails,
+		WebhookSecret:          webhookSecret,
 	}
 
 	if cfg.JWTSecret == "" {

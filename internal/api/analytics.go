@@ -135,8 +135,8 @@ func (s *Server) campaignReport(w http.ResponseWriter, r *http.Request) {
 	defer linkRows.Close()
 
 	type linkStat struct {
-		URL   string `json:"url"`
-		Clicks int64 `json:"clicks"`
+		URL    string `json:"url"`
+		Clicks int64  `json:"clicks"`
 	}
 	topLinks := make([]linkStat, 0)
 	for linkRows.Next() {

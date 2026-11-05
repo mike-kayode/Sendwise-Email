@@ -9,8 +9,8 @@ import (
 type BounceType string
 
 const (
-	BounceHard   BounceType = "hard"
-	BounceSoft   BounceType = "soft"
+	BounceHard    BounceType = "hard"
+	BounceSoft    BounceType = "soft"
 	BounceBlocked BounceType = "blocked"
 )
 

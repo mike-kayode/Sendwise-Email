@@ -15,10 +15,10 @@ import (
 )
 
 var (
-	ErrNotFound        = errors.New("campaign not found")
-	ErrInvalidState    = errors.New("campaign is not in a sendable state")
-	ErrSegmentNotFound = errors.New("campaign segment not found")
-	ErrInvalidSegment  = errors.New("campaign segment rules are invalid")
+	ErrNotFound         = errors.New("campaign not found")
+	ErrInvalidState     = errors.New("campaign is not in a sendable state")
+	ErrSegmentNotFound  = errors.New("campaign segment not found")
+	ErrInvalidSegment   = errors.New("campaign segment rules are invalid")
 	ErrDomainUnverified = errors.New("sending domain is not verified")
 )
 
@@ -27,10 +27,10 @@ type Publisher interface {
 }
 
 type Service struct {
-	pool                 *pgxpool.Pool
-	publisher            Publisher
-	logger               *slog.Logger
-	maxAttempts          int
+	pool                  *pgxpool.Pool
+	publisher             Publisher
+	logger                *slog.Logger
+	maxAttempts           int
 	requireVerifiedDomain bool
 }
 

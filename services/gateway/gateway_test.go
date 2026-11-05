@@ -223,12 +223,12 @@ func TestGatewayHealthAndCORS(t *testing.T) {
 func setProdEnv(t *testing.T, env string, overrides map[string]string) {
 	t.Helper()
 	base := map[string]string{
-		"APP_ENV":         env,
-		"IDENTITY_URL":    "http://identity:8080",
-		"WORKSPACE_URL":   "http://workspace:8080",
-		"LEGACY_API_URL":  "http://api:8080",
-		"SERVICE_TOKEN":   "test-service-token",
-		"CORS_ORIGINS":    "http://localhost:3000",
+		"APP_ENV":                      env,
+		"IDENTITY_URL":                 "http://identity:8080",
+		"WORKSPACE_URL":                "http://workspace:8080",
+		"LEGACY_API_URL":               "http://api:8080",
+		"SERVICE_TOKEN":                "test-service-token",
+		"CORS_ORIGINS":                 "http://localhost:3000",
 		"GATEWAY_AUTH_RATE_PER_MINUTE": "60",
 		"GATEWAY_AUTH_BURST":           "20",
 	}

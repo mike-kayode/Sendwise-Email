@@ -49,34 +49,34 @@ type suppressionItem struct {
 }
 
 type bounceWebhook struct {
-	Event           string `json:"event"`
-	Email           string `json:"email"`
-	Domain          string `json:"domain"`
-	SMTPCode        string `json:"smtp_code"`
-	SMTPEnhanced    string `json:"smtp_enhanced"`
-	Reason          string `json:"reason"`
-	CampaignID      string `json:"campaign_id,omitempty"`
-	JobID           string `json:"job_id,omitempty"`
-	MessageID       string `json:"message_id,omitempty"`
+	Event        string `json:"event"`
+	Email        string `json:"email"`
+	Domain       string `json:"domain"`
+	SMTPCode     string `json:"smtp_code"`
+	SMTPEnhanced string `json:"smtp_enhanced"`
+	Reason       string `json:"reason"`
+	CampaignID   string `json:"campaign_id,omitempty"`
+	JobID        string `json:"job_id,omitempty"`
+	MessageID    string `json:"message_id,omitempty"`
 }
 
 type complaintWebhook struct {
-	Event          string `json:"event"`
-	Email          string `json:"email"`
-	Domain         string `json:"domain"`
-	FeedbackType   string `json:"feedback_type"`
-	CampaignID     string `json:"campaign_id,omitempty"`
-	MessageID      string `json:"message_id,omitempty"`
+	Event        string `json:"event"`
+	Email        string `json:"email"`
+	Domain       string `json:"domain"`
+	FeedbackType string `json:"feedback_type"`
+	CampaignID   string `json:"campaign_id,omitempty"`
+	MessageID    string `json:"message_id,omitempty"`
 }
 
 type DeliveryHandler struct {
-	pool           *pgxpool.Pool
-	tokens         *auth.Manager
-	logger         *slog.Logger
-	replayer       deliveryService
-	publisher      publisher
-	webhookSecret  string
-	idempotency    *idempotencyStore
+	pool          *pgxpool.Pool
+	tokens        *auth.Manager
+	logger        *slog.Logger
+	replayer      deliveryService
+	publisher     publisher
+	webhookSecret string
+	idempotency   *idempotencyStore
 }
 
 type publisher interface {
@@ -85,13 +85,13 @@ type publisher interface {
 
 func NewDeliveryHandler(pool *pgxpool.Pool, tokens *auth.Manager, logger *slog.Logger, replayer deliveryService, publisher publisher, webhookSecret string) *DeliveryHandler {
 	return &DeliveryHandler{
-		pool:           pool,
-		tokens:         tokens,
-		logger:         logger,
-		replayer:       replayer,
-		publisher:      publisher,
-		webhookSecret:  webhookSecret,
-		idempotency:    newIdempotencyStore(),
+		pool:          pool,
+		tokens:        tokens,
+		logger:        logger,
+		replayer:      replayer,
+		publisher:     publisher,
+		webhookSecret: webhookSecret,
+		idempotency:   newIdempotencyStore(),
 	}
 }
 
@@ -398,7 +398,8 @@ func (h *DeliveryHandler) organizationID(r *http.Request) string {
 // ------------------------------------------------------------
 
 // webhookSignature parses the X-Webhook-Signature header of the form:
-//   t=<timestamp>, v1=<hmac_hex>
+//
+//	t=<timestamp>, v1=<hmac_hex>
 type webhookSignature struct {
 	Timestamp int64
 	HMAC      string
@@ -467,17 +468,17 @@ func (h *DeliveryHandler) verifyWebhookSignature(body []byte, signatureHeader st
 
 // idempotencyEntry records a single processed webhook idempotency key with expiry.
 type idempotencyEntry struct {
-	key      string
-	expires  time.Time
+	key     string
+	expires time.Time
 }
 
 // idempotencyStore is a small in-memory store with TTL-based expiration.
 // Suitable for single-instance deployments. Multi-instance deployments should
 // replace this with Redis or a database-backed store.
 type idempotencyStore struct {
-	mu     sync.RWMutex
-	items  map[string]idempotencyEntry
-	ttl    time.Duration
+	mu    sync.RWMutex
+	items map[string]idempotencyEntry
+	ttl   time.Duration
 }
 
 func newIdempotencyStore() *idempotencyStore {
