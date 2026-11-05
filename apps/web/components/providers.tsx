@@ -37,9 +37,10 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (token && !isLoading) {
-      void me();
+      void me().catch(() => {});
     }
-  }, [token, isLoading, me]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, isLoading]);
 
   return (
     <QueryClientProvider client={client}>

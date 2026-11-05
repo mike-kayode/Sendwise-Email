@@ -1,7 +1,10 @@
+import { useCallback } from "react";
 import { useAuthStore } from "@/stores/auth";
 import { apiFetch, getAccessToken } from "@/lib/auth";
 import { loginRequest } from "@/lib/login-utils";
 import type { User, Organization } from "@/stores/auth";
+
+let meInFlight: Promise<{ user: User; organization: Organization }> | null = null;
 
 export function useAuth() {
   const token = useAuthStore((s) => s.token);
@@ -54,13 +57,23 @@ export function useAuth() {
     }
   };
 
-  const me = async () => {
-    const res = await apiFetch<{ user: User; organization: Organization }>("/auth/me");
-    const latestToken = getAccessToken() ?? token;
-    if (!latestToken) throw new Error("Authentication session is missing.");
-    setSession(latestToken, res.user, res.organization);
-    return res;
-  };
+  // Stable identity + single-flight: effects depend on `me`, so a new function
+  // every render re-ran them forever (each run updated the store and re-rendered),
+  // hammering /auth/me until the gateway rate limiter returned 429.
+  const me = useCallback(async () => {
+    if (!meInFlight) {
+      meInFlight = (async () => {
+        const res = await apiFetch<{ user: User; organization: Organization }>("/auth/me");
+        const latestToken = getAccessToken();
+        if (!latestToken) throw new Error("Authentication session is missing.");
+        useAuthStore.getState().setSession(latestToken, res.user, res.organization);
+        return res;
+      })().finally(() => {
+        meInFlight = null;
+      });
+    }
+    return meInFlight;
+  }, []);
 
   return {
     token,

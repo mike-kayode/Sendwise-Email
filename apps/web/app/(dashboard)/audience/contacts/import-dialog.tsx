@@ -27,6 +27,7 @@ import {
   ChevronLeft,
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
+import { apiFetch } from "@/lib/auth";
 import type { ContactImport } from "@/lib/auth";
 
 type ImportStep = "upload" | "map" | "preview" | "importing" | "complete";
@@ -36,9 +37,10 @@ type ImportResult = {
   status: string;
   total_rows: number;
   processed_rows: number;
-  imported_count: number;
-  skipped_count: number;
-  invalid_count: number;
+  imported: number;
+  skipped: number;
+  invalid: number;
+  last_error?: string;
   errors: Array<{ row: number; message: string }>;
 };
 
@@ -96,10 +98,6 @@ export function ImportDialog({
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const pollInterval = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const apiUrl = (path: string) => {
-    return `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000"}${path}`;
-  };
 
   const CONTACT_FIELDS: { value: ContactField; label: string }[] = [
     { value: "email", label: "Email" },
@@ -189,22 +187,13 @@ export function ImportDialog({
 
     setIsImporting(true);
     try {
-      const resp = await fetch(apiUrl("/api/v1/contacts/import"), {
+      const result = await apiFetch<{ id: string }>("/contacts/import", {
         method: "POST",
         body: formData,
-        credentials: "include",
-        cache: "no-store",
       });
-      if (!resp.ok) {
-        const eb = (await resp.json().catch(() => ({}))) as {
-          error?: { message?: string };
-        };
-        throw new Error(eb?.error?.message || "Import failed");
-      }
-      const result = (await resp.json()) as { id: string };
       setJobId(result.id);
       setStep("importing");
-      startPolling();
+      startPolling(result.id);
     } catch (err) {
       setIsImporting(false);
       toast.toast({
@@ -215,34 +204,47 @@ export function ImportDialog({
     }
   };
 
-  const startPolling = () => {
-    if (!jobId) return;
+  const startPolling = (id: string) => {
+    stopPolling();
+    let failures = 0;
+    const startedAt = Date.now();
     pollInterval.current = setInterval(async () => {
       try {
-        const res = await fetch(apiUrl(`/api/v1/contact-imports/${jobId}`), {
-          credentials: "include",
-          cache: "no-store",
-        });
-        if (!res.ok) return;
-        const result = (await res.json()) as ImportResult;
+        const result = await apiFetch<ImportResult>(`/contact-imports/${id}`);
+        failures = 0;
         setImportResult(result);
-        if (result.status === "completed" || result.status === "failed") {
+        const pending = ["queued", "pending", "processing", "running"].includes(result.status);
+        if (!pending) {
           stopPolling();
           setIsImporting(false);
           setStep("complete");
+          const ok = result.status === "completed";
           toast.toast({
-            title:
-              result.status === "completed" ? "Import complete" : "Import completed",
-            description:
-              result.status === "completed"
-                ? `Imported ${result.imported_count} contacts (${result.skipped_count} skipped).`
-                : `Imported ${result.imported_count} contacts with ${result.invalid_count} errors.`,
-            variant: result.status === "completed" ? "default" : "destructive",
+            title: ok ? "Import complete" : "Import finished with errors",
+            description: `Imported ${result.imported} contacts (${result.skipped} skipped, ${result.invalid} invalid).`,
+            variant: ok ? "default" : "destructive",
           });
           onImportComplete?.();
+        } else if (Date.now() - startedAt > 5 * 60 * 1000) {
+          stopPolling();
+          setIsImporting(false);
+          toast.toast({
+            title: "Import is taking too long",
+            description: "It is still queued on the server. Check back shortly.",
+            variant: "destructive",
+          });
         }
       } catch (err) {
         console.error("Polling error:", err);
+        if (++failures >= 5) {
+          stopPolling();
+          setIsImporting(false);
+          toast.toast({
+            title: "Lost contact with the server",
+            description: err instanceof Error ? err.message : "Unknown error",
+            variant: "destructive",
+          });
+        }
       }
     }, 2000);
   };
@@ -494,15 +496,15 @@ export function ImportDialog({
                 </div>
                 <div className="rounded-lg border border-slate-200 p-4">
                   <p className="text-xs text-slate-500 uppercase">Imported</p>
-                  <p className="text-sm font-semibold text-emerald-600">{importResult.imported_count}</p>
+                  <p className="text-sm font-semibold text-emerald-600">{importResult.imported}</p>
                 </div>
                 <div className="rounded-lg border border-slate-200 p-4">
                   <p className="text-xs text-slate-500 uppercase">Skipped</p>
-                  <p className="text-sm font-semibold text-amber-600">{importResult.skipped_count}</p>
+                  <p className="text-sm font-semibold text-amber-600">{importResult.skipped}</p>
                 </div>
                 <div className="rounded-lg border border-slate-200 p-4">
                   <p className="text-xs text-slate-500 uppercase">Invalid</p>
-                  <p className="text-sm font-semibold text-rose-600">{importResult.invalid_count}</p>
+                  <p className="text-sm font-semibold text-rose-600">{importResult.invalid}</p>
                 </div>
               </div>
               {importResult.errors && importResult.errors.length > 0 && (
