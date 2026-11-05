@@ -84,6 +84,10 @@ jobs:
         run: npm --prefix apps/web install
       - name: Typecheck
         run: npm --prefix apps/web run typecheck
+      - name: Lint
+        run: npm --prefix apps/web run lint
+      - name: Build
+        run: npm --prefix apps/web run build
 
   docker-build:
     runs-on: ubuntu-latest
