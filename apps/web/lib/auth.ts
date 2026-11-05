@@ -229,6 +229,25 @@ export type DomainDNSRecord = {
   status: string;
 };
 
+export type CampaignReport = {
+  campaign?: Campaign;
+  recipients: { total: number; by_status: Record<string, number> };
+  events: { by_type: Record<string, number> };
+  rates: { open_rate: number; click_rate: number; bounce_rate: number };
+  top_links: { url: string; clicks: number }[];
+};
+
+export type ValidationCheck = {
+  name: string;
+  status: string; // "pass" | "warning" | "error"
+  message: string;
+};
+
+export type CampaignValidation = {
+  valid: boolean;
+  checks: ValidationCheck[];
+};
+
 export type DomainDetail = SendingDomain & {
   dns_records: DomainDNSRecord[];
 };
