@@ -12,6 +12,11 @@ set -euo pipefail
 #   ./scripts/deploy.sh rollback --yes   # DESTRUCTIVE: restore the latest DB backup
 #   ./scripts/deploy.sh production       # deploy with production env validation
 #
+# Deploy order: .env.example-vs-.env variable check -> config validation ->
+# docker compose config -q -> fresh DB backup -> build -> migrations (legacy +
+# identity + workspace) -> up --no-deps -> seven-endpoint smoke test.
+# Every step refuses to continue on failure.
+#
 # Rollback restores data only; images are not versioned. To roll back code,
 # check out the previous git tag and deploy again.
 
@@ -44,6 +49,8 @@ if [ -f "$ROOT/.env.local" ]; then
 fi
 COMPOSE+=(-f "$ROOT/docker-compose.yml" -f "$ROOT/docker-compose.microservices.yml")
 
+[ -f "$ROOT/.env.example" ] || fail ".env.example not found at $ROOT/.env.example"
+
 command -v curl >/dev/null 2>&1 || fail "curl is required for smoke tests"
 command -v docker >/dev/null 2>&1 || fail "docker is required"
 
@@ -60,6 +67,28 @@ set +a
 
 APP_ENV_VALUE="${APP_ENV:-development}"
 ENVIRONMENT="${ENVIRONMENT_ARG:-$APP_ENV_VALUE}"
+
+# Every variable name documented in .env.example must exist in .env (or the
+# .env.local override). A new required variable that reaches compose and
+# .env.example but never lands in .env is exactly the gap that caused the
+# last outage: containers start, fail config validation, dashboard down.
+validate_env_keys() {
+  log "Comparing .env.example variable names against .env..."
+  local missing
+  missing="$(
+    comm -23 \
+      <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ROOT/.env.example" | cut -d= -f1 | sort -u) \
+      <(cat \
+          <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | cut -d= -f1) \
+          <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ROOT/.env.local" 2>/dev/null | cut -d= -f1) \
+        | sort -u)
+  )"
+  if [ -n "$missing" ]; then
+    printf '%s\n' "$missing" | sed 's/^/  missing from .env: /' >&2
+    fail "add every variable above to .env (copy values from .env.example)"
+  fi
+  log "  every .env.example variable name is present"
+}
 
 validate_config() {
   log "Validating configuration (environment: $ENVIRONMENT)..."
@@ -82,6 +111,14 @@ validate_config() {
   log "Configuration validation passed"
 }
 
+# Catches interpolation errors (e.g. ${WEBHOOK_SECRET:?...} with an empty
+# value) before any container is built or started.
+check_compose_config() {
+  log "Validating compose configuration (docker compose config -q)..."
+  "${COMPOSE[@]}" config -q || fail "docker compose config is invalid"
+  log "  compose config OK"
+}
+
 take_backup() {
   local stamp dir
   stamp="$(date +%Y%m%d%H%M%S)"
@@ -97,6 +134,9 @@ take_backup() {
   local db
   for db in "${POSTGRES_DB:-email}" identity workspace; do
     "${COMPOSE[@]}" exec -T postgres pg_dump -U "${POSTGRES_USER:-email}" -d "$db" | gzip > "$dir/$db.sql.gz"
+    # pipefail already aborts on pg_dump failure; this also guards a silent
+    # zero-byte dump. Deploy refuses to continue without a real backup.
+    [ -s "$dir/$db.sql.gz" ] || fail "backup for $db is empty: $dir/$db.sql.gz"
     log "  dumped $db"
   done
   echo "$dir" > "$ROOT/backups/latest"
@@ -117,8 +157,13 @@ run_migrations() {
 }
 
 start_stack() {
-  log "Starting the combined stack..."
-  "${COMPOSE[@]}" up -d
+  # Infrastructure first (no application dependencies), then the application
+  # services with --no-deps: migrations already ran explicitly above, so the
+  # one-shot migrate jobs are not re-triggered here.
+  log "Starting infrastructure (postgres, redis, nats, stalwart)..."
+  "${COMPOSE[@]}" up -d postgres redis nats stalwart
+  log "Starting application services (--no-deps)..."
+  "${COMPOSE[@]}" up -d --no-deps api worker identity workspace gateway web caddy
   log "Stack started"
 }
 
@@ -189,6 +234,7 @@ do_rollback() {
 
 case "$COMMAND" in
   backup)
+    validate_env_keys
     validate_config
     take_backup
     ;;
@@ -199,7 +245,9 @@ case "$COMMAND" in
     do_rollback "$@"
     ;;
   deploy)
+    validate_env_keys
     validate_config
+    check_compose_config
     take_backup
     build_images
     run_migrations
