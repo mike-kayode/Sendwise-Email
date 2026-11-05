@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { Plus, Tag } from "lucide-react";
+import { Check, Plus, Tag, Trash2, X } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -21,6 +21,10 @@ type ContactTag = {
 export default function TagsPage() {
   const [newTagName, setNewTagName] = useState("");
   const [newTagColor, setNewTagColor] = useState("#4f46e5");
+  const [editingTag, setEditingTag] = useState<ContactTag | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editColor, setEditColor] = useState("");
+  const [savingTag, setSavingTag] = useState(false);
   const { toast } = useToast();
 
   const tagsQuery = useQuery({
@@ -32,6 +36,7 @@ export default function TagsPage() {
   });
 
   const tags = tagsQuery.data ?? [];
+  const colors = ["#4f46e5", "#0891b2", "#059669", "#d97706", "#db2777", "#7c3aed"];
 
   if (tagsQuery.isLoading) {
     return (
@@ -64,7 +69,50 @@ export default function TagsPage() {
     }
   };
 
-  const colors = ["#4f46e5", "#0891b2", "#059669", "#d97706", "#db2777", "#7c3aed"];
+  const startEditingTag = (tag: ContactTag) => {
+    setEditingTag(tag);
+    setEditName(tag.name);
+    setEditColor(tag.color);
+  };
+
+  const handleUpdateTag = async () => {
+    if (!editingTag || !editName.trim() || savingTag) return;
+    setSavingTag(true);
+    try {
+      await apiFetch(`/tags/${editingTag.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: editName, color: editColor }),
+      });
+      setEditingTag(null);
+      await tagsQuery.refetch();
+      toast({ title: "Tag updated", description: "Your changes have been saved." });
+    } catch (err) {
+      toast({
+        title: "Failed to update tag",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setSavingTag(false);
+    }
+  };
+
+  const handleDeleteTag = async (tag: ContactTag) => {
+    if (!window.confirm(`Delete "${tag.name}"? Contacts will remain; only this tag and its assignments will be removed.`)) {
+      return;
+    }
+    try {
+      await apiFetch(`/tags/${tag.id}`, { method: "DELETE" });
+      await tagsQuery.refetch();
+      toast({ title: "Tag deleted", description: "The contacts were not deleted." });
+    } catch (err) {
+      toast({
+        title: "Failed to delete tag",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  };
 
   return (
     <div>
@@ -75,7 +123,7 @@ export default function TagsPage() {
         actions={
           <button
             className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-500"
-            onClick={() => toast({ title: "New tag", description: "Use the form on the right." })}
+          onClick={() => document.getElementById("new-tag-name")?.focus()}
           >
             <Plus className="h-4 w-4" /> New tag
           </button>
@@ -99,6 +147,44 @@ export default function TagsPage() {
             tags.map((tag) => (
               <Card key={tag.id}>
                 <CardContent className="flex items-center gap-4 p-4">
+                  {editingTag?.id === tag.id ? (
+                    <div className="grid w-full gap-3 sm:grid-cols-[1fr_auto_auto]">
+                      <Input
+                        aria-label="Tag name"
+                        value={editName}
+                        onChange={(event) => setEditName(event.target.value)}
+                        maxLength={100}
+                      />
+                      <select
+                        aria-label="Tag color"
+                        value={editColor}
+                        onChange={(event) => setEditColor(event.target.value)}
+                        className="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm"
+                      >
+                        {colors.map((color) => (
+                          <option key={color} value={color}>{color}</option>
+                        ))}
+                      </select>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleUpdateTag()}
+                          disabled={!editName.trim() || savingTag}
+                          className="inline-flex h-10 items-center gap-1 rounded-lg bg-indigo-600 px-3 text-sm text-white disabled:opacity-50"
+                        >
+                          <Check className="h-4 w-4" /> Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingTag(null)}
+                          className="inline-flex h-10 items-center gap-1 rounded-lg px-3 text-sm text-slate-600 ring-1 ring-slate-200"
+                        >
+                          <X className="h-4 w-4" /> Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
                   <span
                     className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
                     style={{ backgroundColor: `${tag.color}1a`, color: tag.color }}
@@ -117,9 +203,23 @@ export default function TagsPage() {
                       style={{ backgroundColor: tag.color, width: `${Math.min((tag.contact_count / 100) * 100, 100)}%` }}
                     />
                   </div>
-                  <button className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50">
+                  <button
+                    type="button"
+                    onClick={() => startEditingTag(tag)}
+                    className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+                  >
                     Edit
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteTag(tag)}
+                    aria-label={`Delete ${tag.name}`}
+                    className="rounded-lg p-2 text-slate-500 hover:bg-rose-50 hover:text-rose-700"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                    </>
+                  )}
                 </CardContent>
               </Card>
             ))
@@ -133,6 +233,7 @@ export default function TagsPage() {
               Tags can be applied manually, through imports, or automatically from forms and the API.
             </p>
             <Input
+              id="new-tag-name"
               placeholder="e.g. webinar-2026"
               value={newTagName}
               onChange={(e) => setNewTagName(e.target.value)}

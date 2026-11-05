@@ -23,6 +23,14 @@ func TestContactImportWorkerPersistsPendingContactsAndResults(t *testing.T) {
 	`).Scan(&organizationID); err != nil {
 		t.Fatalf("create integration organization: %v", err)
 	}
+	var listID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO contact_lists (organization_id, name)
+		VALUES ($1, 'Import target')
+		RETURNING id
+	`, organizationID).Scan(&listID); err != nil {
+		t.Fatalf("create import target list: %v", err)
+	}
 
 	mapping := contacts.CSVColumnMapping{
 		Email:        "email",
@@ -36,10 +44,10 @@ func TestContactImportWorkerPersistsPendingContactsAndResults(t *testing.T) {
 	source := []byte("email,first_name,company,status\nada@example.test,Ada,Engines Inc,subscribed\nada@example.test,Ada,Duplicate,subscribed\nnot-an-email,Invalid,Unknown,subscribed\n")
 	var importID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO contact_imports (organization_id, file_name, source_data, mapping)
-		VALUES ($1, 'contacts.csv', $2, $3::jsonb)
+		INSERT INTO contact_imports (organization_id, file_name, source_data, mapping, list_id)
+		VALUES ($1, 'contacts.csv', $2, $3::jsonb, $4)
 		RETURNING id
-	`, organizationID, source, mappingJSON).Scan(&importID); err != nil {
+	`, organizationID, source, mappingJSON, listID).Scan(&importID); err != nil {
 		t.Fatalf("create import job: %v", err)
 	}
 
@@ -95,5 +103,18 @@ func TestContactImportWorkerPersistsPendingContactsAndResults(t *testing.T) {
 	}
 	if fields["company"] != "Engines Inc" {
 		t.Fatalf("company = %q, want Engines Inc", fields["company"])
+	}
+	var memberships int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM contact_list_members m
+		JOIN contacts c ON c.id = m.contact_id
+		WHERE m.organization_id = $1 AND m.list_id = $2
+		  AND c.email = 'ada@example.test'
+	`, organizationID, listID).Scan(&memberships); err != nil {
+		t.Fatalf("count imported list membership: %v", err)
+	}
+	if memberships != 1 {
+		t.Fatalf("list memberships = %d, want 1", memberships)
 	}
 }

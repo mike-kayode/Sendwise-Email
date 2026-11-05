@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   Dialog,
   DialogContent,
@@ -28,7 +29,15 @@ import {
 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { apiFetch } from "@/lib/auth";
-import type { ContactImport } from "@/lib/auth";
+import type { ListResponse } from "@/lib/auth";
+import {
+  autoMapCSVHeader,
+  buildCSVColumnMapping,
+  isCSVEmailValue,
+  parseCSVPreview,
+  readCSVFile,
+  type CSVContactField,
+} from "@/lib/csv-import";
 
 type ImportStep = "upload" | "map" | "preview" | "importing" | "complete";
 
@@ -44,14 +53,8 @@ type ImportResult = {
   errors: Array<{ row: number; message: string }>;
 };
 
-type ContactField =
-  | "email"
-  | "first_name"
-  | "last_name"
-  | "phone"
-  | "company"
-  | "title"
-  | "none";
+type ContactField = CSVContactField;
+type ImportList = { id: string; name: string };
 
 export function ImportDialog({
   open,
@@ -65,6 +68,11 @@ export function ImportDialog({
   const [isOpen, setIsOpen] = useState(false);
   const [step, setStep] = useState<ImportStep>("upload");
   const toast = useToast();
+  const listsQuery = useQuery({
+    queryKey: ["lists"],
+    queryFn: () => apiFetch<ListResponse<ImportList>>("/lists"),
+    enabled: isOpen,
+  });
 
   // Sync controlled open state with internal state
   useEffect(() => {
@@ -82,6 +90,8 @@ export function ImportDialog({
       setHeaders([]);
       setPreviewRows([]);
       setMapping({});
+      setListID("");
+      setCsvHasHeader(true);
       setJobId(null);
       setImportResult(null);
       setIsImporting(false);
@@ -94,6 +104,8 @@ export function ImportDialog({
   const [headers, setHeaders] = useState<string[]>([]);
   const [previewRows, setPreviewRows] = useState<string[][]>([]);
   const [mapping, setMapping] = useState<Record<string, ContactField>>({});
+  const [csvHasHeader, setCsvHasHeader] = useState(true);
+  const [listID, setListID] = useState("");
   const [jobId, setJobId] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [isImporting, setIsImporting] = useState(false);
@@ -106,10 +118,13 @@ export function ImportDialog({
     { value: "phone", label: "Phone" },
     { value: "company", label: "Company" },
     { value: "title", label: "Job Title" },
+    { value: "city", label: "City" },
+    { value: "country", label: "Country" },
+    { value: "custom", label: "Custom field" },
     { value: "none", label: "Skip" },
   ];
 
-  const handleFileSelect = (selectedFile: File) => {
+  const handleFileSelect = async (selectedFile: File) => {
     if (!selectedFile.name.toLowerCase().endsWith(".csv")) {
       setFileError("Please upload a CSV file (.csv extension).");
       return;
@@ -120,31 +135,31 @@ export function ImportDialog({
     }
     setFile(selectedFile);
     setFileError(null);
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      const lines = text.split("\n").filter((l) => l.trim());
-      if (lines.length === 0) {
-        setFileError("Empty file.");
-        return;
-      }
-      const hdrs = lines[0].split(",").map((h) => h.trim().replace(/^"|"$/g, ""));
-      setHeaders(hdrs);
-      setPreviewRows(lines.slice(1, 6).map((l) => l.split(",").map((c) => c.trim())));
-      const auto: Record<string, ContactField> = {};
-      hdrs.forEach((h) => {
-        const l = h.toLowerCase().trim();
-        if (l === "email" || l === "e-mail") auto[h] = "email";
-        else if (l.includes("first")) auto[h] = "first_name";
-        else if (l.includes("last")) auto[h] = "last_name";
-        else if (l === "phone" || l === "mobile") auto[h] = "phone";
-        else if (l === "company" || l === "org") auto[h] = "company";
-        else if (l === "title") auto[h] = "title";
-        else auto[h] = "none";
-      });
-      setMapping(auto);
-    };
-    reader.readAsText(selectedFile);
+    try {
+      const preview = parseCSVPreview(await readCSVFile(selectedFile));
+      setHeaders(preview.headers);
+      setPreviewRows(preview.rows);
+      setCsvHasHeader(preview.hasHeader);
+      const emailColumn = preview.hasHeader
+        ? -1
+        : (preview.rows[0] ?? []).findIndex(isCSVEmailValue);
+      setMapping(
+        Object.fromEntries(
+          preview.headers.map((header, index) => [
+            header,
+            preview.hasHeader
+              ? autoMapCSVHeader(header)
+              : index === (emailColumn < 0 ? 0 : emailColumn)
+                ? "email"
+                : "none",
+          ]),
+        ),
+      );
+      setStep("map");
+    } catch (error) {
+      setFile(null);
+      setFileError(error instanceof Error ? error.message : "The CSV file could not be read.");
+    }
   };
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
@@ -159,15 +174,18 @@ export function ImportDialog({
   };
 
   const mapField = (header: string, field: ContactField) => {
-    setMapping((prev) => ({ ...prev, [header]: field }));
+    setMapping((previous) => {
+      const updated = { ...previous };
+      for (const [mappedHeader, mappedField] of Object.entries(updated)) {
+        if (mappedHeader !== header && mappedField === field) updated[mappedHeader] = "none";
+      }
+      updated[header] = field;
+      return updated;
+    });
   };
 
   const isFieldMapped = (field: ContactField) => {
     return Object.values(mapping).includes(field);
-  };
-
-  const getMappedHeader = (field: ContactField) => {
-    return Object.entries(mapping).find(([, v]) => v === field)?.[0];
   };
 
   const handleImport = async () => {
@@ -181,9 +199,22 @@ export function ImportDialog({
     }
     if (!file) return;
 
+    let columnMapping;
+    try {
+      columnMapping = buildCSVColumnMapping(headers, mapping, csvHasHeader);
+    } catch (error) {
+      toast.toast({
+        title: "Check column mapping",
+        description: error instanceof Error ? error.message : "The selected mapping is invalid.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("mapping", JSON.stringify(mapping));
+    formData.append("mapping", JSON.stringify(columnMapping));
+    if (listID) formData.append("list_id", listID);
 
     setIsImporting(true);
     try {
@@ -288,6 +319,8 @@ export function ImportDialog({
     setHeaders([]);
     setPreviewRows([]);
     setMapping({});
+    setListID("");
+    setCsvHasHeader(true);
     setJobId(null);
     setImportResult(null);
     setIsImporting(false);
@@ -318,7 +351,7 @@ export function ImportDialog({
             Upload a CSV file to import contacts in bulk.
           </DialogDescription>
         </div>
-        <DialogContent className="p-0">
+        <div className="p-0">
           <div className="flex items-center gap-2 mb-4 px-4">
             {stepOrder.map((stepKey, idx) => {
               const isCompleted = stepOrder.indexOf(step) > stepOrder.indexOf(stepKey);
@@ -425,6 +458,25 @@ export function ImportDialog({
                       Email is required. Please map an email column.
                     </span>
                   </div>
+                )}
+                <label className="mt-5 grid gap-2 text-sm text-slate-700">
+                  Add imported contacts to a list (optional)
+                  <select
+                    value={listID}
+                    onChange={(event) => setListID(event.target.value)}
+                    disabled={listsQuery.isLoading}
+                    className="h-10 rounded-md border border-slate-200 bg-white px-3"
+                  >
+                    <option value="">Do not add to a list</option>
+                    {(listsQuery.data?.data ?? []).map((list) => (
+                      <option key={list.id} value={list.id}>{list.name}</option>
+                    ))}
+                  </select>
+                </label>
+                {listsQuery.error && (
+                  <p className="mt-2 text-sm text-rose-600">
+                    Lists could not be loaded: {(listsQuery.error as Error).message}
+                  </p>
                 )}
               </div>
             </div>
@@ -565,7 +617,7 @@ export function ImportDialog({
               </div>
             </div>
           )}
-        </DialogContent>
+        </div>
         <div className="flex justify-between w-full p-4 border-t border-slate-100 bg-slate-50">
           {step !== "complete" && (
             <div className="flex justify-between w-full">
@@ -574,9 +626,13 @@ export function ImportDialog({
                   Back
                 </Button>
               )}
-              {step === "preview" && (
-                <Button onClick={handleImport} className="bg-indigo-600 hover:bg-indigo-700">
-                  Start Import
+              {step === "map" && (
+                <Button
+                  onClick={() => setStep("preview")}
+                  disabled={!isFieldMapped("email")}
+                  className="bg-indigo-600 hover:bg-indigo-700"
+                >
+                  Review import <ChevronRight className="h-3 w-3 ml-1" />
                 </Button>
               )}
             </div>

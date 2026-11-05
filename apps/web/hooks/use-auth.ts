@@ -44,16 +44,13 @@ export function useAuth() {
   };
 
   const logout = async () => {
-    try {
-      await apiFetch("/auth/logout", {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-    } finally {
-      clearSession();
-      if (typeof window !== "undefined") {
-        window.location.href = "/login";
-      }
+    await apiFetch("/auth/logout", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    clearSession();
+    if (typeof window !== "undefined") {
+      window.location.href = "/login";
     }
   };
 

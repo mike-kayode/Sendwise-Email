@@ -22,6 +22,7 @@ func TestImportMigrationsAreAdditive(t *testing.T) {
 	initial := readMigration(t, "0001_init.sql")
 	upgrade := readMigration(t, "0002_contact_imports.sql")
 	repair := readMigration(t, "0006_migration_repairs.sql")
+	listImport := readMigration(t, "0008_contact_import_lists.sql")
 
 	if !strings.Contains(initial, "CREATE TABLE contact_imports") {
 		t.Fatal("initial migration must create contact_imports")
@@ -35,6 +36,9 @@ func TestImportMigrationsAreAdditive(t *testing.T) {
 			if !strings.Contains(migration, expected) {
 				t.Errorf("migration is missing idempotent addition %q", expected)
 			}
+		}
+		if !strings.Contains(listImport, "ADD COLUMN IF NOT EXISTS list_id uuid REFERENCES contact_lists(id) ON DELETE SET NULL") {
+			t.Fatal("list import migration must add a nullable, safe list reference")
 		}
 	}
 }

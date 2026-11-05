@@ -61,8 +61,8 @@ func main() {
 			})
 		}
 	}
-
 	tokens := auth.NewManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL)
+
 	campaignService := campaigns.NewService(pool, publisher, logger, cfg.MaxDeliveryAttempts, cfg.RequireVerifiedDomain)
 	apiKeyService := auth.NewAPIKeyService(pool, logger)
 	server := api.New(cfg, pool, tokens, campaignService, apiKeyService, bus, logger)
@@ -90,6 +90,9 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+// manager that is configured to consult the session revocation store on each
+// request. This is what makes logout immediately invalidate issued access
+// tokens.
 		logger.Error("graceful shutdown", "error", err)
 	}
 }

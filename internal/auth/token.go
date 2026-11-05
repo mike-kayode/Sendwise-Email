@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -14,21 +15,45 @@ type Claims struct {
 	CampaignID     string `json:"cmp,omitempty"`
 	ContactID      string `json:"cid,omitempty"`
 	URL            string `json:"url,omitempty"`
+	SessionID      string `json:"sid,omitempty"`
 	jwt.RegisteredClaims
 }
 
 type Manager struct {
-	secret []byte
-	issuer string
-	ttl    time.Duration
+	secret        []byte
+	issuer        string
+	ttl           time.Duration
+	sessionStore  SessionStore
+	logger        *slog.Logger
 }
 
 func NewManager(secret, issuer string, ttl time.Duration) *Manager {
-	return &Manager{secret: []byte(secret), issuer: issuer, ttl: ttl}
+	return NewManagerWithStore(secret, issuer, ttl, nil)
+}
+
+// NewManagerWithStore creates a Manager that consults sessionStore on every
+// request. If sessionStore is nil, the middleware skips revocation checks.
+func NewManagerWithStore(secret, issuer string, ttl time.Duration, sessionStore SessionStore) *Manager {
+	return &Manager{
+		secret:      []byte(secret),
+		issuer:      issuer,
+		ttl:         ttl,
+		sessionStore: sessionStore,
+	}
 }
 
 func (m *Manager) TTL() time.Duration {
 	return m.ttl
+}
+
+// WithSessionStore returns a copy of the manager with the given session store.
+func (m *Manager) WithSessionStore(sessionStore SessionStore) *Manager {
+	return &Manager{
+		secret:       m.secret,
+		issuer:       m.issuer,
+		ttl:          m.ttl,
+		sessionStore: sessionStore,
+	}
 }
 
 func (m *Manager) IssueAccess(userID, organizationID, role string) (string, error) {
@@ -39,6 +64,21 @@ func (m *Manager) IssueAccess(userID, organizationID, role string) (string, erro
 			Subject: userID,
 		},
 	}, m.ttl)
+}
+
+// IssueAccessWithSession is like IssueAccess but also creates a session record
+// and returns the session ID to embed in the access token.
+func (m *Manager) IssueAccessWithSession(userID, organizationID, role string) (string, string, error) {
+	sessionID := uuid.NewString()
+	token, err := m.issue(Claims{
+		OrganizationID: organizationID,
+		Role:           role,
+		SessionID:      sessionID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject: userID,
+		},
+	}, m.ttl)
+	return token, sessionID, err
 }
 
 func (m *Manager) IssueTracking(jobID, organizationID, campaignID, contactID string) (string, error) {
@@ -74,7 +114,11 @@ func (m *Manager) IssueUnsubscribe(organizationID, contactID string) (string, er
 	}, 365*24*time.Hour)
 }
 
-func (m *Manager) issue(claims Claims, ttl time.Duration) (string, error) {
+func (m *Manager) issue(claims Claims, ttl time.Duration, sessionID ...string) (string, error) {
+	if len(sessionID) > 0 {
+		claims.SessionID = sessionID[0]
+	}
+	// sessionID is copied into claims.SessionID above
 	now := time.Now()
 	claims.Issuer = m.issuer
 	claims.IssuedAt = jwt.NewNumericDate(now)

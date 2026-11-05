@@ -52,6 +52,8 @@ type fakeStore struct {
 	audit            []fakeAuditRow
 	registrations    []registrationCall
 	revokedUsers     []string
+	revokeSessionErr error
+	revokeTokenErr   error
 	nextID           int
 }
 
@@ -250,6 +252,9 @@ func (f *fakeStore) RotateRefreshToken(_ context.Context, sessionID, presentedHa
 func (f *fakeStore) RevokeSession(_ context.Context, sessionID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.revokeSessionErr != nil {
+		return f.revokeSessionErr
+	}
 	session, ok := f.sessions[sessionID]
 	if !ok {
 		return nil
@@ -262,6 +267,9 @@ func (f *fakeStore) RevokeSession(_ context.Context, sessionID string) error {
 func (f *fakeStore) RevokeSessionByToken(_ context.Context, tokenHash string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.revokeTokenErr != nil {
+		return f.revokeTokenErr
+	}
 	id, ok := f.sessionByRefresh[tokenHash]
 	if !ok {
 		return nil
@@ -977,6 +985,19 @@ func TestLogoutRevokesByRefreshToken(t *testing.T) {
 	decodeBody(t, rec, &resp)
 	if !resp.Revoked {
 		t.Fatal("expected session to be revoked")
+	}
+}
+
+func TestLogoutReportsSessionRevocationFailure(t *testing.T) {
+	handler, store, _, _ := newTestHandler(t)
+	store.revokeTokenErr = errors.New("database unavailable")
+
+	rec := doJSON(t, handler.Routes(), http.MethodPost, "/auth/logout", `{"refresh_token":"logout-token"}`)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if cookies := rec.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("logout cleared cookies after failed revocation: %#v", cookies)
 	}
 }
 

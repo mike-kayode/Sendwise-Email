@@ -22,6 +22,14 @@ func TestContactImportAPIQueuesAndScopesProgress(t *testing.T) {
 	pool := testutil.NewPostgres(t)
 	ctx := context.Background()
 	userID, organizationID := createImportTestPrincipal(t, ctx, pool, "import-owner@example.test", "import-workspace")
+	var listID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO contact_lists (organization_id, name)
+		VALUES ($1, 'Import target')
+		RETURNING id
+	`, organizationID).Scan(&listID); err != nil {
+		t.Fatalf("create import target list: %v", err)
+	}
 	tokens := auth.NewManager("integration-test-secret-value", "integration-test", time.Hour)
 	token, err := tokens.IssueAccess(userID, organizationID, auth.RoleOwner)
 	if err != nil {
@@ -61,6 +69,9 @@ func TestContactImportAPIQueuesAndScopesProgress(t *testing.T) {
 	if err := writer.WriteField("mapping", string(mapping)); err != nil {
 		t.Fatalf("write mapping field: %v", err)
 	}
+	if err := writer.WriteField("list_id", listID); err != nil {
+		t.Fatalf("write target list: %v", err)
+	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close multipart body: %v", err)
 	}
@@ -96,11 +107,12 @@ func TestContactImportAPIQueuesAndScopesProgress(t *testing.T) {
 		ID       string `json:"id"`
 		Status   string `json:"status"`
 		FileName string `json:"file_name"`
+		ListID   string `json:"list_id"`
 	}
 	if err := json.Unmarshal(statusResponse.Body.Bytes(), &status); err != nil {
 		t.Fatalf("decode import status: %v", err)
 	}
-	if status.ID != queued.ID || status.Status != "queued" || status.FileName != "contacts.csv" {
+	if status.ID != queued.ID || status.Status != "queued" || status.FileName != "contacts.csv" || status.ListID != listID {
 		t.Fatalf("unexpected import status: %#v", status)
 	}
 

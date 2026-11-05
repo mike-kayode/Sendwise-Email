@@ -1,6 +1,7 @@
 package contacts
 
 import (
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -83,5 +84,87 @@ func TestCSVReaderRejectsInvalidAddressAndColumnCount(t *testing.T) {
 	}
 	if _, err := reader.Read(); err == nil {
 		t.Fatal("Read() accepted a row with an invalid number of columns")
+	}
+}
+
+func TestCSVReaderSupportsBOMSemicolonQuotedMultilineAndHeaderAliases(t *testing.T) {
+	source := "\ufeffEmail Address;First Name;Company Name\nada@example.com;Ada;\"Engines;\r\nInc\"\n"
+	reader, mapping, err := NewCSVReader(strings.NewReader(source), nil)
+	if err != nil {
+		t.Fatalf("NewCSVReader() error = %v", err)
+	}
+	if mapping.Email != "email_address" || mapping.FirstName != "first_name" {
+		t.Fatalf("unexpected inferred mapping: %#v", mapping)
+	}
+	row, err := reader.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	var fields map[string]string
+	if err := json.Unmarshal(row.CustomFields, &fields); err != nil {
+		t.Fatalf("decode custom fields: %v", err)
+	}
+	if row.Email != "ada@example.com" || row.FirstName != "Ada" || fields["company_name"] != "Engines;\nInc" {
+		t.Fatalf("unexpected parsed row: %#v, fields=%#v", row, fields)
+	}
+}
+
+func TestCSVReaderSupportsWindows1252(t *testing.T) {
+	source := []byte("email,first_name,company\njose@example.com,Jos\xe9,Caf\xe9\n")
+	reader, _, err := NewCSVReader(strings.NewReader(string(source)), nil)
+	if err != nil {
+		t.Fatalf("NewCSVReader() error = %v", err)
+	}
+	row, err := reader.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if row.FirstName != "José" || string(row.CustomFields) != `{"company":"Café"}` {
+		t.Fatalf("unexpected decoded row: %#v", row)
+	}
+}
+
+func TestCSVReaderKeepsFirstRowWhenHeaderIsAbsent(t *testing.T) {
+	reader, mapping, err := NewCSVReader(strings.NewReader("ada@example.com\nlinus@example.com\n"), nil)
+	if err != nil {
+		t.Fatalf("NewCSVReader() error = %v", err)
+	}
+	if mapping.Email != "column_1" || mapping.HasHeader == nil || *mapping.HasHeader {
+		t.Fatalf("unexpected headerless mapping: %#v", mapping)
+	}
+	for _, email := range []string{"ada@example.com", "linus@example.com"} {
+		row, err := reader.Read()
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if row.Email != email {
+			t.Fatalf("email = %q, want %q", row.Email, email)
+		}
+	}
+	if _, err := reader.Read(); err != io.EOF {
+		t.Fatalf("Read() end error = %v, want EOF", err)
+	}
+}
+
+func TestCSVReaderHonorsExplicitHeaderlessMapping(t *testing.T) {
+	hasHeader := false
+	mapping := &CSVColumnMapping{
+		Email:     "Column 2",
+		FirstName: "Column 1",
+		HasHeader: &hasHeader,
+	}
+	reader, _, err := NewCSVReader(strings.NewReader("Ada,EMAIL@EXAMPLE.COM\n"), mapping)
+	if err != nil {
+		t.Fatalf("NewCSVReader() error = %v", err)
+	}
+	row, err := reader.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if row.Email != "email@example.com" {
+		t.Fatalf("email = %q, want normalized email", row.Email)
+	}
+	if row.FirstName != "Ada" {
+		t.Fatalf("first name = %q, want Ada", row.FirstName)
 	}
 }

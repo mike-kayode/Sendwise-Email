@@ -25,6 +25,7 @@ type contactImport struct {
 	ID            string          `json:"id"`
 	Status        string          `json:"status"`
 	FileName      string          `json:"file_name"`
+	ListID        string          `json:"list_id,omitempty"`
 	TotalRows     int             `json:"total_rows"`
 	ProcessedRows int             `json:"processed_rows"`
 	Imported      int             `json:"imported"`
@@ -111,12 +112,30 @@ func (s *Server) importContacts(w http.ResponseWriter, r *http.Request) {
 	}
 	fileName = strings.ToValidUTF8(fileName, "_")
 
+	listID := strings.TrimSpace(r.FormValue("list_id"))
+	if listID != "" {
+		var listExists bool
+		if err := s.pool.QueryRow(r.Context(), `
+			SELECT EXISTS (
+				SELECT 1 FROM contact_lists
+				WHERE id = $1::uuid AND organization_id = $2
+			)
+		`, listID, s.organizationID(r)).Scan(&listExists); err != nil {
+			httpx.Error(w, http.StatusBadRequest, "invalid_list", "The selected list is invalid.")
+			return
+		}
+		if !listExists {
+			httpx.Error(w, http.StatusNotFound, "list_not_found", "The selected list could not be found.")
+			return
+		}
+	}
+
 	var jobID string
 	if err := s.pool.QueryRow(r.Context(), `
-		INSERT INTO contact_imports (organization_id, created_by, file_name, source_data, mapping)
-		VALUES ($1, $2, $3, $4, $5::jsonb)
+		INSERT INTO contact_imports (organization_id, created_by, file_name, source_data, mapping, list_id)
+		VALUES ($1, $2, $3, $4, $5::jsonb, NULLIF($6, '')::uuid)
 		RETURNING id
-	`, s.organizationID(r), s.claims(r).Subject, fileName, data, mappingJSON).Scan(&jobID); err != nil {
+	`, s.organizationID(r), s.claims(r).Subject, fileName, data, mappingJSON, listID).Scan(&jobID); err != nil {
 		s.logger.Error("queue contact import", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not queue the contact import.")
 		return
@@ -132,13 +151,13 @@ func (s *Server) getContactImport(w http.ResponseWriter, r *http.Request) {
 	var item contactImport
 	var rawErrors []byte
 	err := s.pool.QueryRow(r.Context(), `
-		SELECT id, status, file_name, total_rows, processed_rows,
+		SELECT id, status, file_name, COALESCE(list_id::text, ''), total_rows, processed_rows,
 		       imported_count, skipped_count, invalid_count, errors,
 		       COALESCE(last_error, ''), created_at, started_at, completed_at
 		FROM contact_imports
 		WHERE id = $1 AND organization_id = $2
 	`, r.PathValue("id"), s.organizationID(r)).Scan(
-		&item.ID, &item.Status, &item.FileName, &item.TotalRows, &item.ProcessedRows,
+		&item.ID, &item.Status, &item.FileName, &item.ListID, &item.TotalRows, &item.ProcessedRows,
 		&item.Imported, &item.Skipped, &item.Invalid, &rawErrors,
 		&item.LastError, &item.CreatedAt, &item.StartedAt, &item.CompletedAt,
 	)

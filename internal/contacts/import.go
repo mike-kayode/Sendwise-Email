@@ -1,6 +1,7 @@
 package contacts
 
 import (
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,11 @@ import (
 	"net/mail"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/transform"
 )
 
 var importFieldKey = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,62}$`)
@@ -22,6 +28,7 @@ type CSVColumnMapping struct {
 	FirstName    string            `json:"first_name,omitempty"`
 	LastName     string            `json:"last_name,omitempty"`
 	CustomFields map[string]string `json:"custom_fields,omitempty"`
+	HasHeader    *bool             `json:"has_header,omitempty"`
 }
 
 type CSVContactRow struct {
@@ -34,6 +41,7 @@ type CSVContactRow struct {
 type CSVReader struct {
 	reader         *csv.Reader
 	mapping        CSVColumnMapping
+	pendingRecord  []string
 	emailIndex     int
 	firstNameIndex int
 	lastNameIndex  int
@@ -41,7 +49,16 @@ type CSVReader struct {
 }
 
 func NewCSVReader(source io.Reader, mapping *CSVColumnMapping) (*CSVReader, CSVColumnMapping, error) {
-	reader := csv.NewReader(source)
+	data, err := io.ReadAll(source)
+	if err != nil {
+		return nil, CSVColumnMapping{}, fmt.Errorf("read CSV data: %w", err)
+	}
+	data, err = decodeCSV(data)
+	if err != nil {
+		return nil, CSVColumnMapping{}, fmt.Errorf("decode CSV data: %w", err)
+	}
+
+	reader := newCSVDecoder(data)
 	reader.TrimLeadingSpace = true
 	reader.FieldsPerRecord = -1
 	header, err := reader.Read()
@@ -50,6 +67,19 @@ func NewCSVReader(source io.Reader, mapping *CSVColumnMapping) (*CSVReader, CSVC
 	}
 	if len(header) == 0 || len(header) > MaxCSVImportColumns {
 		return nil, CSVColumnMapping{}, fmt.Errorf("CSV must contain between 1 and %d columns", MaxCSVImportColumns)
+	}
+
+	hasHeader := inferCSVHeader(header)
+	if mapping != nil && mapping.HasHeader != nil {
+		hasHeader = *mapping.HasHeader
+	}
+	var pendingRecord []string
+	if !hasHeader {
+		pendingRecord = header
+		header = make([]string, len(pendingRecord))
+		for index := range header {
+			header[index] = fmt.Sprintf("column_%d", index+1)
+		}
 	}
 
 	indexes := make(map[string]int, len(header))
@@ -69,9 +99,13 @@ func NewCSVReader(source io.Reader, mapping *CSVColumnMapping) (*CSVReader, CSVC
 	resolved := CSVColumnMapping{}
 	if mapping == nil {
 		resolved = defaultCSVMapping(header)
+		if !hasHeader {
+			resolved.Email = header[0]
+		}
 	} else {
 		resolved = *mapping
 	}
+	resolved.HasHeader = &hasHeader
 
 	emailIndex, ok := indexes[normalizeColumn(resolved.Email)]
 	if !ok || normalizeColumn(resolved.Email) == "" {
@@ -115,6 +149,7 @@ func NewCSVReader(source io.Reader, mapping *CSVColumnMapping) (*CSVReader, CSVC
 	return &CSVReader{
 		reader:         reader,
 		mapping:        resolved,
+		pendingRecord:  pendingRecord,
 		emailIndex:     emailIndex,
 		firstNameIndex: firstNameIndex,
 		lastNameIndex:  lastNameIndex,
@@ -123,9 +158,16 @@ func NewCSVReader(source io.Reader, mapping *CSVColumnMapping) (*CSVReader, CSVC
 }
 
 func (r *CSVReader) Read() (CSVContactRow, error) {
-	record, err := r.reader.Read()
-	if err != nil {
-		return CSVContactRow{}, err
+	var record []string
+	if r.pendingRecord != nil {
+		record = r.pendingRecord
+		r.pendingRecord = nil
+	} else {
+		var err error
+		record, err = r.reader.Read()
+		if err != nil {
+			return CSVContactRow{}, err
+		}
 	}
 	rawEmail := strings.TrimSpace(cell(record, r.emailIndex))
 	address, err := mail.ParseAddress(rawEmail)
@@ -155,11 +197,11 @@ func defaultCSVMapping(headers []string) CSVColumnMapping {
 	mapping := CSVColumnMapping{CustomFields: make(map[string]string)}
 	for _, header := range headers {
 		switch header {
-		case "email":
+		case "email", "email_address", "e_mail", "mail":
 			mapping.Email = header
-		case "first_name":
+		case "first_name", "firstname", "given_name", "given":
 			mapping.FirstName = header
-		case "last_name":
+		case "last_name", "lastname", "family_name", "surname":
 			mapping.LastName = header
 		case "status", "source":
 			continue
@@ -184,7 +226,19 @@ func optionalColumnIndex(indexes map[string]int, column, label string) (int, err
 }
 
 func normalizeColumn(column string) string {
-	return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(column, "\ufeff")))
+	column = strings.TrimSpace(strings.TrimPrefix(column, "\ufeff"))
+	var normalized strings.Builder
+	separator := true
+	for _, character := range strings.ToLower(column) {
+		if unicode.IsLetter(character) || unicode.IsDigit(character) {
+			normalized.WriteRune(character)
+			separator = false
+		} else if !separator {
+			normalized.WriteByte('_')
+			separator = true
+		}
+	}
+	return strings.Trim(normalized.String(), "_")
 }
 
 func cell(record []string, index int) string {
@@ -192,4 +246,52 @@ func cell(record []string, index int) string {
 		return ""
 	}
 	return record[index]
+}
+
+func decodeCSV(data []byte) ([]byte, error) {
+	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
+	if utf8.Valid(data) {
+		return data, nil
+	}
+	decoded, _, err := transform.Bytes(charmap.Windows1252.NewDecoder(), data)
+	return decoded, err
+}
+
+func newCSVDecoder(data []byte) *csv.Reader {
+	delimiter := ','
+	bestColumns := 0
+	for _, candidate := range []rune{',', ';'} {
+		reader := csv.NewReader(bytes.NewReader(data))
+		reader.Comma = candidate
+		reader.TrimLeadingSpace = true
+		reader.FieldsPerRecord = -1
+		record, err := reader.Read()
+		if err == nil && len(record) > bestColumns {
+			delimiter = candidate
+			bestColumns = len(record)
+		}
+	}
+	reader := csv.NewReader(bytes.NewReader(data))
+	reader.Comma = delimiter
+	return reader
+}
+
+func inferCSVHeader(firstRecord []string) bool {
+	if len(firstRecord) == 0 {
+		return true
+	}
+	for _, column := range firstRecord {
+		switch normalizeColumn(column) {
+		case "email", "email_address", "e_mail", "mail":
+			return true
+		}
+	}
+	for _, value := range firstRecord {
+		value = strings.TrimSpace(value)
+		address, err := mail.ParseAddress(value)
+		if err == nil && strings.EqualFold(address.Address, value) {
+			return false
+		}
+	}
+	return true
 }

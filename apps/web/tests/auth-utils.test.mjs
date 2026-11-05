@@ -40,6 +40,14 @@ test("network fetch failures become a clear login message without hiding HTTP er
   const networkError = normalizeFetchError(new TypeError("Failed to fetch"));
   assert.ok(networkError instanceof ApiError);
   assert.equal(networkError.code, "network_error");
-  assert.equal(loginErrorMessage(networkError), "Cannot reach the server. Please try again.");
-  assert.equal(loginErrorMessage(new ApiError(401, "invalid_credentials", "Email or password is incorrect.")), "Email or password is incorrect.");
+  assert.equal(
+    loginErrorMessage(networkError),
+    "Cannot reach the server. Please check your connection and try again.",
+  );
+  assert.equal(
+    loginErrorMessage(
+      new ApiError(401, "invalid_credentials", "The email address or password is incorrect."),
+    ),
+    "The email address or password is incorrect.",
+  );
 });

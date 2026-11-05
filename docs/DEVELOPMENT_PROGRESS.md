@@ -1,6 +1,24 @@
 # Development Progress
 
-**Last updated:** 2026-11-04
+**Last updated:** 2026-11-05
+
+## Current repair pass
+
+- [x] Reproduced CSV import workflow defects in source: upload did not advance to mapping, the frontend CSV split was not quote-aware, and the submitted mapping shape disagreed with the API's strict JSON contract.
+- [x] Fixed CSV preview/mapping workflow, UTF-8 BOM and Windows-1252 decoding, comma/semicolon parsing, quoted/multiline values, and headerless first-row handling.
+- [x] Added tenant-validated target-list selection and worker-side idempotent list membership for imported and already-existing contacts, with an additive migration.
+- [x] Added Go parser/API/worker regression coverage and frontend CSV helper tests.
+- [x] Added a visible desktop/mobile dashboard Sign out action with progress/error handling; local session data is cleared only after backend logout succeeds.
+- [x] Added tenant-scoped tag rename/delete API operations and connected dashboard editing/deletion, including a confirmation and contact-preservation behavior.
+- [~] Identity logout revokes refresh sessions, but access-token middleware does not immediately check session revocation. See [authentication/logout verification](./quality/AUTHENTICATION_AND_LOGOUT.md).
+- [~] List management and segment builder remain incomplete; see [audience verification](./quality/CONTACTS_LISTS_TAGS_SEGMENTS.md).
+- [x] Verified Go import/API/worker/migration packages, frontend typecheck, and frontend unit tests.
+- [~] Investigated the reported `test3@pipsleague.com`: no matching API/worker log lines were available; a local database query was blocked by the environment's Docker socket policy. Account-specific reproduction is not claimed.
+- [~] PostgreSQL integration tests could not run because `TEST_DATABASE_URL` is unset. The full Go suite's gateway test and Next.js production build were blocked by sandbox restrictions on local process/port operations.
+- [ ] Continue the remaining product modules and verify the import journey against an authorized PostgreSQL-backed test organization.
+
+See [CSV import investigation](./quality/CSV_IMPORT_INVESTIGATION.md) and
+[master repair report](./quality/MASTER_REPAIR_REPORT.md) for precise evidence and blockers.
 
 ## Completed foundation work
 

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -142,6 +143,8 @@ type tagInput struct {
 	Color string `json:"color"`
 }
 
+var tagColorPattern = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+
 func (s *Server) createTag(w http.ResponseWriter, r *http.Request) {
 	var input tagInput
 	if err := httpx.Decode(w, r, &input); err != nil {
@@ -155,6 +158,10 @@ func (s *Server) createTag(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Color == "" {
 		input.Color = "#64748b"
+	}
+	if !tagColorPattern.MatchString(input.Color) {
+		httpx.Error(w, http.StatusBadRequest, "invalid_color", "Tag color must be a six-digit hexadecimal color.")
+		return
 	}
 
 	var t tag
@@ -172,6 +179,59 @@ func (s *Server) createTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusCreated, t)
+}
+
+func (s *Server) updateTag(w http.ResponseWriter, r *http.Request) {
+	var input tagInput
+	if err := httpx.Decode(w, r, &input); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_body", "The request body is invalid.")
+		return
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	if input.Name == "" {
+		httpx.Error(w, http.StatusBadRequest, "missing_name", "Tag name is required.")
+		return
+	}
+	if input.Color != "" && !tagColorPattern.MatchString(input.Color) {
+		httpx.Error(w, http.StatusBadRequest, "invalid_color", "Tag color must be a six-digit hexadecimal color.")
+		return
+	}
+
+	result, err := s.pool.Exec(r.Context(), `
+		UPDATE tags
+		SET name = $3, color = COALESCE(NULLIF($4, ''), color)
+		WHERE id = $1 AND organization_id = $2
+	`, r.PathValue("id"), s.organizationID(r), input.Name, input.Color)
+	if isUniqueViolation(err) {
+		httpx.Error(w, http.StatusConflict, "tag_exists", "A tag with this name already exists.")
+		return
+	}
+	if err != nil {
+		s.logger.Error("update tag", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not update the tag.")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		httpx.Error(w, http.StatusNotFound, "tag_not_found", "The tag could not be found.")
+		return
+	}
+	httpx.NoContent(w)
+}
+
+func (s *Server) deleteTag(w http.ResponseWriter, r *http.Request) {
+	result, err := s.pool.Exec(r.Context(), `
+		DELETE FROM tags WHERE id = $1 AND organization_id = $2
+	`, r.PathValue("id"), s.organizationID(r))
+	if err != nil {
+		s.logger.Error("delete tag", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not delete the tag.")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		httpx.Error(w, http.StatusNotFound, "tag_not_found", "The tag could not be found.")
+		return
+	}
+	httpx.NoContent(w)
 }
 
 type segment struct {

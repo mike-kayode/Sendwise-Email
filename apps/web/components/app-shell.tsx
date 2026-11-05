@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   LayoutTemplate,
   List,
+  LogOut,
   Mail,
   Menu,
   Plus,
@@ -26,6 +27,7 @@ import {
 } from "lucide-react";
 import { cn, initials } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth";
+import { useAuth } from "@/hooks/use-auth";
 
 type NavItem = {
   href: string;
@@ -93,6 +95,9 @@ function SidebarContent({
   workspacePlan,
   userName,
   userEmail,
+  onLogout,
+  isLoggingOut,
+  logoutError,
 }: {
   pathname: string;
   onNavigate?: () => void;
@@ -100,6 +105,9 @@ function SidebarContent({
   workspacePlan: string;
   userName: string;
   userEmail: string;
+  onLogout: () => void;
+  isLoggingOut: boolean;
+  logoutError: string | null;
 }) {
   return (
     <div className="flex h-full flex-col">
@@ -166,6 +174,20 @@ function SidebarContent({
             <p className="truncate text-[11px] text-slate-500">{userEmail}</p>
           </div>
         </div>
+        <button
+          type="button"
+          onClick={onLogout}
+          disabled={isLoggingOut}
+          className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-slate-600 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-wait disabled:opacity-60"
+        >
+          <LogOut className="h-4 w-4" />
+          {isLoggingOut ? "Signing out..." : "Sign out"}
+        </button>
+        {logoutError ? (
+          <p role="alert" className="px-2 pt-1 text-xs text-rose-700">
+            {logoutError}
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -174,12 +196,26 @@ function SidebarContent({
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   const user = useAuthStore((state) => state.user);
   const organization = useAuthStore((state) => state.organization);
+  const { logout } = useAuth();
   const workspaceName = organization?.name ?? "Sendwise";
   const workspacePlan = organization?.role ? organization.role.toUpperCase() : "WORKSPACE";
   const userName = user?.name ?? "Workspace owner";
   const userEmail = user?.email ?? "owner@example.com";
+  const handleLogout = async () => {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    setLogoutError(null);
+    try {
+      await logout();
+    } catch (error) {
+      setLogoutError(error instanceof Error ? error.message : "Could not sign out. Please try again.");
+      setIsLoggingOut(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#f6f8f7]">
@@ -190,6 +226,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           workspacePlan={workspacePlan}
           userName={userName}
           userEmail={userEmail}
+          onLogout={handleLogout}
+          isLoggingOut={isLoggingOut}
+          logoutError={logoutError}
         />
       </aside>
 
@@ -215,6 +254,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               workspacePlan={workspacePlan}
               userName={userName}
               userEmail={userEmail}
+              onLogout={handleLogout}
+              isLoggingOut={isLoggingOut}
+              logoutError={logoutError}
             />
           </aside>
         </div>

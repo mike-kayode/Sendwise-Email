@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -21,6 +22,30 @@ const (
 	RoleViewer  = "viewer"
 )
 
+// SessionStore is the interface used by the auth middleware to check whether a
+// presented access-token session is still active. Only the service owning the
+// session records (Identity) implements this; the legacy API implements it
+// against the shared revocation store as a compatibility bridge.
+type SessionStore interface {
+	// Active reports whether the session identified by sessionID belongs to
+	// the given user and has not been revoked.
+	Active(ctx context.Context, userID, sessionID string) (bool, error)
+}
+
+// DefaultSessionStore is a no-op implementation used when session revocation
+// is not configured. To force immediate revocation, configure a real store.
+type DefaultSessionStore struct{}
+
+func (d *DefaultSessionStore) Active(ctx context.Context, userID, sessionID string) (bool, error) {
+	return true, nil
+}
+
+var errSessionNotFound = errors.New("session not found")
+
+// NullSessionStore returns a SessionStore that always reports sessions active.
+// Use it only when no revocation store is configured.
+func NullSessionStore() SessionStore { return &DefaultSessionStore{} }
+
 func (m *Manager) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := strings.TrimSpace(r.Header.Get("Authorization"))
@@ -38,6 +63,20 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		if claims.OrganizationID == "" {
 			httpx.Error(w, http.StatusForbidden, "missing_organization", "The access token is not associated with an organization.")
 			return
+		}
+
+		// Check session revocation immediately after token validation.
+		if m.sessionStore != nil {
+			active, err := m.sessionStore.Active(r.Context(), claims.Subject, claims.SessionID)
+			if err != nil {
+				m.logger.Error("session check failed", "error", err)
+				httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not verify the session.")
+				return
+			}
+			if !active {
+				httpx.Error(w, http.StatusUnauthorized, "session_revoked", "The session has been revoked. Sign in again.")
+				return
+			}
 		}
 
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), claimsKey, claims)))

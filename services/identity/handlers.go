@@ -597,11 +597,17 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 			revoked = true
 		} else if !errors.Is(err, ErrInvalidToken) {
 			h.logger.Error("revoke session by refresh token", "error", err)
+			kit.Error(w, http.StatusInternalServerError, "internal_error", "The session could not be revoked.")
+			return
 		}
 	}
 	if !revoked && sessionID != "" {
 		if err := h.store.RevokeSession(r.Context(), sessionID); err == nil {
 			revoked = true
+		} else {
+			h.logger.Error("revoke session by access token", "error", err)
+			kit.Error(w, http.StatusInternalServerError, "internal_error", "The session could not be revoked.")
+			return
 		}
 	}
 	if userID != "" {

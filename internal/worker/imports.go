@@ -26,6 +26,7 @@ var errContactImportLeaseLost = errors.New("contact import lease lost")
 type contactImportJob struct {
 	ID            string
 	Organization  string
+	ListID        string
 	LeaseToken    string
 	SourceData    []byte
 	Mapping       []byte
@@ -90,7 +91,7 @@ func (w *Worker) claimContactImport(ctx context.Context) (*contactImportJob, err
 
 	job := &contactImportJob{}
 	err = tx.QueryRow(ctx, `
-		SELECT id, organization_id, source_data, mapping, attempts,
+		SELECT id, organization_id, COALESCE(list_id::text, ''), source_data, mapping, attempts,
 		       total_rows, processed_rows, imported_count, skipped_count,
 		       invalid_count, errors
 		FROM contact_imports
@@ -100,7 +101,7 @@ func (w *Worker) claimContactImport(ctx context.Context) (*contactImportJob, err
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED
 	`).Scan(
-		&job.ID, &job.Organization, &job.SourceData, &job.Mapping, &job.Attempts,
+		&job.ID, &job.Organization, &job.ListID, &job.SourceData, &job.Mapping, &job.Attempts,
 		&job.TotalRows, &job.ProcessedRows, &job.Imported, &job.Skipped,
 		&job.Invalid, &job.Errors,
 	)
@@ -262,6 +263,24 @@ func (w *Worker) commitContactImportBatch(ctx context.Context, job *contactImpor
 		}
 		job.Imported += inserted
 		job.Skipped += len(rows) - inserted
+
+		if job.ListID != "" {
+			emails := make([]string, len(rows))
+			for index, row := range rows {
+				emails[index] = row.Email
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO contact_list_members (organization_id, contact_id, list_id, source)
+				SELECT $1, c.id, $2, 'csv_import'
+				FROM contacts c
+				JOIN (SELECT DISTINCT unnest($3::text[]) AS email) imported
+				  ON lower(c.email) = imported.email
+				WHERE c.organization_id = $1
+				ON CONFLICT (contact_id, list_id) DO NOTHING
+			`, job.Organization, job.ListID, emails); err != nil {
+				return fmt.Errorf("add imported contacts to list: %w", err)
+			}
+		}
 	}
 
 	job.ProcessedRows = cursor
