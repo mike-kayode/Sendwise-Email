@@ -691,8 +691,10 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
    The subsequent status-only Actions run [#34](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42258811907)
    passed `test-go`, `test-web`, `lint`, and `docker-build`, but its E2E job
    timed out in `p2-auth.spec.ts` waiting for a successful invitations response.
-   The DKIM code was unchanged from run #33; the follow-up final-SHA run will
-   determine whether this was transient.
+   The DKIM code was unchanged from run #33. The subsequent final-SHA Actions
+   run [#35](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42259993023)
+   for SHA `4a542410b73fa1071105ebd5e26f57b33d11163d` passed all five jobs, so
+   the run #34 failure did not reproduce.
 
 4. **Production mail guard — Not done.** Startup validation for production
    Mailpit/localhost SMTP and the log provider is not implemented or tested.
