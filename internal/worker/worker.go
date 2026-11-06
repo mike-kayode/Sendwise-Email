@@ -275,6 +275,10 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		Text:    textBody,
 		Headers: headers,
 	}
+	message.DKIM, err = delivery.LoadDKIMConfig(ctx, w.pool, row.OrganizationID, row.SenderEmail, w.cfg.DKIMEncryptionKey)
+	if err != nil {
+		return w.handleSendFailure(ctx, row, fmt.Errorf("load dkim signing key: %w", err))
+	}
 
 	// Per-domain concurrency: limit simultaneous outbound connections per
 	// recipient domain to protect sender reputation.

@@ -2,14 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -20,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/httpx"
 )
 
@@ -91,75 +84,13 @@ type domainInput struct {
 	Domain string `json:"domain"`
 }
 
-// generateDKIMKeyPair creates a fresh 2048-bit RSA keypair for a sending domain.
-// The public key is the base64-encoded PKCS#1 RSAPublicKey (the DKIM "p=" value)
-// and the private key is the PKCS#8 PEM, encrypted with AES-GCM using a key
-// derived from the configured DKIM_ENCRYPTION_KEY secret.
 func generateDKIMKeyPair(dkimEncryptionKey string) (publicKeyB64 string, encryptedPrivateKey string, err error) {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return "", "", fmt.Errorf("generate dkim keypair: %w", err)
-	}
-	publicDER := x509.MarshalPKCS1PublicKey(&privateKey.PublicKey)
-	publicKeyB64 = base64.StdEncoding.EncodeToString(publicDER)
-
-	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
-	if err != nil {
-		return "", "", fmt.Errorf("marshal dkim private key: %w", err)
-	}
-	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
-
-	derivedKey := sha256.Sum256([]byte(dkimEncryptionKey))
-	block, err := aes.NewCipher(derivedKey[:])
-	if err != nil {
-		return "", "", fmt.Errorf("init dkim encryption: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", "", fmt.Errorf("init dkim encryption: %w", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", "", fmt.Errorf("generate dkim nonce: %w", err)
-	}
-	ciphertext := gcm.Seal(nonce, nonce, []byte(privatePEM), nil)
-	encryptedPrivateKey = base64.StdEncoding.EncodeToString(ciphertext)
-
-	return publicKeyB64, encryptedPrivateKey, nil
+	return delivery.GenerateDKIMKeyPair(dkimEncryptionKey)
 }
 
 // decryptDKIMPrivateKey reverses generateDKIMKeyPair for a stored envelope.
 func decryptDKIMPrivateKey(dkimEncryptionKey string, encryptedPrivateKey string) (string, error) {
-	if encryptedPrivateKey == "" {
-		return "", errors.New("dkim private key is not configured")
-	}
-	data, err := base64.StdEncoding.DecodeString(encryptedPrivateKey)
-	if err != nil {
-		return "", fmt.Errorf("decode dkim private key: %w", err)
-	}
-	derivedKey := sha256.Sum256([]byte(dkimEncryptionKey))
-	block, err := aes.NewCipher(derivedKey[:])
-	if err != nil {
-		return "", fmt.Errorf("init dkim decryption: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("init dkim decryption: %w", err)
-	}
-	if len(data) < gcm.NonceSize() {
-		return "", errors.New("invalid dkim private key envelope")
-	}
-	nonce := data[:gcm.NonceSize()]
-	padded := data[gcm.NonceSize():]
-	plaintext, err := gcm.Open(nil, nonce, padded, nil)
-	if err != nil {
-		return "", fmt.Errorf("decrypt dkim private key: %w", err)
-	}
-	pemBlock, _ := pem.Decode(plaintext)
-	if pemBlock == nil {
-		return "", errors.New("could not decode dkim private key pem block")
-	}
-	return string(pemBlock.Bytes), nil
+	return delivery.DecryptDKIMPrivateKey(dkimEncryptionKey, encryptedPrivateKey)
 }
 
 func (s *Server) createDomain(w http.ResponseWriter, r *http.Request) {

@@ -1,10 +1,12 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
@@ -38,6 +40,11 @@ func NewSMTPTransport(addr, host, username, password string, tlsInsecure bool) *
 }
 
 func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) {
+	messageData, err := marshalMessage(msg)
+	if err != nil {
+		return nil, fmt.Errorf("prepare smtp message: %w", err)
+	}
+
 	dialer := &net.Dialer{Timeout: t.DialTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", t.Addr)
 	if err != nil {
@@ -99,7 +106,7 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 		return nil, classifySMTP(fmt.Errorf("smtp data: %w", err))
 	}
 
-	if err := writeMessage(writer, msg); err != nil {
+	if _, err := io.Copy(writer, bytes.NewReader(messageData)); err != nil {
 		_ = writer.Close()
 		return nil, fmt.Errorf("write message: %w", err)
 	}
@@ -112,6 +119,17 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 
 	messageID := formatMessageID(msg.ID)
 	return &Result{MessageID: messageID, Accepted: true}, nil
+}
+
+func marshalMessage(msg Message) ([]byte, error) {
+	var raw bytes.Buffer
+	if err := writeMessage(&raw, msg); err != nil {
+		return nil, err
+	}
+	if msg.DKIM == nil {
+		return raw.Bytes(), nil
+	}
+	return SignMessage(raw.Bytes(), msg.DKIM)
 }
 
 func ensureSTARTTLS(advertised, allowInsecure bool) error {
@@ -194,7 +212,7 @@ func sanitizeHeader(value string) string {
 
 func isReservedHeader(key string) bool {
 	switch strings.ToLower(key) {
-	case "from", "to", "subject", "date", "message-id", "mime-version", "content-type", "content-transfer-encoding":
+	case "from", "to", "subject", "date", "message-id", "mime-version", "content-type", "content-transfer-encoding", "dkim-signature":
 		return true
 	default:
 		return false

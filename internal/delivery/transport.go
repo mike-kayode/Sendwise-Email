@@ -13,6 +13,7 @@ type Message struct {
 	HTML    string
 	Text    string
 	Headers map[string]string
+	DKIM    *DKIMConfig
 }
 
 type Result struct {

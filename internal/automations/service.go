@@ -55,14 +55,15 @@ type Execution struct {
 }
 
 type Service struct {
-	pool       *pgxpool.Pool
-	logger     *slog.Logger
-	smtpAddr   string
-	smtpHost   string
-	smtpUser   string
-	smtpPass   string
-	fromEmail  string
-	appBaseURL string
+	pool              *pgxpool.Pool
+	logger            *slog.Logger
+	smtpAddr          string
+	smtpHost          string
+	smtpUser          string
+	smtpPass          string
+	fromEmail         string
+	appBaseURL        string
+	dkimEncryptionKey string
 }
 
 func NewService(pool *pgxpool.Pool, logger *slog.Logger, cfg config.Config) *Service {
@@ -70,14 +71,15 @@ func NewService(pool *pgxpool.Pool, logger *slog.Logger, cfg config.Config) *Ser
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Service{
-		pool:       pool,
-		logger:     logger,
-		smtpAddr:   cfg.SMTPAddr,
-		smtpHost:   cfg.SMTPHost,
-		smtpUser:   cfg.SMTPUsername,
-		smtpPass:   cfg.SMTPPassword,
-		fromEmail:  strings.TrimSpace(cfg.SMTPFrom),
-		appBaseURL: strings.TrimSpace(cfg.AppBaseURL),
+		pool:              pool,
+		logger:            logger,
+		smtpAddr:          cfg.SMTPAddr,
+		smtpHost:          cfg.SMTPHost,
+		smtpUser:          cfg.SMTPUsername,
+		smtpPass:          cfg.SMTPPassword,
+		fromEmail:         strings.TrimSpace(cfg.SMTPFrom),
+		appBaseURL:        strings.TrimSpace(cfg.AppBaseURL),
+		dkimEncryptionKey: cfg.DKIMEncryptionKey,
 	}
 }
 
@@ -469,8 +471,12 @@ func (s *Service) sendEmailStep(ctx context.Context, orgID, executionID, contact
 	subject = renderTemplate(subject, renderMap)
 	htmlBody = renderTemplate(htmlBody, renderMap)
 	textBody = renderTemplate(textBody, renderMap)
+	dkimConfig, err := delivery.LoadDKIMConfig(ctx, s.pool, orgID, fromAddress, s.dkimEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("load dkim signing key: %w", err)
+	}
 	transport := delivery.NewSMTPTransport(s.smtpAddr, s.smtpHost, s.smtpUser, s.smtpPass, true)
-	_, err = transport.Send(context.Background(), delivery.Message{
+	_, err = transport.Send(ctx, delivery.Message{
 		ID:      fmt.Sprintf("automation-%s-%s", executionID, contactID),
 		From:    fromAddress,
 		To:      email,
@@ -478,6 +484,7 @@ func (s *Service) sendEmailStep(ctx context.Context, orgID, executionID, contact
 		HTML:    htmlBody,
 		Text:    textBody,
 		Headers: map[string]string{"List-Unsubscribe": "<" + s.appBaseURL + "/unsubscribe?email=" + email + ">"},
+		DKIM:    dkimConfig,
 	})
 	return err
 }

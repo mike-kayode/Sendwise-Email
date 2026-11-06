@@ -554,7 +554,7 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
    `go test ./internal/api -run Domain -count=1 -v` — `TestDomainsIntegration`
    and all five DNS resolver tests pass.
 
-2. **CI and formatting — Done for code SHA `30c0866`; status-only commit follows.**
+2. **CI and formatting — Done for code SHA `6f44a9e` (Actions run #32).**
    `gofmt -l cmd internal services shared` returned no paths. The old
    integration-test registration flow and API-key creation defects were fixed;
    the concurrent 401 refresh race now reuses a token another request has
@@ -639,11 +639,43 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
    docker-build: success
    ```
 
-   This status-only commit must also receive a green Actions run before the
-   final SHA is considered verified.
+   The status-only commit was also verified by Actions run #32 on SHA
+   `6f44a9e`; all five jobs passed.
 
-3. **DKIM signing — Not done.** Outbound messages have not been verified against
-   the per-domain public key. Signer selection and implementation are pending.
+3. **DKIM signing — Done with local Postgres and Mailpit proof.** Application-side
+   signing was selected: the worker and automation runtime load the encrypted
+   per-domain key and sign the serialized RFC message immediately before SMTP
+   handoff. Compose passes `DKIM_ENCRYPTION_KEY` to both the API (automation
+   runtime) and worker. The signing test sends a campaign through SMTP to
+   Mailpit, fetches the raw received message, and verifies its signature
+   against the matching published TXT value.
+
+   ```
+   $ TEST_DATABASE_URL='postgres://email:email@127.0.0.1:5432/email?sslmode=disable' \
+       go test ./internal/worker -run TestCampaignTemplateDeliveryIntegration -v -count=1
+   === RUN   TestCampaignTemplateDeliveryIntegration
+   {"time":"2026-11-06T17:58:47.739976+01:00","level":"ERROR","msg":"send verification email","service":"worker","env":"test","error":"resend API key not configured"}
+   {"time":"2026-11-06T17:58:47.740208+01:00","level":"INFO","msg":"http request","service":"worker","env":"test","method":"POST","path":"/api/v1/auth/register","status":201,"duration_ms":42,"request_id":"ed86f58e-9dda-48b1-b928-1c7cb7789b55"}
+   {"time":"2026-11-06T17:58:47.820803+01:00","level":"INFO","msg":"http request","service":"worker","env":"test","method":"POST","path":"/api/v1/lists","status":201,"duration_ms":8,"request_id":"d8d0d054-ce5f-476a-8272-6f228a851aa7"}
+   {"time":"2026-11-06T17:58:47.828209+01:00","level":"INFO","msg":"http request","service":"worker","env":"test","method":"POST","path":"/api/v1/contacts","status":201,"duration_ms":7,"request_id":"1b1ffaeb-c56e-43cd-9f7e-4c2397faa575"}
+   {"time":"2026-11-06T17:58:47.834283+01:00","level":"INFO","msg":"http request","service":"worker","env":"test","method":"POST","path":"/api/v1/templates","status":201,"duration_ms":3,"request_id":"bcbd7e77-2385-4b77-a5af-bbaf56094b63"}
+   {"time":"2026-11-06T17:58:47.838955+01:00","level":"INFO","msg":"http request","service":"worker","env":"test","method":"POST","path":"/api/v1/campaigns","status":201,"duration_ms":4,"request_id":"a71ac675-1873-4b6c-9567-81a662cb0e32"}
+   {"time":"2026-11-06T17:58:47.854536+01:00","level":"WARN","msg":"no message publisher configured; delivery jobs remain queued","service":"worker","env":"test","campaign_id":"61bc1d0f-a344-4f04-8b02-e7b768967b7d"}
+   {"time":"2026-11-06T17:58:47.855076+01:00","level":"INFO","msg":"http request","service":"worker","env":"test","method":"POST","path":"/api/v1/campaigns/61bc1d0f-a344-4f04-8b02-e7b768967b7d/send","status":202,"duration_ms":15,"request_id":"0ff5cd98-692f-4d1e-9a25-351b83daef9e"}
+       campaign_template_delivery_integration_test.go:195: verified DKIM signature on Mailpit message 50GAtbssxT5qUdgQgSDeNw against campaign-test._domainkey.example.com
+   --- PASS: TestCampaignTemplateDeliveryIntegration (0.23s)
+   PASS
+   ok  	github.com/khayode/email-platform/internal/worker 1.236s
+   ```
+
+   Full Go tests against local Postgres, `go vet ./...`, `gofmt -l .`, web
+   typecheck/lint/tests/build, and the real-gateway domains Playwright spec also
+   passed. The broader browser suite was not green: the audience scenario timed
+   out waiting for dashboard navigation after submitting its default smoke
+   credentials; only the domains spec was rerun and passed. The test's missing
+   Resend key log is for the test account's separate verification email; no
+   external email was sent. Production mail delivery remains unverified under
+   blocker 4.
 
 4. **Production mail guard — Not done.** Startup validation for production
    Mailpit/localhost SMTP and the log provider is not implemented or tested.

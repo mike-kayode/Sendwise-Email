@@ -1,17 +1,21 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/emersion/go-msgauth/dkim"
 	"github.com/jackc/pgx/v5/pgxpool"
 	apipkg "github.com/khayode/email-platform/internal/api"
 	"github.com/khayode/email-platform/internal/auth"
@@ -51,6 +55,7 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 		SMTPAddr:               "127.0.0.1:1025",
 		SMTPHost:               "mailpit",
 		SMTPFrom:               "hello@example.com",
+		DKIMEncryptionKey:      "campaign-dkim-encryption-key-for-tests",
 		SendingRate:            20,
 		MaxDeliveryAttempts:    3,
 		MaxMessageAge:          48 * time.Hour,
@@ -71,6 +76,16 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 	var userID, organizationID string
 	if err := pool.QueryRow(context.Background(), `SELECT u.id, om.organization_id FROM users u JOIN organization_members om ON om.user_id = u.id WHERE u.email = $1 LIMIT 1`, ownerEmail).Scan(&userID, &organizationID); err != nil {
 		t.Fatalf("lookup new user org membership: %v", err)
+	}
+	publicKey, encryptedPrivateKey, err := delivery.GenerateDKIMKeyPair(cfg.DKIMEncryptionKey)
+	if err != nil {
+		t.Fatalf("generate campaign dkim key: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO sending_domains (organization_id, domain, status, dkim_selector, dkim_public_key, dkim_private_key)
+		VALUES ($1, 'example.com', 'verified', 'campaign-test', $2, $3)
+	`, organizationID, publicKey, encryptedPrivateKey); err != nil {
+		t.Fatalf("create verified sending domain: %v", err)
 	}
 	accessToken, err := tokens.IssueAccess(userID, organizationID, "owner")
 	if err != nil {
@@ -115,8 +130,9 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 	}
 
 	content := `{"version":1,"blocks":[{"type":"heading","content":"Hi {{first_name}}","align":"left"},{"type":"paragraph","content":"This is a live proof message with unsubscribe: {{unsubscribe_url}}","align":"left"}]}`
-	campaignBody := fmt.Sprintf(`{"name":"P5 delivery proof","subject":"Hello {{first_name}}","preview_text":"P5 proof","sender_name":"Sendwise","sender_email":"hello@example.com","list_id":"%s","template_id":"%s","content":%s}`,
-		list.ID, template.ID, content)
+	subjectToken := fmt.Sprintf("p5-%d", time.Now().UnixNano())
+	campaignBody := fmt.Sprintf(`{"name":"P5 delivery proof","subject":"%s {{first_name}}","preview_text":"P5 proof","sender_name":"Sendwise","sender_email":"hello@example.com","list_id":"%s","template_id":"%s","content":%s}`,
+		subjectToken, list.ID, template.ID, content)
 	campaignResp := doAPIRequest(t, server.Handler(), "POST", "/api/v1/campaigns", accessToken, campaignBody)
 	if campaignResp.Code != http.StatusCreated {
 		t.Fatalf("campaign create status = %d, want %d; body: %s", campaignResp.Code, http.StatusCreated, campaignResp.Body.String())
@@ -143,12 +159,45 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 		t.Fatalf("worker.process() error = %v, retryAfter=%s", err, retryAfter)
 	}
 
-	waitForMailpitMessage(t, func(message mailpitMessage) bool {
-		return strings.Contains(message.Subject, "Hello Ada") || strings.Contains(message.Snippet, "live proof message")
+	received := waitForMailpitMessage(t, func(message mailpitMessage) bool {
+		return strings.Contains(message.Subject, subjectToken)
 	})
+	rawURL := "http://127.0.0.1:8025/api/v1/message/" + url.PathEscape(received.ID) + "/raw"
+	rawResponse, err := http.Get(rawURL)
+	if err != nil {
+		t.Fatalf("fetch raw Mailpit message: %v", err)
+	}
+	defer rawResponse.Body.Close()
+	if rawResponse.StatusCode != http.StatusOK {
+		t.Fatalf("raw Mailpit message status = %d, want %d", rawResponse.StatusCode, http.StatusOK)
+	}
+	rawMessage, err := io.ReadAll(rawResponse.Body)
+	if err != nil {
+		t.Fatalf("read raw Mailpit message: %v", err)
+	}
+	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(rawMessage), &dkim.VerifyOptions{
+		LookupTXT: func(name string) ([]string, error) {
+			if name != "campaign-test._domainkey.example.com" {
+				return nil, fmt.Errorf("unexpected dkim lookup name %q", name)
+			}
+			return []string{"v=DKIM1; k=rsa; p=" + publicKey}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("verify delivered message dkim signature: %v", err)
+	}
+	if len(verifications) != 1 {
+		t.Fatalf("delivered message has %d dkim signatures, want exactly 1", len(verifications))
+	}
+	if verifications[0].Err != nil {
+		t.Fatalf("delivered message dkim verification failed: %v", verifications[0].Err)
+	}
+	t.Logf("verified DKIM signature on Mailpit message %s against %s._domainkey.%s",
+		received.ID, "campaign-test", "example.com")
 }
 
 type mailpitMessage struct {
+	ID      string `json:"ID"`
 	Subject string `json:"Subject"`
 	Snippet string `json:"Snippet"`
 	From    struct {
@@ -173,7 +222,7 @@ func doAPIRequest(t *testing.T, handler http.Handler, method, path, token, body 
 	return resp
 }
 
-func waitForMailpitMessage(t *testing.T, match func(mailpitMessage) bool) {
+func waitForMailpitMessage(t *testing.T, match func(mailpitMessage) bool) mailpitMessage {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
@@ -186,7 +235,7 @@ func waitForMailpitMessage(t *testing.T, match func(mailpitMessage) bool) {
 				for _, message := range payload.Messages {
 					if match(message) {
 						resp.Body.Close()
-						return
+						return message
 					}
 				}
 			}
@@ -195,4 +244,5 @@ func waitForMailpitMessage(t *testing.T, match func(mailpitMessage) bool) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	t.Fatal("Mailpit did not receive the expected campaign delivery message")
+	return mailpitMessage{}
 }
