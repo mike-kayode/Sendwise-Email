@@ -609,9 +609,11 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
 
    One earlier full-suite attempt timed out at the second smoke-account login
    in `forms.spec.ts`; that test passed alone and the complete suite passed on
-   rerun. CI workflow changes are included in the local blocker commit but have
-   not yet run in GitHub Actions. Do not treat this blocker as Done until
-   Actions is green for the final pushed SHA.
+   rerun. GitHub Actions run [#26](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42250453929)
+   for `b4e9d3f` failed before jobs started because the workflow parser
+   rejected the NATS service's sequence-form `command` (line 66, col 18).
+   That value is now a scalar; the follow-up commit's Actions run is pending.
+   Do not treat this blocker as Done until Actions is green for the final SHA.
 
 3. **DKIM signing — Not done.** Outbound messages have not been verified against
    the per-domain public key. Signer selection and implementation are pending.
