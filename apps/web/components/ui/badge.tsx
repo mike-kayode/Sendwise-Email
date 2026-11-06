@@ -37,7 +37,7 @@ export function Badge({
   );
 }
 
-export function StatusBadge({ status }: { status: string }) {
+export function StatusBadge({ status }: { status?: string | null }) {
   const variant: Record<string, BadgeVariant> = {
     completed: "success",
     sent: "success",
@@ -59,5 +59,6 @@ export function StatusBadge({ status }: { status: string }) {
     cancelled: "danger",
   };
 
-  return <Badge variant={variant[status] ?? "neutral"}>{status.replaceAll("_", " ")}</Badge>;
+  const value = status?.replaceAll("_", " ") || "unknown";
+  return <Badge variant={variant[status ?? ""] ?? "neutral"}>{value}</Badge>;
 }

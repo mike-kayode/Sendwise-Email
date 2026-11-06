@@ -531,7 +531,63 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
 
 ## Not working / known limitations
 
-- Some module backends remain partial; see code.
+### Pre-deploy blockers
+
+1. **Domains page crash — Done via the required fallback.** The reported crash
+   was not reproducible against the local production build and live gateway/API.
+   `StatusBadge` now accepts a missing or null status and renders `unknown`;
+   the dashboard error boundary remains in place. The real-stack Playwright test
+   seeds pending, verified, and misconfigured records, including NULL/empty
+   DKIM keys and NULL `last_checked_at`, and fails on any page error or
+   `console.error`.
+
+   ```
+   $ E2E_BASE_URL=http://localhost:3000 E2E_API_ORIGIN=http://localhost:8084 MAILPIT_API_URL=http://localhost:8025 npm run test:e2e -- e2e/domains.spec.ts --reporter=line
+   Running 1 test using 1 worker
+   [1/1] [chromium] › e2e/domains.spec.ts:92:1 › sending domains load from the real API without browser errors
+   1 passed (3.7s)
+   ```
+
+   Screenshots: `apps/web/test-results/domains-sending-domains-lo-b5a4a--API-without-browser-errors-chromium/domains-empty.png`
+   (0 domains) and `.../domains-one-unverified-one-verified.png` (1
+   unverified, 1 verified). The API domain tests also pass with Postgres:
+   `go test ./internal/api -run Domain -count=1 -v` — `TestDomainsIntegration`
+   and all five DNS resolver tests pass.
+
+2. **CI and formatting — Not done.** The two identified Go files have not yet
+   been formatted, and a green Actions run for a final SHA has not been
+   confirmed. `go vet ./...` passed. Full `go test ./...` currently fails in
+   legacy auth integration tests (`TestAuthRegisterLoginMeIntegration`,
+   `TestContactsCRUDIntegration`, `TestCampaignsLifecycleIntegration`,
+   `TestAnalyticsOverviewIntegration`, and `TestAPIKeyLifecycleIntegration`);
+   these still expect the retired registration response and reuse hard-coded
+   accounts. This must be reconciled before treating the release gate as green.
+
+3. **DKIM signing — Not done.** Outbound messages have not been verified against
+   the per-domain public key. Signer selection and implementation are pending.
+
+4. **Production mail guard — Not done.** Startup validation for production
+   Mailpit/localhost SMTP and the log provider is not implemented or tested.
+   No external verification email was sent.
+
+5. **Server environment — Not done.** No production server or `.env` was
+   accessed; required production variables and `scripts/check-env.sh` have not
+   been verified.
+
+6. **Migrations on production backup — Not done.** No production backup was
+   available or accessed; migrations 0013–0015 have not been run against a
+   restored production copy.
+
+7. **Backfill on production copy — Not done.** The production database is out
+   of scope and unavailable. Backfill has not been run on a production copy or
+   server.
+
+### Remaining non-blocking limitations
+
+- P6 live DNS verification has only fake-resolver coverage.
+- P7–P9 lack a full registration-to-campaign-delivery browser journey.
+- Templates do not have complete update/delete and full-editor workflows.
+- Report accuracy is unverified; billing has no provider end-to-end proof.
 
 ## Deploy steps
 

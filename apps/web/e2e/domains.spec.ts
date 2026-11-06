@@ -1,117 +1,182 @@
-import { expect, test } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
+import { expect, test, type APIRequestContext } from "@playwright/test";
 
-const EMAIL = process.env.DEPLOY_SMOKE_EMAIL ?? "smoke@sendwise.test";
-const PASSWORD = process.env.DEPLOY_SMOKE_PASSWORD ?? "SmokeTest2026!";
+const API_ORIGIN = process.env.E2E_API_ORIGIN ?? "http://localhost:8084";
+const MAILPIT_API = process.env.MAILPIT_API_URL ?? "http://localhost:8025";
 
-test("sending domains: generated records, verification, and no browser errors", async ({ page }) => {
+async function findVerificationLink(
+  request: APIRequestContext,
+  email: string,
+): Promise<string> {
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    const response = await request.get(`${MAILPIT_API}/api/v1/search`, {
+      params: { query: `to:${email}` },
+    });
+    expect(response.ok(), `Mailpit search failed with ${response.status()}`).toBeTruthy();
+    const result = (await response.json()) as {
+      messages?: Array<{ ID?: string; id?: string; Subject?: string; subject?: string }>;
+    };
+    const message = (result.messages ?? []).find((item) =>
+      (item.Subject ?? item.subject ?? "").toLowerCase().includes("verify your email"),
+    );
+    const id = message?.ID ?? message?.id;
+    if (id) {
+      const detail = await request.get(
+        `${MAILPIT_API}/api/v1/message/${encodeURIComponent(id)}`,
+      );
+      expect(detail.ok(), `Mailpit message read failed with ${detail.status()}`).toBeTruthy();
+      const content = JSON.stringify(await detail.json());
+      const link = content.match(/https?:\/\/[^\s"'<>\\]+/g)?.find((item) =>
+        item.includes("/auth/verify?"),
+      );
+      if (link) {
+        return link.replaceAll("\\u0026", "&").replaceAll("&amp;", "&");
+      }
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+  }
+  throw new Error("Mailpit did not receive the domain-page test account verification email");
+}
+
+function runLocalSQL(sql: string): void {
+  const composeFiles = [
+    resolve(process.cwd(), "../../docker-compose.yml"),
+    resolve(process.cwd(), "../../docker-compose.microservices.yml"),
+  ];
+  const args = [
+    "compose",
+    ...composeFiles.flatMap((file) => ["-f", file]),
+    "exec",
+    "-T",
+    "postgres",
+    "sh",
+    "-lc",
+    `psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "${sql}"`,
+  ];
+  execFileSync("docker", args, { stdio: "pipe" });
+}
+
+function seedDomains(organizationID: string, stamp: number): void {
+  if (!/^[0-9a-f-]{36}$/i.test(organizationID)) {
+    throw new Error("The login token did not contain a valid organization ID");
+  }
+  runLocalSQL(`
+    INSERT INTO sending_domains (
+      organization_id, domain, status, dkim_selector, dkim_public_key,
+      spf_status, dkim_status, dmarc_status, verification_status,
+      last_checked_at, verified_at
+    ) VALUES
+      ('${organizationID}', 'pending-${stamp}.example.test', 'pending', 'mail', NULL,
+       'pending', 'missing', 'pending', 'pending', NULL, NULL),
+      ('${organizationID}', 'verified-${stamp}.example.test', 'verified', 'mail', '',
+       'verified', 'verified', 'verified', 'verified', now(), now())
+  `);
+}
+
+function seedMisconfiguredDomain(organizationID: string, stamp: number): void {
+  runLocalSQL(`
+    INSERT INTO sending_domains (
+      organization_id, domain, status, dkim_selector, dkim_public_key,
+      spf_status, dkim_status, dmarc_status, verification_status,
+      last_checked_at, verified_at
+    ) VALUES (
+      '${organizationID}', 'misconfigured-${stamp}.example.test',
+      'misconfigured', 'mail', NULL, 'mismatched', 'missing', 'verified',
+      'mismatched', NULL, NULL
+    )
+  `);
+}
+
+test("sending domains load from the real API without browser errors", async ({
+  page,
+  request,
+}, testInfo) => {
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
+  const domainAPIResponses: number[] = [];
   page.on("pageerror", (error) => pageErrors.push(`${error.message}\n${error.stack ?? ""}`));
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
   });
+  page.on("response", (response) => {
+    if (
+      response.url().startsWith(API_ORIGIN) &&
+      new URL(response.url()).pathname.includes("/api/v1/domains")
+    ) {
+      domainAPIResponses.push(response.status());
+    }
+  });
 
-  await page.goto("/login");
-  await page.getByPlaceholder("you@example.com").fill(EMAIL);
-  await page.getByPlaceholder("••••••••").fill(PASSWORD);
+  const stamp = Date.now();
+  const email = `domain-page-${stamp}@example.test`;
+  const password = `Domain-${stamp}-Page-Test!`;
+
+  await page.goto("/register");
+  await page.getByPlaceholder("Your name").fill("Domain Page Test");
+  await page.getByPlaceholder("you@example.com").fill(email);
+  await page.getByPlaceholder("Acme Studio").fill(`Domain Page ${stamp}`);
+  await page.getByPlaceholder("••••••••••").fill(password);
+  const registrationResponse = page.waitForResponse(
+    (response) =>
+      response.url().startsWith(API_ORIGIN) &&
+      new URL(response.url()).pathname.endsWith("/auth/register"),
+  );
+  await page.getByRole("button", { name: "Create workspace" }).click();
+  const registered = await registrationResponse;
+  expect(registered.status(), await registered.text()).toBe(201);
+  await page.waitForURL("**/login");
+
+  const verificationLink = await findVerificationLink(request, email);
+  const verificationToken = new URL(verificationLink).searchParams.get("token");
+  expect(verificationToken).toBeTruthy();
+  await page.goto(`/auth/verify?token=${encodeURIComponent(verificationToken!)}`);
+  await expect(page.getByText("Verified", { exact: true })).toBeVisible();
+  await page.waitForURL("**/login");
+
+  await page.getByPlaceholder("you@example.com").fill(email);
+  await page.getByPlaceholder("••••••••").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL("**/dashboard");
   await page.goto("/domains");
   await expect(page.getByRole("heading", { name: "Sending domains" })).toBeVisible();
+  await expect(page.getByText("No sending domains yet.")).toBeVisible();
+  expect(domainAPIResponses).toContain(200);
+  await page.screenshot({ path: testInfo.outputPath("domains-empty.png"), fullPage: true });
 
-  const domainName = `domain-e2e-${Date.now()}.example.com`;
-  const createResponse = page.waitForResponse(
-    (response) =>
-      response.url().endsWith("/api/v1/domains") &&
-      response.request().method() === "POST" &&
-      response.status() === 201,
-  );
-  await page.getByPlaceholder("mail.yourdomain.com").fill(domainName);
-  await page.getByRole("button", { name: "Add domain" }).click();
-  const created = await (await createResponse).json();
-  await expect(page.getByText(domainName, { exact: true }).first()).toBeVisible();
+  const accessToken = await page.evaluate(() => localStorage.getItem("access_token"));
+  expect(accessToken).toBeTruthy();
+  const payload = accessToken!.split(".")[1].replaceAll("-", "+").replaceAll("_", "/");
+  const claims = JSON.parse(
+    atob(payload.padEnd(Math.ceil(payload.length / 4) * 4, "=")),
+  ) as { org?: string };
+  expect(claims.org).toBeTruthy();
+  seedDomains(claims.org!, stamp);
 
-  const domainCard = page.locator("div.cursor-pointer").filter({ hasText: domainName }).first();
-  await domainCard.click();
-  const recordsTable = page.getByRole("table");
+  await page.reload();
+  await expect(page.getByText("1 of 2 verified", { exact: true })).toBeVisible();
   await expect(
-    recordsTable.getByText(`_sendwise-verification.${domainName}`, { exact: true }),
+    page.getByText(`pending-${stamp}.example.test`, { exact: true }).first(),
   ).toBeVisible();
-  await expect(recordsTable.locator("tbody tr")).toHaveCount(4);
   await expect(
-    recordsTable.getByText(`v=DKIM1; k=rsa; p=${created.dkim_public_key}`, { exact: true }),
+    page.getByText(`verified-${stamp}.example.test`, { exact: true }).first(),
   ).toBeVisible();
-
-  const dnsRecords = [
-    {
-      type: "TXT",
-      name: domainName,
-      value: "v=spf1 mx ~all",
-      purpose: "SPF",
-      status: "verified",
-    },
-    {
-      type: "TXT",
-      name: `${created.dkim_selector}._domainkey.${domainName}`,
-      value: `v=DKIM1; k=rsa; p=${created.dkim_public_key}`,
-      purpose: "DKIM",
-      status: "verified",
-    },
-    {
-      type: "TXT",
-      name: `_dmarc.${domainName}`,
-      value: "v=DMARC1; p=none",
-      purpose: "DMARC",
-      status: "verified",
-    },
-    {
-      type: "TXT",
-      name: `_sendwise-verification.${domainName}`,
-      value: `v=sendwise-verification ${domainName}`,
-      purpose: "Domain ownership",
-      status: "verified",
-    },
-  ];
-  const verifiedDomain = {
-    ...created,
-    status: "verified",
-    spf_status: "verified",
-    dkim_status: "verified",
-    dmarc_status: "verified",
-    verification_status: "verified",
-    last_checked_at: new Date().toISOString(),
-  };
-
-  await page.route(`**/api/v1/domains/${created.id}/verify`, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ domain: verifiedDomain, dns_records: dnsRecords }),
-    });
-  });
-  await page.route(`**/api/v1/domains/${created.id}/dns-records`, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ domain: verifiedDomain, dns_records: dnsRecords }),
-    });
-  });
-  await page.route("**/api/v1/domains", async (route) => {
-    if (route.request().method() !== "GET") {
-      await route.continue();
-      return;
-    }
-    const response = await route.fetch();
-    const body = await response.json();
-    const domain = body.data?.find((item: { id: string }) => item.id === created.id);
-    if (domain) Object.assign(domain, verifiedDomain);
-    await route.fulfill({ response, body: JSON.stringify(body) });
+  await expect(page.getByText("Verification needed", { exact: true })).toBeVisible();
+  await expect(page.getByText("Ready to send", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("domains-one-unverified-one-verified.png"),
+    fullPage: true,
   });
 
-  await domainCard.getByRole("button", { name: "Verify now" }).click();
-  await expect(page.getByText("This domain is ready to send.")).toBeVisible();
-  await expect(domainCard.getByText("Ready to send")).toBeVisible();
-  await expect(page.getByText(`_sendwise-verification.${domainName}`, { exact: true })).toBeVisible();
+  seedMisconfiguredDomain(claims.org!, stamp);
+  await page.reload();
+  await expect(
+    page.getByText(`misconfigured-${stamp}.example.test`, { exact: true }).first(),
+  ).toBeVisible();
+  await expect(page.getByText("misconfigured", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("mismatched", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("missing", { exact: true }).first()).toBeVisible();
 
   expect(pageErrors, pageErrors.join("\n")).toEqual([]);
   expect(consoleErrors, consoleErrors.join("\n")).toEqual([]);
