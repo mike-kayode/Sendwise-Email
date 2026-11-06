@@ -688,6 +688,12 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
    docker-build: success
    ```
 
+   The subsequent status-only Actions run [#34](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42258811907)
+   passed `test-go`, `test-web`, `lint`, and `docker-build`, but its E2E job
+   timed out in `p2-auth.spec.ts` waiting for a successful invitations response.
+   The DKIM code was unchanged from run #33; the follow-up final-SHA run will
+   determine whether this was transient.
+
 4. **Production mail guard — Not done.** Startup validation for production
    Mailpit/localhost SMTP and the log provider is not implemented or tested.
    No external verification email was sent.
