@@ -7,26 +7,10 @@ import (
 	"github.com/khayode/email-platform/internal/auth"
 )
 
-// ensureActorMiddleware self-heals the legacy users/organizations rows that
-// write-path foreign keys (created_by, organization_id) reference.
-//
-// Identity and Workspace own those records and publish projection events that
-// the worker applies asynchronously. When an event is missed (worker downtime,
-// recreated NATS stream, deployment on a fresh volume), every insert that
-// references the missing row fails with an opaque 500 — e.g.
-// "Could not create the template." Running a cheap idempotent upsert before
-// each authenticated write makes the API converge regardless of event
-// delivery, without weakening the projections (they use ON CONFLICT DO
-// NOTHING, so a later real event never collides with the placeholder).
 func (s *Server) ensureActorMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet, http.MethodHead, http.MethodOptions:
-			// Reads never touch insert foreign keys.
-		default:
-			if claims := s.claims(r); claims != nil {
-				s.ensureActorRows(r.Context(), claims)
-			}
+		if claims := s.claims(r); claims != nil {
+			s.ensureActorRows(r.Context(), claims)
 		}
 		next.ServeHTTP(w, r)
 	})

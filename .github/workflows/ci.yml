@@ -25,6 +25,16 @@ jobs:
         run: |
           gofmt -l cmd internal services shared
           test -z "$(gofmt -l cmd internal services shared)"
+      - name: Go build
+        run: go build ./...
+      - name: Validate Compose files
+        env:
+          SERVICE_TOKEN: ci-only-service-token
+          WEBHOOK_SECRET: ci-only-webhook-secret
+        run: |
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.microservices.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.microservices.yml config -q
       - name: Compose config check
         run: |
           docker compose -f docker-compose.yml config -q
@@ -90,6 +100,8 @@ jobs:
         run: npm --prefix apps/web run typecheck
       - name: Lint
         run: npm --prefix apps/web run lint
+      - name: Test
+        run: npm --prefix apps/web test
       - name: Build
         run: npm --prefix apps/web run build
 
