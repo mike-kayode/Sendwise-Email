@@ -8,7 +8,7 @@ on:
 
 env:
   GO_VERSION: "1.26"
-  NODE_VERSION: "20"
+  NODE_VERSION: "22"
 
 jobs:
   lint:
@@ -33,7 +33,6 @@ jobs:
           WEBHOOK_SECRET: ci-only-webhook-secret
         run: |
           docker compose -f docker-compose.yml config -q
-          docker compose -f docker-compose.microservices.yml config -q
           docker compose -f docker-compose.yml -f docker-compose.microservices.yml config -q
 
   test-go:
