@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -103,5 +104,57 @@ func TestLoadConfigRejectsUnknownMailProvider(t *testing.T) {
 
 	if _, err := LoadConfig(); err == nil {
 		t.Fatal("LoadConfig() error = nil, want failure for unknown MAIL_PROVIDER")
+	}
+}
+
+func TestLoadProductionRejectsDevelopmentMailRelay(t *testing.T) {
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("SERVICE_TOKEN", "test-service-token")
+	t.Setenv("SMTP_USERNAME", "mailer")
+	t.Setenv("SMTP_PASSWORD", "smtp-secret")
+	t.Setenv("SMTP_FROM", "hello@example.test")
+	t.Setenv("RESEND_API_KEY", "test-resend-key")
+	t.Setenv("RESEND_FROM_EMAIL", "hello@example.test")
+
+	for _, test := range []struct {
+		name     string
+		provider string
+		addr     string
+		host     string
+		want     string
+	}{
+		{name: "mailpit relay", provider: "smtp", addr: "mailpit:1025", host: "mailpit", want: "development-only relay"},
+		{name: "localhost relay", provider: "smtp", addr: "localhost:587", host: "localhost", want: "development-only relay"},
+		{name: "loopback ip relay", provider: "smtp", addr: "127.0.0.1:587", host: "127.0.0.1", want: "development-only relay"},
+		{name: "mailpit with resend provider", provider: "resend", addr: "mailpit:1025", host: "mailpit", want: "development-only relay"},
+		{name: "log mailer", provider: "log", addr: "smtp.example.test:587", host: "smtp.example.test", want: "MAIL_PROVIDER=log is not allowed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("MAIL_PROVIDER", test.provider)
+			t.Setenv("SMTP_ADDR", test.addr)
+			t.Setenv("SMTP_HOST", test.host)
+
+			_, err := LoadConfig()
+			if err == nil {
+				t.Fatalf("LoadConfig() accepted production mail configuration %s/%s/%s", test.provider, test.addr, test.host)
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("LoadConfig() error = %q, want it to contain %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadDevelopmentAllowsDevelopmentMailRelay(t *testing.T) {
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("SERVICE_TOKEN", "test-service-token")
+	t.Setenv("MAIL_PROVIDER", "log")
+	t.Setenv("SMTP_ADDR", "mailpit:1025")
+	t.Setenv("SMTP_HOST", "mailpit")
+
+	if _, err := LoadConfig(); err != nil {
+		t.Fatalf("LoadConfig() rejected development Mailpit/log configuration: %v", err)
 	}
 }

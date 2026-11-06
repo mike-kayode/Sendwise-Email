@@ -131,6 +131,32 @@ func TestLoadProductionRequiresSecureConfiguration(t *testing.T) {
 				values["ACCESS_TOKEN_TTL"] = "2h"
 			},
 		},
+		{
+			name: "smtp relay is mailpit",
+			mutate: func(values map[string]string) {
+				values["SMTP_ADDR"] = "mailpit:1025"
+				values["SMTP_HOST"] = "mailpit"
+			},
+		},
+		{
+			name: "smtp relay is localhost",
+			mutate: func(values map[string]string) {
+				values["SMTP_ADDR"] = "localhost:587"
+				values["SMTP_HOST"] = "localhost"
+			},
+		},
+		{
+			name: "mail provider is log",
+			mutate: func(values map[string]string) {
+				values["MAIL_PROVIDER"] = "log"
+			},
+		},
+		{
+			name: "unknown mail provider",
+			mutate: func(values map[string]string) {
+				values["MAIL_PROVIDER"] = "carrier-pigeon"
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -152,6 +178,32 @@ func TestLoadAcceptsValidProductionConfiguration(t *testing.T) {
 	if !cfg.RequireVerifiedDomain {
 		t.Fatal("production must require verified domains")
 	}
+	if cfg.MailProvider != "auto" {
+		t.Fatalf("MailProvider = %q, want auto default", cfg.MailProvider)
+	}
+}
+
+func TestLoadProductionMailProviderResendAcceptsRealRelay(t *testing.T) {
+	values := productionConfig()
+	values["MAIL_PROVIDER"] = "resend"
+	cfg, err := load(configLookup(values))
+	if err != nil {
+		t.Fatalf("load production config with resend: %v", err)
+	}
+	if cfg.MailProvider != "resend" {
+		t.Fatalf("MailProvider = %q, want resend", cfg.MailProvider)
+	}
+}
+
+func TestLoadDevelopmentAllowsDevelopmentMailRelay(t *testing.T) {
+	values := map[string]string{
+		"MAIL_PROVIDER": "log",
+		"SMTP_ADDR":     "mailpit:1025",
+		"SMTP_HOST":     "mailpit",
+	}
+	if _, err := load(configLookup(values)); err != nil {
+		t.Fatalf("development load rejected Mailpit/log configuration: %v", err)
+	}
 }
 
 func TestLoadAppliesProductionRulesToStaging(t *testing.T) {
@@ -170,6 +222,8 @@ func productionConfig() map[string]string {
 	return map[string]string{
 		"APP_ENV":                 "production",
 		"JWT_SECRET":              strings.Repeat("a", 48),
+		"SMTP_ADDR":               "smtp.example.test:587",
+		"SMTP_HOST":               "smtp.example.test",
 		"SMTP_USERNAME":           "mailer",
 		"SMTP_PASSWORD":           "smtp-secret",
 		"IDENTITY_URL":            "http://identity:8080",

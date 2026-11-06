@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/khayode/email-platform/internal/kit"
 )
 
 type Config struct {
@@ -47,6 +49,7 @@ type Config struct {
 	DomainConcurrencyLimit int
 	CORSOrigins            []string
 	RequireVerifiedDomain  bool
+	MailProvider           string
 	ResendAPIKey           string
 	ResendFromEmail        string
 	ResendFromName         string
@@ -159,11 +162,18 @@ func load(lookup func(string) string) (Config, error) {
 		DomainConcurrencyLimit: domainConcurrencyLimit,
 		CORSOrigins:            splitCSV(getenv(lookup, "CORS_ORIGINS", "http://localhost:3000")),
 		RequireVerifiedDomain:  requireVerifiedDomain,
+		MailProvider:           strings.ToLower(strings.TrimSpace(getenv(lookup, "MAIL_PROVIDER", "auto"))),
 		ResendAPIKey:           resendAPIKey,
 		ResendFromEmail:        resendFromEmail,
 		ResendFromName:         resendFromName,
 		SuperAdminEmails:       superAdminEmails,
 		WebhookSecret:          webhookSecret,
+	}
+
+	switch cfg.MailProvider {
+	case "auto", "smtp", "resend", "log":
+	default:
+		return cfg, fmt.Errorf("MAIL_PROVIDER must be auto, smtp, resend, or log, got %q", cfg.MailProvider)
 	}
 
 	if cfg.JWTSecret == "" {
@@ -184,6 +194,12 @@ func load(lookup func(string) string) (Config, error) {
 		}
 		if !cfg.RequireVerifiedDomain {
 			return cfg, fmt.Errorf("REQUIRE_VERIFIED_DOMAIN must be true in staging and production")
+		}
+		// Campaign delivery always uses SMTP, so a secure environment that
+		// still points at Mailpit or the loopback interface must fail at
+		// startup instead of silently discarding production mail.
+		if err := kit.ValidateProductionMail(env, cfg.MailProvider, cfg.SMTPAddr, cfg.SMTPHost); err != nil {
+			return cfg, err
 		}
 		if cfg.SMTPUsername == "" || cfg.SMTPPassword == "" {
 			return cfg, fmt.Errorf("SMTP_USERNAME and SMTP_PASSWORD are required in staging and production")

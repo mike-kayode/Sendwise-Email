@@ -95,5 +95,11 @@ func LoadConfig() (Config, error) {
 			return Config{}, fmt.Errorf("MAIL_PROVIDER=log is not allowed in production")
 		}
 	}
+	// Fail fast when a secure environment would deliver mail to Mailpit or the
+	// loopback interface, or when the log mailer is configured: both accept
+	// the message and never hand it to a real recipient.
+	if err := kit.ValidateProductionMail(base.Env, cfg.MailProvider, cfg.SMTPAddr, cfg.SMTPHost); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
