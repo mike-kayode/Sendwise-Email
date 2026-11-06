@@ -51,6 +51,12 @@ func TestLoadConfigAlwaysSecuresCookiesInProduction(t *testing.T) {
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("SERVICE_TOKEN", "test-service-token")
 	t.Setenv("COOKIE_SECURE", "false")
+	t.Setenv("MAIL_PROVIDER", "smtp")
+	t.Setenv("SMTP_ADDR", "smtp.example.test:587")
+	t.Setenv("SMTP_HOST", "smtp.example.test")
+	t.Setenv("SMTP_USERNAME", "mailer")
+	t.Setenv("SMTP_PASSWORD", "smtp-secret")
+	t.Setenv("SMTP_FROM", "hello@example.test")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -58,6 +64,35 @@ func TestLoadConfigAlwaysSecuresCookiesInProduction(t *testing.T) {
 	}
 	if !cfg.CookieSecure {
 		t.Error("CookieSecure = false in production")
+	}
+}
+
+func TestLoadProductionRequiresWorkingMailProvider(t *testing.T) {
+	for key, value := range map[string]string{
+		"JWT_SECRET": "test-secret", "APP_ENV": "production", "SERVICE_TOKEN": "test-service-token",
+	} {
+		t.Setenv(key, value)
+	}
+	t.Setenv("MAIL_PROVIDER", "smtp")
+	t.Setenv("SMTP_ADDR", "")
+	t.Setenv("SMTP_HOST", "")
+	t.Setenv("SMTP_USERNAME", "")
+	t.Setenv("SMTP_PASSWORD", "")
+	t.Setenv("SMTP_FROM", "")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig() accepted production SMTP without credentials")
+	}
+
+	t.Setenv("MAIL_PROVIDER", "resend")
+	t.Setenv("RESEND_API_KEY", "")
+	t.Setenv("RESEND_FROM_EMAIL", "")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig() accepted production Resend without credentials")
+	}
+
+	t.Setenv("MAIL_PROVIDER", "log")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig() accepted the log mailer in production")
 	}
 }
 

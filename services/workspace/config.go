@@ -17,6 +17,7 @@ type Config struct {
 	AppBaseURL     string
 	AccessTokenTTL time.Duration
 	ServiceToken   string
+	IdentityURL    string
 }
 
 // LoadConfig reads Workspace service configuration from environment variables.
@@ -31,6 +32,7 @@ func LoadConfig() (Config, error) {
 		AppBaseURL:     strings.TrimRight(kit.Getenv("APP_BASE_URL", "http://localhost:3000"), "/"),
 		AccessTokenTTL: kit.GetenvDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
 		ServiceToken:   kit.Getenv("SERVICE_TOKEN", ""),
+		IdentityURL:    strings.TrimRight(kit.Getenv("IDENTITY_URL", "http://localhost:8082"), "/"),
 	}
 
 	if cfg.JWTSecret == "" {

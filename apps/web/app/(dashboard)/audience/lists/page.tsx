@@ -1,8 +1,9 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import Link from "next/link";
 import { useState } from "react";
-import { ArrowDownRight, ArrowUpRight, Plus, Users } from "lucide-react";
+import { Plus, Users } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -33,7 +34,7 @@ export default function ListsPage() {
   const listsQuery = useQuery({
     queryKey: ["lists"],
     queryFn: async () => {
-      const res = await apiFetch<{ data: ContactList[] | null }>("/lists");
+      const res = await apiFetch<{ data: ContactList[]; pagination: { total: number; limit: number; offset: number } }>("/lists");
       return res.data ?? [];
     },
   });
@@ -76,6 +77,21 @@ export default function ListsPage() {
     }
   };
 
+  const handleDeleteList = async (list: ContactList) => {
+    if (!window.confirm(`Delete "${list.name}"? This removes its membership records but not the contacts.`)) return;
+    try {
+      await apiFetch(`/lists/${list.id}`, { method: "DELETE" });
+      await listsQuery.refetch();
+      toast({ title: "List deleted", description: "Contacts were not deleted." });
+    } catch (error) {
+      toast({
+        title: "Failed to delete list",
+        description: error instanceof Error ? error.message : "The list could not be deleted.",
+        variant: "destructive",
+      });
+    }
+  };
+
   return (
     <div>
       <PageHeader
@@ -93,8 +109,9 @@ export default function ListsPage() {
       />
 
       {listsQuery.error ? (
-        <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
-          Unable to load lists: {(listsQuery.error as Error).message}
+        <div role="alert" className="mb-4 flex items-center justify-between rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+          <span>Unable to load lists: {(listsQuery.error as Error).message}</span>
+          <Button variant="secondary" onClick={() => void listsQuery.refetch()}>Retry</Button>
         </div>
       ) : null}
 
@@ -127,10 +144,7 @@ export default function ListsPage() {
                   <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
                     <Users className="h-4 w-4" />
                   </span>
-                  <Badge variant="success">
-                    <ArrowUpRight className="h-3 w-3" />
-                    0%
-                  </Badge>
+                  <Badge variant="success">{list.contact_count} contacts</Badge>
                 </div>
                 <h3 className="mt-3 text-sm font-semibold text-slate-900">{list.name}</h3>
                 <p className="mt-0.5 line-clamp-2 text-xs text-slate-500">
@@ -140,6 +154,12 @@ export default function ListsPage() {
                   {formatNumber(list.contact_count)}
                 </p>
                 <p className="text-xs text-slate-500">contacts</p>
+                <Link
+                  href={`/audience/lists/${list.id}`}
+                  className="mt-4 inline-flex text-xs font-medium text-indigo-600 hover:text-indigo-500"
+                >
+                  Manage list
+                </Link>
               </CardContent>
             </Card>
           ))
@@ -179,9 +199,18 @@ export default function ListsPage() {
                       {formatNumber(list.contact_count)}
                     </Td>
                     <Td>
-                      <button className="text-xs font-medium text-indigo-600 hover:text-indigo-500">
-                        Manage
-                      </button>
+                      <div className="flex items-center justify-end gap-3">
+                        <Link href={`/audience/lists/${list.id}`} className="text-xs font-medium text-indigo-600 hover:text-indigo-500">
+                          Manage
+                        </Link>
+                        <button
+                          type="button"
+                          className="text-xs font-medium text-rose-600 hover:text-rose-500"
+                          onClick={() => void handleDeleteList(list)}
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </Td>
                   </Tr>
                 ))

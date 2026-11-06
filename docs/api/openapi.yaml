@@ -90,24 +90,32 @@ components:
           description: Evidence provided for the contact's marketing opt-in.
     SegmentRules:
       type: object
-      required: [match, conditions]
+      required: [groups]
       properties:
-        match: { type: string, enum: [all, any] }
-        conditions:
+        groups:
           type: array
           minItems: 1
-          maxItems: 50
+          maxItems: 20
           items:
             type: object
-            required: [field, operator]
+            required: [match, conditions]
             properties:
-              field:
-                type: string
-                description: Allowed values are email, first_name, last_name, status, source, created_at, or custom_fields.<key> with a safe key name.
-              operator:
-                type: string
-                enum: [equals, not_equals, contains, does_not_contain, greater_than, less_than, is_empty, is_not_empty, date_before, date_after]
-              value: { type: string }
+              match: { type: string, enum: [AND, OR] }
+              conditions:
+                type: array
+                minItems: 1
+                maxItems: 50
+                items:
+                  type: object
+                  required: [field, operator]
+                  properties:
+                    field:
+                      type: string
+                      pattern: '^(email|status|tag|list|created_at|custom_fields\.[A-Za-z][A-Za-z0-9_]{0,62})$'
+                    operator:
+                      type: string
+                      enum: [equals, not_equals, contains, does_not_contain, is_empty, is_not_empty, before, after]
+                    value: { type: string }
     ContactList:
       type: object
       properties:
@@ -435,11 +443,86 @@ paths:
       responses:
         '201': { description: Contact list created }
   /api/v1/lists/{id}:
+    get:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Get a list and its current member count
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Contact list }
+        '404': { description: List not found in the authenticated organization }
+    patch:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Rename or update a list
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                description: { type: string }
+      responses:
+        '204': { description: List updated }
+        '404': { description: List not found in the authenticated organization }
     delete:
       tags: [audiences]
       security: [{ BearerAuth: [] }]
       parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses: { '204': { description: Deleted } }
+  /api/v1/lists/{id}/contacts:
+    get:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: List paginated members of a list
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated list members with total, limit, and offset }
+        '404': { description: List not found in the authenticated organization }
+    post:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Add contacts to a list
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contact_ids]
+              properties:
+                contact_ids: { type: array, items: { type: string, format: uuid }, minItems: 1, maxItems: 500 }
+      responses:
+        '204': { description: Membership added }
+        '404': { description: List or contact not found in the authenticated organization }
+  /api/v1/lists/{id}/contacts/{contactID}:
+    delete:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Remove a contact from a list without deleting the contact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: contactID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Membership removed }
+        '404': { description: List or contact not found in the authenticated organization }
+  /api/v1/lists/{id}/contacts/export:
+    get:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Export list members as CSV
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: CSV file of list members, content: { text/csv: {} } }
+        '404': { description: List not found in the authenticated organization }
 
   /api/v1/tags:
     get:
@@ -454,6 +537,74 @@ paths:
       summary: Create a tag
       responses:
         '201': { description: Tag created }
+  /api/v1/tags/{id}:
+    patch:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Rename or recolor a tag
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Tag updated }
+        '404': { description: Tag not found in the authenticated organization }
+    delete:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Delete a tag and its assignments
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Tag deleted }
+        '404': { description: Tag not found in the authenticated organization }
+  /api/v1/contacts/tags:
+    post:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Bulk assign a tag to contacts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tag_id, contact_ids]
+              properties:
+                tag_id: { type: string, format: uuid }
+                contact_ids: { type: array, items: { type: string, format: uuid }, minItems: 1, maxItems: 500 }
+      responses:
+        '204': { description: Tag assigned }
+        '404': { description: Tag or contact not found in the authenticated organization }
+  /api/v1/contacts/{id}/tags:
+    get:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: List a contact's tags
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated contact tags }
+        '404': { description: Contact not found in the authenticated organization }
+  /api/v1/contacts/{id}/tags/{tagID}:
+    post:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Assign a tag to a contact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: tagID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Tag assigned }
+        '404': { description: Tag or contact not found in the authenticated organization }
+    delete:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Unassign a tag from a contact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: tagID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Tag unassigned }
+        '404': { description: Tag or contact not found in the authenticated organization }
   /api/v1/forms:
     get:
       tags: [forms]
@@ -554,8 +705,6 @@ paths:
       responses:
         '201': { description: Segment created }
         '400': { description: Invalid segment rules }
-      responses:
-        '201': { description: Segment created }
 
   /api/v1/segments/{id}:
     delete:
@@ -565,6 +714,36 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         '204': { description: Segment deleted }
+        '404': { description: Segment not found in the authenticated organization }
+  /api/v1/segments/{id}/contacts:
+    get:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: List paginated segment contacts
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated segment contacts evaluated from the saved rules }
+        '404': { description: Segment not found in the authenticated organization }
+  /api/v1/segments/preview:
+    post:
+      tags: [audiences]
+      security: [{ BearerAuth: [] }]
+      summary: Preview segment rules with count and up to ten contacts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rules]
+              properties:
+                rules: { $ref: '#/components/schemas/SegmentRules' }
+      responses:
+        '200': { description: Match count and up to ten sample contacts }
+        '400': { description: Invalid segment rules }
 
   /api/v1/templates:
     get:

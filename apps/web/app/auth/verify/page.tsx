@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldLabel } from "@/components/ui/form";
@@ -21,6 +21,7 @@ export default function VerifyEmailPage() {
   const [message, setMessage] = useState("");
   const [email, setEmail] = useState("");
   const [resendState, setResendState] = useState<"idle" | "sending" | "sent">("idle");
+  const verificationRequest = useRef<Promise<{ message: string }> | null>(null);
 
   useEffect(() => {
     const token = new URLSearchParams(window.location.search).get("token");
@@ -30,13 +31,17 @@ export default function VerifyEmailPage() {
       return;
     }
 
-    let cancelled = false;
-    apiFetch<{ message: string }>("/auth/verify", {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    })
+    if (!verificationRequest.current) {
+      verificationRequest.current = apiFetch<{ message: string }>("/auth/verify", {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      });
+    }
+
+    let active = true;
+    verificationRequest.current
       .then((res) => {
-        if (cancelled) return;
+        if (!active) return;
         setState("success");
         setMessage(res.message ?? "Email verified.");
         toast({
@@ -46,13 +51,13 @@ export default function VerifyEmailPage() {
         setTimeout(() => router.push("/login"), 1200);
       })
       .catch((err: any) => {
-        if (cancelled) return;
+        if (!active) return;
         setState("error");
         setMessage(err?.message ?? "This verification link is invalid or has expired.");
       });
 
     return () => {
-      cancelled = true;
+      active = false;
     };
   }, [router, toast]);
 

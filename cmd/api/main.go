@@ -17,6 +17,7 @@ import (
 	"github.com/khayode/email-platform/internal/messaging"
 	"github.com/khayode/email-platform/internal/observability"
 	"github.com/khayode/email-platform/internal/outbox"
+	"github.com/khayode/email-platform/internal/session"
 )
 
 func main() {
@@ -62,6 +63,9 @@ func main() {
 		}
 	}
 	tokens := auth.NewManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL)
+	if cfg.IdentityURL != "" {
+		tokens = tokens.WithSessionStore(session.NewHTTPStore(cfg.IdentityURL, cfg.ServiceToken))
+	}
 
 	campaignService := campaigns.NewService(pool, publisher, logger, cfg.MaxDeliveryAttempts, cfg.RequireVerifiedDomain)
 	apiKeyService := auth.NewAPIKeyService(pool, logger)

@@ -6,12 +6,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"net/mail"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/khayode/email-platform/internal/kit"
 )
 
@@ -53,7 +55,7 @@ func NewHandler(store Store, tokens *kit.Manager, workspace WorkspaceClient, mai
 	}
 	return &Handler{
 		store:       store,
-		tokens:      tokens,
+		tokens:      tokens.WithSessionStore(localSessionStore{store: store}),
 		workspace:   workspace,
 		mailer:      mailer,
 		cfg:         cfg,
@@ -64,12 +66,34 @@ func NewHandler(store Store, tokens *kit.Manager, workspace WorkspaceClient, mai
 	}
 }
 
+type localSessionStore struct {
+	store Store
+}
+
+func (s localSessionStore) Active(ctx context.Context, userID, sessionID string) (bool, error) {
+	if sessionID == "" {
+		return false, nil
+	}
+	session, err := s.store.GetSession(ctx, sessionID)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return session.UserID == userID && session.RevokedAt == nil && session.ExpiresAt.After(time.Now()), nil
+}
+
 // Routes returns the Identity HTTP router.
 func (h *Handler) Routes() http.Handler {
 	r := http.NewServeMux()
 
 	authRate := kit.RateLimit(h.authLimiter)
+	internal := kit.Chain(http.HandlerFunc(h.checkSession), kit.ServiceAuth(h.cfg.ServiceToken))
+	internalMail := kit.Chain(http.HandlerFunc(h.sendInvitationEmail), kit.ServiceAuth(h.cfg.ServiceToken))
 
+	r.Handle("GET /internal/sessions/{sessionID}", internal)
+	r.Handle("POST /internal/mail/invitation", internalMail)
 	r.Handle("POST /auth/register", authRate(http.HandlerFunc(h.register)))
 	r.Handle("POST /auth/login", authRate(http.HandlerFunc(h.login)))
 	r.Handle("POST /auth/refresh", authRate(http.HandlerFunc(h.refresh)))
@@ -85,6 +109,72 @@ func (h *Handler) Routes() http.Handler {
 	r.HandleFunc("GET /readyz", h.ready)
 
 	return kit.Chain(r, kit.Recover(h.logger), kit.AccessLog(h.logger), kit.RequestID)
+}
+
+func (h *Handler) checkSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("sessionID")
+	userID := r.URL.Query().Get("user_id")
+	if _, err := uuid.Parse(sessionID); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_session_id", "The session id must be a UUID.")
+		return
+	}
+	if _, err := uuid.Parse(userID); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_user_id", "The user id must be a UUID.")
+		return
+	}
+	session, err := h.store.GetSession(r.Context(), sessionID)
+	if errors.Is(err, ErrNotFound) {
+		kit.JSON(w, http.StatusOK, map[string]bool{"active": false})
+		return
+	}
+	if err != nil {
+		h.logger.Error("check session", "error", err, "session_id", sessionID)
+		kit.Error(w, http.StatusInternalServerError, "internal_error", "An unexpected error occurred.")
+		return
+	}
+	active := session.UserID == userID && session.RevokedAt == nil && session.ExpiresAt.After(time.Now())
+	kit.JSON(w, http.StatusOK, map[string]bool{"active": active})
+}
+
+func (h *Handler) sendInvitationEmail(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Email            string `json:"email"`
+		Role             string `json:"role"`
+		OrganizationName string `json:"organization_name"`
+		AcceptURL        string `json:"accept_url"`
+	}
+	if err := kit.Decode(w, r, &request); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_request", "The invitation email request is invalid.")
+		return
+	}
+	request.Email = normalizeEmail(request.Email)
+	request.OrganizationName = strings.TrimSpace(request.OrganizationName)
+	switch request.Role {
+	case "admin", "manager", "author", "analyst", "viewer":
+	default:
+		kit.Error(w, http.StatusBadRequest, "invalid_request", "The invitation email request is incomplete.")
+		return
+	}
+	if !validEmail(request.Email) || request.OrganizationName == "" || strings.ContainsAny(request.OrganizationName, "\r\n") ||
+		request.AcceptURL == "" || strings.ContainsAny(request.AcceptURL, "\r\n") {
+		kit.Error(w, http.StatusBadRequest, "invalid_request", "The invitation email request is incomplete.")
+		return
+	}
+	link := html.EscapeString(request.AcceptURL)
+	organization := html.EscapeString(request.OrganizationName)
+	role := html.EscapeString(request.Role)
+	message := MailMessage{
+		To:      request.Email,
+		Subject: "You are invited to join " + request.OrganizationName,
+		HTML:    "<p>You have been invited to join <strong>" + organization + "</strong> as " + role + ".</p><p><a href=\"" + link + "\">Accept invitation</a></p>",
+		Text:    "You have been invited to join " + request.OrganizationName + " as " + request.Role + ".\n\nAccept the invitation: " + request.AcceptURL,
+	}
+	if err := h.mailer.Send(r.Context(), message); err != nil {
+		h.logger.Error("send invitation email", "email", request.Email, "error", err)
+		kit.Error(w, http.StatusBadGateway, "email_delivery_failed", "The invitation email could not be delivered.")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) ready(w http.ResponseWriter, r *http.Request) {

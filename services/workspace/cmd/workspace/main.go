@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khayode/email-platform/internal/kit"
 	"github.com/khayode/email-platform/internal/outbox"
+	"github.com/khayode/email-platform/internal/session"
 	"github.com/khayode/email-platform/services/workspace"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -74,7 +75,8 @@ func main() {
 		}
 	}
 
-	tokens := kit.NewManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL)
+	tokens := kit.NewManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL).
+		WithSessionStore(session.NewHTTPStore(cfg.IdentityURL, cfg.ServiceToken))
 	handler := workspace.NewHandler(store, tokens, cfg, logger)
 
 	logger.Info("workspace service starting", "address", cfg.HTTPAddr)

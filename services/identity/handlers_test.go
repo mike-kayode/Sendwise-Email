@@ -1009,9 +1009,41 @@ func TestHealthAndReady(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("healthz status = %d", rec.Code)
 	}
+
 	rec = doJSON(t, routes, http.MethodGet, "/readyz", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("readyz status = %d", rec.Code)
+	}
+}
+
+func TestInternalInvitationEmailUsesConfiguredMailer(t *testing.T) {
+	handler, _, _, mailer := newTestHandler(t)
+	handler.cfg.ServiceToken = "service-secret"
+	request := httptest.NewRequest(http.MethodPost, "/internal/mail/invitation", strings.NewReader(`{
+		"email":"invitee@example.test",
+		"role":"admin",
+		"organization_name":"Example Workspace",
+		"accept_url":"https://app.example.test/auth/accept-invite?token=abc"
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Service-Token", "service-secret")
+	response := httptest.NewRecorder()
+	handler.Routes().ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("invitation mail status = %d, body = %s", response.Code, response.Body.String())
+	}
+	sent := mailer.Sent()
+	if len(sent) != 1 || sent[0].To != "invitee@example.test" ||
+		!strings.Contains(sent[0].Text, "Example Workspace") ||
+		!strings.Contains(sent[0].Text, "accept-invite?token=abc") {
+		t.Fatalf("sent invitation mail = %#v", sent)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/internal/mail/invitation", strings.NewReader(`{}`))
+	response = httptest.NewRecorder()
+	handler.Routes().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated invitation mail status = %d, want 401", response.Code)
 	}
 }
 

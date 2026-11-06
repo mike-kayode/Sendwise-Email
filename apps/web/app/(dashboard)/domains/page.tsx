@@ -1,29 +1,28 @@
 "use client";
 
 import { useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { CheckCircle2, Copy, Globe, Key, Plus, RefreshCw, ShieldCheck, XCircle, Send } from "lucide-react";
+import { CheckCircle2, Copy, Globe, Plus, RefreshCw, ShieldCheck, XCircle, Send } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { StatusBadge, Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Table, Thead, Tbody, Tr, Th, Td } from "@/components/ui/table";
-import { apiFetch, type SendingDomain } from "@/lib/auth";
+import { apiFetch, type DomainDNSRecord, type SendingDomain } from "@/lib/auth";
 import { formatDateTime } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
 
-const recordStatusText = (status?: string) => (status ? status.replace("_", " ") : "unknown");
+const recordStatusText = (status?: string) => (status ? status.replaceAll("_", " ") : "unknown");
 
 export default function DomainsPage() {
   const [newDomain, setNewDomain] = useState("");
-  const [dkimKey, setDkimKey] = useState("");
-  const [editingDkimDomain, setEditingDkimDomain] = useState<string | null>(null);
   const [selectedDomainId, setSelectedDomainId] = useState<string | null>(null);
   const [verifyingAll, setVerifyingAll] = useState(false);
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
   const dnsSectionRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
+  const queryClient = useQueryClient();
 
   const domainsQuery = useQuery({
     queryKey: ["domains"],
@@ -34,30 +33,26 @@ export default function DomainsPage() {
   });
 
   const domains = domainsQuery.data ?? [];
+  const domainIDs = domains.map((domain) => domain.id);
+  const dnsRecordsQuery = useQuery({
+    queryKey: ["domain-dns-records", domainIDs],
+    enabled: domainIDs.length > 0,
+    queryFn: async () => {
+      const entries = await Promise.all(
+        domains.map(async (domain) => {
+          const result = await apiFetch<{ dns_records: DomainDNSRecord[] }>(
+            `/domains/${domain.id}/dns-records`,
+          );
+          return [domain.id, result.dns_records] as const;
+        }),
+      );
+      return Object.fromEntries(entries);
+    },
+  });
   const unverified = domains.filter((d) => d.status !== "verified");
   const verifiedCount = domains.length - unverified.length;
   const selectedDomain = domains.find((d) => d.id === selectedDomainId) ?? null;
   const domainsForTable = selectedDomain ? [selectedDomain] : domains;
-
-  const handleSetDkimKey = async (domainId: string) => {
-    if (!dkimKey.trim()) return;
-    try {
-      await apiFetch(`/domains/${domainId}/dkim-key`, {
-        method: "POST",
-        body: JSON.stringify({ dkim_public_key: dkimKey }),
-      });
-      setEditingDkimDomain(null);
-      setDkimKey("");
-      void domainsQuery.refetch();
-      toast({ title: "DKIM key saved", description: "Public key stored for this domain." });
-    } catch (err: any) {
-      toast({
-        title: "Failed to save DKIM key",
-        description: err?.message ?? "Unknown error",
-        variant: "destructive",
-      });
-    }
-  };
 
   const handleAddDomain = async () => {
     if (!newDomain.trim()) return;
@@ -67,7 +62,7 @@ export default function DomainsPage() {
         body: JSON.stringify({ domain: newDomain }),
       });
       setNewDomain("");
-      void domainsQuery.refetch();
+      await queryClient.invalidateQueries({ queryKey: ["domains"] });
       toast({ title: "Domain added", description: "Add the DNS records below, then verify." });
     } catch (err: any) {
       toast({ title: "Failed to add domain", description: err?.message ?? "Unknown error", variant: "destructive" });
@@ -77,16 +72,19 @@ export default function DomainsPage() {
   const handleVerify = async (id: string, domainName?: string) => {
     setVerifyingId(id);
     try {
-      await apiFetch(`/domains/${id}/verify`, { method: "POST" });
-      await domainsQuery.refetch();
-      const updated = domainsQuery.data?.find((d) => d.id === id);
+      const result = await apiFetch<{
+        domain: SendingDomain;
+        dns_records: DomainDNSRecord[];
+      }>(`/domains/${id}/verify`, { method: "POST" });
+      await queryClient.invalidateQueries({ queryKey: ["domains"] });
+      await queryClient.invalidateQueries({ queryKey: ["domain-dns-records"] });
       toast({
-        title: updated?.status === "verified" ? `${domainName ?? "Domain"} is verified` : "DNS check complete",
+        title: result.domain.status === "verified" ? `${domainName ?? "Domain"} is verified` : "DNS check complete",
         description:
-          updated?.status === "verified"
+          result.domain.status === "verified"
             ? "SPF, DKIM, and DMARC all passed. This domain is ready to send."
             : "Some records are still missing. Review the DNS table below.",
-        variant: updated?.status === "verified" ? undefined : "destructive",
+        variant: result.domain.status === "verified" ? undefined : "destructive",
       });
     } catch (err: any) {
       toast({ title: "Verification failed", description: err?.message ?? "Unknown error", variant: "destructive" });
@@ -107,7 +105,8 @@ export default function DomainsPage() {
         // Counted as not passed; refetch below shows the real state.
       }
     }
-    await domainsQuery.refetch();
+    await queryClient.invalidateQueries({ queryKey: ["domains"] });
+    await queryClient.invalidateQueries({ queryKey: ["domain-dns-records"] });
     setVerifyingAll(false);
     toast({
       title: "Verification run finished",
@@ -347,95 +346,46 @@ export default function DomainsPage() {
                     </Tr>
                   </Thead>
                   <Tbody>
-                    {domainsForTable.flatMap((domain) =>
-                      [
-                        {
-                          type: "TXT",
-                          name: domain.domain ?? "",
-                          value: "v=spf1 mx ~all",
-                          purpose: "SPF authorizes your sending infrastructure.",
-                          status: domain.spf_status,
-                        },
-                        {
-                          type: "TXT",
-                          name: `${domain.dkim_selector || "mail"}._domainkey.${domain.domain ?? ""}`,
-                          value: "v=DKIM1; k=rsa; p=<PUBLIC_KEY_FROM_STALWART>",
-                          purpose: "DKIM cryptographically signs outbound messages.",
-                          status: domain.dkim_status,
-                        },
-                        {
-                          type: "TXT",
-                          name: `_dmarc.${domain.domain ?? ""}`,
-                          value: `v=DMARC1; p=none; rua=mailto:dmarc@${domain.domain}`,
-                          purpose: "DMARC tells receivers what to do on auth failure.",
-                          status: domain.dmarc_status,
-                        },
-                      ].map((record, idx) => {
-                        const isDkim = record.type === "TXT" && record.name.includes("_domainkey");
-                        const isEditingDkim = isDkim && editingDkimDomain === domain.id;
-                        return (
-                          <Tr key={`${domain.id}-${idx}`}>
+                    {dnsRecordsQuery.error ? (
+                      <Tr>
+                        <Td colSpan={6} className="p-6 text-center text-sm text-red-600">
+                          Could not load DNS records: {dnsRecordsQuery.error.message}
+                        </Td>
+                      </Tr>
+                    ) : dnsRecordsQuery.isLoading ? (
+                      <Tr>
+                        <Td colSpan={6} className="p-6 text-center text-sm text-slate-500">
+                          Loading DNS records...
+                        </Td>
+                      </Tr>
+                    ) : (
+                      domainsForTable.flatMap((domain) =>
+                        (dnsRecordsQuery.data?.[domain.id] ?? []).map((record, idx) => (
+                          <Tr key={`${domain.id}-${record.name}-${idx}`}>
                             <Td>
                               <Badge variant="outline">{record.type}</Badge>
                             </Td>
-                            <Td className="font-mono text-xs text-slate-700">
-                              {record.name}
-                            </Td>
+                            <Td className="font-mono text-xs text-slate-700">{record.name}</Td>
                             <Td className="max-w-[240px] truncate font-mono text-xs text-slate-500">
-                              {isEditingDkim ? (
-                                <Input
-                                  value={dkimKey}
-                                  onChange={(e) => setDkimKey(e.target.value)}
-                                  className="h-7 text-xs font-mono truncate"
-                                  placeholder="Paste the DKIM public key"
-                                />
-                              ) : (
-                                record.value
-                              )}
+                              {record.value || "Not configured"}
                             </Td>
                             <Td className="text-xs text-slate-600">{record.purpose}</Td>
                             <Td>
-                              <StatusBadge status={record.status ?? ""} />
+                              <StatusBadge status={recordStatusText(record.status)} />
                             </Td>
                             <Td>
-                              {isEditingDkim ? (
-                                <>
-                                  <button
-                                    onClick={() => handleSetDkimKey(domain.id)}
-                                    className="rounded p-1 text-emerald-600 hover:bg-emerald-50"
-                                    aria-label="Save DKIM key"
-                                  >
-                                    <Key className="h-3.5 w-3.5" />
-                                  </button>
-                                  <button
-                                    onClick={() => setEditingDkimDomain(null)}
-                                    className="ml-1 rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                                    aria-label="Cancel"
-                                  >
-                                    <XCircle className="h-3.5 w-3.5" />
-                                  </button>
-                                </>
-                              ) : record.status !== "verified" && isDkim ? (
-                                <button
-                                  onClick={() => setEditingDkimDomain(domain.id)}
-                                  className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                                  aria-label="Enter DKIM public key"
-                                >
-                                  <Key className="h-3.5 w-3.5" />
-                                </button>
-                              ) : (
-                                <button
-                                  onClick={() => copyText(record.value, `${record.type} record`)}
-                                  className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                                  aria-label="Copy record"
-                                >
-                                  <Copy className="h-3.5 w-3.5" />
-                                </button>
-                              )}
+                              <button
+                                onClick={() => void copyText(record.value, `${record.type} record`)}
+                                disabled={!record.value}
+                                className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+                                aria-label={`Copy ${record.name} record`}
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                              </button>
                             </Td>
                           </Tr>
-                        );
-                      }),
+                        )),
+                      )
                     )}
                   </Tbody>
                 </Table>

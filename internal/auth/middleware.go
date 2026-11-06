@@ -67,10 +67,14 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 
 		// Check session revocation immediately after token validation.
 		if m.sessionStore != nil {
+			if claims.SessionID == "" {
+				httpx.Error(w, http.StatusUnauthorized, "session_revoked", "The session has been revoked. Sign in again.")
+				return
+			}
 			active, err := m.sessionStore.Active(r.Context(), claims.Subject, claims.SessionID)
 			if err != nil {
 				m.logger.Error("session check failed", "error", err)
-				httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not verify the session.")
+				httpx.Error(w, http.StatusServiceUnavailable, "session_check_unavailable", "The session could not be verified.")
 				return
 			}
 			if !active {

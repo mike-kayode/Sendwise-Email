@@ -167,11 +167,46 @@ func TestGatewayAuthRateLimit(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusTooManyRequests {
 			limited = true
+			if got := resp.Header.Get("Retry-After"); got != "60" {
+				t.Fatalf("Retry-After = %q, want 60", got)
+			}
 			break
 		}
 	}
 	if !limited {
 		t.Fatal("expected auth requests to be rate limited")
+	}
+}
+
+func TestGatewayNormalAuthPageLoadStaysUnderRateLimit(t *testing.T) {
+	var identityHits []upstreamEcho
+	identity := newEchoServer(&identityHits)
+	defer identity.Close()
+	var workspaceHits, legacyHits []upstreamEcho
+	workspace := newEchoServer(&workspaceHits)
+	defer workspace.Close()
+	legacy := newEchoServer(&legacyHits)
+	defer legacy.Close()
+
+	server, _ := newTestGateway(t, Config{
+		IdentityURL:       identity.URL,
+		WorkspaceURL:      workspace.URL,
+		LegacyAPIURL:      legacy.URL,
+		AuthRatePerMinute: 60,
+		AuthBurst:         20,
+	})
+	for i := 0; i < 10; i++ {
+		resp, err := http.Get(server.URL + "/api/v1/auth/me")
+		if err != nil {
+			t.Fatalf("page-load auth request %d: %v", i+1, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("page-load auth request %d status = %d, want 200", i+1, resp.StatusCode)
+		}
+	}
+	if len(identityHits) != 10 {
+		t.Fatalf("identity received %d page-load requests, want 10", len(identityHits))
 	}
 }
 
@@ -224,6 +259,7 @@ func setProdEnv(t *testing.T, env string, overrides map[string]string) {
 	t.Helper()
 	base := map[string]string{
 		"APP_ENV":                      env,
+		"JWT_SECRET":                   "a-long-test-secret-value-for-gateway",
 		"IDENTITY_URL":                 "http://identity:8080",
 		"WORKSPACE_URL":                "http://workspace:8080",
 		"LEGACY_API_URL":               "http://api:8080",

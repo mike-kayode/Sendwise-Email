@@ -1,11 +1,14 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/mail"
@@ -337,11 +340,65 @@ func (h *Handler) createInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	organization, err := h.store.GetOrganization(r.Context(), claims.OrganizationID)
+	if err != nil {
+		h.revokeUnsentInvitation(r.Context(), claims.OrganizationID, invitation.ID)
+		h.logger.Error("load organization for invitation email", "organization_id", claims.OrganizationID, "error", err)
+		kit.Error(w, http.StatusInternalServerError, "internal_error", "The invitation could not be delivered.")
+		return
+	}
+	acceptURL := h.cfg.AppBaseURL + "/auth/accept-invite?token=" + token
+	if err := h.sendInvitationEmail(r, req.Email, req.Role, organization.Name, acceptURL); err != nil {
+		h.revokeUnsentInvitation(r.Context(), claims.OrganizationID, invitation.ID)
+		h.logger.Error("send invitation email", "invitation_id", invitation.ID, "error", err)
+		kit.Error(w, http.StatusBadGateway, "email_delivery_failed", "The invitation could not be delivered.")
+		return
+	}
+
 	kit.JSON(w, http.StatusCreated, map[string]any{
 		"invitation": invitation,
 		"token":      token,
-		"accept_url": h.cfg.AppBaseURL + "/auth/accept-invite?token=" + token,
+		"accept_url": acceptURL,
 	})
+}
+
+func (h *Handler) revokeUnsentInvitation(ctx context.Context, organizationID, invitationID string) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := h.store.RevokeInvitation(cleanupCtx, organizationID, invitationID); err != nil {
+		h.logger.Error("revoke undelivered invitation", "invitation_id", invitationID, "error", err)
+	}
+}
+
+func (h *Handler) sendInvitationEmail(r *http.Request, email, role, organizationName, acceptURL string) error {
+	if h.cfg.IdentityURL == "" || h.cfg.ServiceToken == "" {
+		return fmt.Errorf("identity mail service is not configured")
+	}
+	body, err := json.Marshal(map[string]string{
+		"email": email, "role": role, "organization_name": organizationName, "accept_url": acceptURL,
+	})
+	if err != nil {
+		return fmt.Errorf("encode invitation email: %w", err)
+	}
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		h.cfg.IdentityURL+"/internal/mail/invitation", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build invitation email request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-Service-Token", h.cfg.ServiceToken)
+	client := &http.Client{Timeout: 5 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("request identity mail service: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("identity mail service returned %d", response.StatusCode)
+	}
+	return nil
 }
 
 func (h *Handler) revokeInvitation(w http.ResponseWriter, r *http.Request) {

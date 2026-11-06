@@ -24,6 +24,8 @@ type Config struct {
 	AutoMigrate            bool
 	JWTSecret              string
 	JWTIssuer              string
+	IdentityURL            string
+	ServiceToken           string
 	AccessTokenTTL         time.Duration
 	SMTPAddr               string
 	SMTPHost               string
@@ -31,6 +33,8 @@ type Config struct {
 	SMTPPassword           string
 	SMTPFrom               string
 	DKIMSelector           string
+	DKIMEncryptionKey      string
+	SPFInclude             string
 	DNSResolverAddr        string
 	DNSResolverTimeout     time.Duration
 	SendingRate            int
@@ -132,6 +136,8 @@ func load(lookup func(string) string) (Config, error) {
 		AutoMigrate:            autoMigrate,
 		JWTSecret:              getenv(lookup, "JWT_SECRET", ""),
 		JWTIssuer:              getenv(lookup, "JWT_ISSUER", "email-platform"),
+		IdentityURL:            strings.TrimRight(getenv(lookup, "IDENTITY_URL", ""), "/"),
+		ServiceToken:           strings.TrimSpace(getenv(lookup, "SERVICE_TOKEN", "")),
 		AccessTokenTTL:         accessTokenTTL,
 		SMTPAddr:               getenv(lookup, "SMTP_ADDR", "localhost:587"),
 		SMTPHost:               getenv(lookup, "SMTP_HOST", "localhost"),
@@ -139,6 +145,8 @@ func load(lookup func(string) string) (Config, error) {
 		SMTPPassword:           getenv(lookup, "SMTP_PASSWORD", ""),
 		SMTPFrom:               getenv(lookup, "SMTP_FROM", "newsletter@example.com"),
 		DKIMSelector:           getenv(lookup, "DKIM_SELECTOR", "mail"),
+		DKIMEncryptionKey:      getenv(lookup, "DKIM_ENCRYPTION_KEY", ""),
+		SPFInclude:             strings.TrimSpace(getenv(lookup, "SPF_INCLUDE", "")),
 		DNSResolverAddr:        getenv(lookup, "DNS_RESOLVER_ADDR", ""),
 		DNSResolverTimeout:     dnsResolverTimeout,
 		SendingRate:            sendingRate,
@@ -170,6 +178,9 @@ func load(lookup func(string) string) (Config, error) {
 	if secureEnv {
 		if len(cfg.JWTSecret) < 32 || strings.Contains(strings.ToLower(cfg.JWTSecret), "change-me") || strings.Contains(strings.ToLower(cfg.JWTSecret), "insecure") {
 			return cfg, fmt.Errorf("JWT_SECRET must be a non-placeholder secret of at least 32 characters in staging or production")
+		}
+		if cfg.IdentityURL == "" || cfg.ServiceToken == "" {
+			return cfg, fmt.Errorf("IDENTITY_URL and SERVICE_TOKEN are required in staging and production for session revocation checks")
 		}
 		if !cfg.RequireVerifiedDomain {
 			return cfg, fmt.Errorf("REQUIRE_VERIFIED_DOMAIN must be true in staging and production")

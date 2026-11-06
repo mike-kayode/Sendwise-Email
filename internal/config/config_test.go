@@ -120,6 +120,12 @@ func TestLoadProductionRequiresSecureConfiguration(t *testing.T) {
 			},
 		},
 		{
+			name: "missing identity session check",
+			mutate: func(values map[string]string) {
+				delete(values, "IDENTITY_URL")
+			},
+		},
+		{
 			name: "long token lifetime",
 			mutate: func(values map[string]string) {
 				values["ACCESS_TOKEN_TTL"] = "2h"
@@ -166,6 +172,8 @@ func productionConfig() map[string]string {
 		"JWT_SECRET":              strings.Repeat("a", 48),
 		"SMTP_USERNAME":           "mailer",
 		"SMTP_PASSWORD":           "smtp-secret",
+		"IDENTITY_URL":            "http://identity:8080",
+		"SERVICE_TOKEN":           "service-token",
 		"REQUIRE_VERIFIED_DOMAIN": "true",
 		"WEBHOOK_SECRET":          strings.Repeat("b", 32),
 	}

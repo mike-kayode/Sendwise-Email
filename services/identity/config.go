@@ -51,11 +51,11 @@ func LoadConfig() (Config, error) {
 		ServiceToken: kit.Getenv("SERVICE_TOKEN", ""),
 
 		MailProvider:    strings.ToLower(strings.TrimSpace(kit.Getenv("MAIL_PROVIDER", "auto"))),
-		SMTPAddr:        kit.Getenv("SMTP_ADDR", "localhost:587"),
-		SMTPHost:        kit.Getenv("SMTP_HOST", "localhost"),
+		SMTPAddr:        kit.Getenv("SMTP_ADDR", ""),
+		SMTPHost:        kit.Getenv("SMTP_HOST", ""),
 		SMTPUsername:    kit.Getenv("SMTP_USERNAME", ""),
 		SMTPPassword:    kit.Getenv("SMTP_PASSWORD", ""),
-		SMTPFrom:        kit.Getenv("SMTP_FROM", "newsletter@example.com"),
+		SMTPFrom:        kit.Getenv("SMTP_FROM", ""),
 		ResendAPIKey:    kit.Getenv("RESEND_API_KEY", ""),
 		ResendFromEmail: kit.Getenv("RESEND_FROM_EMAIL", ""),
 		ResendFromName:  kit.Getenv("RESEND_FROM_NAME", "Sendwise"),
@@ -71,6 +71,29 @@ func LoadConfig() (Config, error) {
 	case "auto", "resend", "smtp", "log":
 	default:
 		return Config{}, fmt.Errorf("MAIL_PROVIDER must be auto, resend, smtp, or log")
+	}
+	if base.Env == "production" {
+		provider := cfg.MailProvider
+		if provider == "auto" {
+			if cfg.ResendAPIKey != "" {
+				provider = "resend"
+			} else {
+				provider = "smtp"
+			}
+		}
+		switch provider {
+		case "smtp":
+			if cfg.SMTPAddr == "" || cfg.SMTPHost == "" || cfg.SMTPUsername == "" ||
+				cfg.SMTPPassword == "" || cfg.SMTPFrom == "" {
+				return Config{}, fmt.Errorf("SMTP_ADDR, SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM are required for production SMTP mail")
+			}
+		case "resend":
+			if cfg.ResendAPIKey == "" || cfg.ResendFromEmail == "" {
+				return Config{}, fmt.Errorf("RESEND_API_KEY and RESEND_FROM_EMAIL are required for production Resend mail")
+			}
+		default:
+			return Config{}, fmt.Errorf("MAIL_PROVIDER=log is not allowed in production")
+		}
 	}
 	return cfg, nil
 }

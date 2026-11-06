@@ -28,6 +28,7 @@ type contact struct {
 	Status         string          `json:"status"`
 	CustomFields   json.RawMessage `json:"custom_fields"`
 	Source         string          `json:"source,omitempty"`
+	Tags           []contactTag    `json:"tags,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
 }
@@ -72,14 +73,20 @@ func (s *Server) listContacts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.pool.Query(r.Context(), `
-		SELECT `+contactColumns+`
-		FROM contacts
-		WHERE organization_id = $1
+		SELECT `+listMemberContactColumns+`,
+		       COALESCE((
+		           SELECT jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name, 'color', t.color) ORDER BY t.name)
+		           FROM contact_tags ct
+		           JOIN tags t ON t.id = ct.tag_id AND t.organization_id = ct.organization_id
+		           WHERE ct.contact_id = c.id AND ct.organization_id = c.organization_id
+		       ), '[]'::jsonb)
+		FROM contacts c
+		WHERE c.organization_id = $1
 		  AND ($2 = '' OR email ILIKE '%' || $2 || '%'
 		       OR COALESCE(first_name, '') ILIKE '%' || $2 || '%'
 		       OR COALESCE(last_name, '') ILIKE '%' || $2 || '%')
-		  AND ($3 = '' OR status = $3)
-		ORDER BY created_at DESC
+		  AND ($3 = '' OR c.status = $3)
+		ORDER BY c.created_at DESC
 		LIMIT $4 OFFSET $5
 	`, orgID, search, status, limit, offset)
 	if err != nil {
@@ -91,7 +98,7 @@ func (s *Server) listContacts(w http.ResponseWriter, r *http.Request) {
 
 	contacts := make([]contact, 0, limit)
 	for rows.Next() {
-		c, err := scanContact(rows)
+		c, err := scanContactWithTags(rows)
 		if err != nil {
 			s.logger.Error("scan contact", "error", err)
 			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load contacts.")

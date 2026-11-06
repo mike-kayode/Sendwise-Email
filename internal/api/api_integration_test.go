@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,11 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khayode/email-platform/internal/auth"
 	"github.com/khayode/email-platform/internal/config"
 	"github.com/khayode/email-platform/internal/db"
+	"github.com/khayode/email-platform/internal/kit"
 	"github.com/khayode/email-platform/internal/observability"
+	"github.com/khayode/email-platform/services/gateway"
 )
 
 var integrationPool *pgxpool.Pool
@@ -57,6 +63,7 @@ func TestMain(m *testing.M) {
 			AccessTokenTTL:        15 * time.Minute,
 			RequireVerifiedDomain: false,
 			SMTPFrom:              "test@example.com",
+			DKIMEncryptionKey:     "integration-dkim-encryption-key-0123456789",
 		}
 		integrationTokens = auth.NewManager(integrationCfg.JWTSecret, integrationCfg.JWTIssuer, integrationCfg.AccessTokenTTL)
 	}
@@ -76,11 +83,112 @@ func newIntegrationServer(t *testing.T) *Server {
 
 func integrationToken(t *testing.T, orgID, role string) string {
 	t.Helper()
-	token, err := integrationTokens.IssueAccess("test-user", orgID, role)
+	token, err := integrationTokens.IssueAccess("11111111-1111-4111-8111-111111111111", orgID, role)
 	if err != nil {
 		t.Fatalf("issue token: %v", err)
 	}
 	return token
+}
+
+func TestLegacyActorSelfHealsThroughGateway(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	userID := uuid.NewString()
+	organizationID := uuid.NewString()
+	token, err := integrationTokens.IssueAccess(userID, organizationID, auth.RoleOwner)
+	if err != nil {
+		t.Fatalf("issue identity access token: %v", err)
+	}
+	apiServer := httptest.NewServer(newIntegrationServer(t).Handler())
+	defer apiServer.Close()
+	identityServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer identityServer.Close()
+	workspaceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer workspaceServer.Close()
+
+	gatewayHandler, err := gateway.New(gateway.Config{
+		BaseConfig: kit.BaseConfig{
+			Env: "test", JWTSecret: integrationCfg.JWTSecret, JWTIssuer: integrationCfg.JWTIssuer,
+		},
+		IdentityURL:  identityServer.URL,
+		WorkspaceURL: workspaceServer.URL,
+		LegacyAPIURL: apiServer.URL,
+	}, observability.NewLogger("test", "gateway"))
+	if err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	gatewayServer := httptest.NewServer(gatewayHandler)
+	defer gatewayServer.Close()
+
+	request := func(method, path, contentType string, body io.Reader) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(method, gatewayServer.URL+path, body)
+		if err != nil {
+			t.Fatalf("build %s request: %v", method, err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		return resp
+	}
+
+	resp := request(http.MethodGet, "/api/v1/lists", "", nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET lists status = %d, want 200", resp.StatusCode)
+	}
+
+	contactBody := bytes.NewBufferString(`{"email":"self-heal@example.test","first_name":"Self","status":"pending"}`)
+	resp = request(http.MethodPost, "/api/v1/contacts", "application/json", contactBody)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST contacts status = %d, want 201", resp.StatusCode)
+	}
+
+	var importBody bytes.Buffer
+	writer := multipart.NewWriter(&importBody)
+	file, err := writer.CreateFormFile("file", "self-heal.csv")
+	if err != nil {
+		t.Fatalf("create CSV field: %v", err)
+	}
+	if _, err := file.Write([]byte("Email,First Name\nself-heal-import@example.test,Import\n")); err != nil {
+		t.Fatalf("write CSV: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart form: %v", err)
+	}
+	resp = request(http.MethodPost, "/api/v1/contacts/import", writer.FormDataContentType(), &importBody)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST contacts/import status = %d, want 202", resp.StatusCode)
+	}
+
+	var projectedUsers, projectedOrganizations, projectedMemberships int
+	if err := integrationPool.QueryRow(context.Background(), `SELECT count(*) FROM users WHERE id = $1`, userID).Scan(&projectedUsers); err != nil {
+		t.Fatalf("count projected user: %v", err)
+	}
+	if err := integrationPool.QueryRow(context.Background(), `SELECT count(*) FROM organizations WHERE id = $1`, organizationID).Scan(&projectedOrganizations); err != nil {
+		t.Fatalf("count projected organization: %v", err)
+	}
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT count(*) FROM organization_members WHERE organization_id = $1 AND user_id = $2
+	`, organizationID, userID).Scan(&projectedMemberships); err != nil {
+		t.Fatalf("count projected membership: %v", err)
+	}
+	if projectedUsers != 1 || projectedOrganizations != 1 || projectedMemberships != 1 {
+		t.Fatalf("actor projection counts = users:%d organizations:%d memberships:%d",
+			projectedUsers, projectedOrganizations, projectedMemberships)
+	}
 }
 
 func doRequest(t *testing.T, s *Server, method, path string, body string, token string) *httptest.ResponseRecorder {
@@ -304,37 +412,210 @@ func TestDomainsIntegration(t *testing.T) {
 	}
 	s := newIntegrationServer(t)
 
-	regBody := `{"email":"domains-owner@example.com","password":"domains-password","name":"Domains Owner","organization_name":"Domains Org"}`
-	w := doRequest(t, s, "POST", "/api/v1/auth/register", regBody, "")
-	assertStatus(t, w, http.StatusCreated)
-	var regResp struct {
-		AccessToken string `json:"access_token"`
+	suffix := time.Now().Format("20060102150405")
+	var orgID string
+	if err := integrationPool.QueryRow(context.Background(), `
+		INSERT INTO organizations (name, slug)
+		VALUES ($1, 'domains-test-' || gen_random_uuid()::text)
+		RETURNING id
+	`, "Domains Org "+suffix).Scan(&orgID); err != nil {
+		t.Fatalf("create sending domains organization: %v", err)
 	}
-	json.Unmarshal(w.Body.Bytes(), &regResp)
-	token := regResp.AccessToken
+	token := integrationToken(t, orgID, "owner")
 
-	createBody := `{"domain":"newsletter.example.com"}`
+	nullKeyDomain := "null-key-smoke-" + suffix + ".example.com"
+	emptyKeyDomain := "empty-key-smoke-" + suffix + ".example.com"
+	verifiedDomain := "verified-smoke-" + suffix + ".example.com"
+	_, err := integrationPool.Exec(context.Background(), `
+		INSERT INTO sending_domains (
+			organization_id, domain, status, dkim_selector, dkim_public_key,
+			spf_status, dkim_status, dmarc_status, verification_status, last_checked_at
+		) VALUES
+			($1, $2, 'pending', 'mail', NULL, 'pending', 'missing', 'mismatched', 'pending', NULL),
+			($1, $3, 'misconfigured', 'mail', '', 'missing', 'mismatched', 'verified', 'missing', now()),
+			($1, $4, 'verified', 'mail', 'public-key', 'verified', 'verified', 'verified', 'verified', NULL)
+	`, orgID, nullKeyDomain, emptyKeyDomain, verifiedDomain)
+	if err != nil {
+		t.Fatalf("insert sending domain shape rows: %v", err)
+	}
+
+	w := doRequest(t, s, "GET", "/api/v1/domains", "", token)
+	assertStatus(t, w, http.StatusOK)
+	var listResp struct {
+		Data []struct {
+			Domain             string     `json:"domain"`
+			Status             string     `json:"status"`
+			DKIMPublicKey      string     `json:"dkim_public_key"`
+			SPFStatus          string     `json:"spf_status"`
+			DKIMStatus         string     `json:"dkim_status"`
+			DMARCStatus        string     `json:"dmarc_status"`
+			VerificationStatus string     `json:"verification_status"`
+			LastCheckedAt      *time.Time `json:"last_checked_at"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode domain list: %v", err)
+	}
+	foundNullKey := false
+	foundEmptyKey := false
+	foundMisconfigured := false
+	foundVerified := false
+	for _, d := range listResp.Data {
+		if d.Domain == nullKeyDomain {
+			foundNullKey = true
+			if d.DKIMPublicKey != "" || d.VerificationStatus != "pending" || d.LastCheckedAt != nil ||
+				d.SPFStatus != "pending" || d.DKIMStatus != "missing" || d.DMARCStatus != "mismatched" {
+				t.Fatalf("unexpected NULL-key row: %+v", d)
+			}
+		}
+		if d.Domain == emptyKeyDomain {
+			foundEmptyKey = d.DKIMPublicKey == "" && d.LastCheckedAt != nil &&
+				d.SPFStatus == "missing" && d.DKIMStatus == "mismatched" && d.DMARCStatus == "verified"
+			foundMisconfigured = d.Status == "misconfigured"
+		}
+		if d.Domain == verifiedDomain {
+			foundVerified = d.Status == "verified" && d.VerificationStatus == "verified" &&
+				d.LastCheckedAt == nil && d.SPFStatus == "verified" &&
+				d.DKIMStatus == "verified" && d.DMARCStatus == "verified"
+		}
+	}
+	if !foundNullKey {
+		t.Fatalf("expected %s in domain list", nullKeyDomain)
+	}
+	if !foundEmptyKey || !foundMisconfigured || !foundVerified {
+		t.Fatalf("expected empty-key/misconfigured and verified rows in domain list; got %+v", listResp.Data)
+	}
+
+	w = doRequest(t, s, "GET", "/api/v1/domains/"+mustDomainID(t, orgID, nullKeyDomain)+"/dns-records", "", token)
+	assertStatus(t, w, http.StatusOK)
+	var nullKeyRecords struct {
+		DNSRecords []dnsRecord `json:"dns_records"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &nullKeyRecords); err != nil {
+		t.Fatalf("decode NULL-key DNS records: %v", err)
+	}
+	if len(nullKeyRecords.DNSRecords) != 4 || nullKeyRecords.DNSRecords[1].Value != "" {
+		t.Fatalf("expected four records and no DKIM placeholder for NULL key, got %+v", nullKeyRecords.DNSRecords)
+	}
+
+	createBody := `{"domain":"newsletter-` + suffix + `.example.com"}`
 	w = doRequest(t, s, "POST", "/api/v1/domains", createBody, token)
 	assertStatus(t, w, http.StatusCreated)
 	var created struct {
-		ID     string `json:"id"`
-		Domain string `json:"domain"`
-		Status string `json:"status"`
+		ID            string `json:"id"`
+		Domain        string `json:"domain"`
+		Status        string `json:"status"`
+		DKIMSelector  string `json:"dkim_selector"`
+		DKIMPublicKey string `json:"dkim_public_key"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &created)
-	if created.Domain != "newsletter.example.com" {
-		t.Fatalf("expected newsletter.example.com, got %s", created.Domain)
+	if created.Domain != "newsletter-"+suffix+".example.com" {
+		t.Fatalf("expected newsletter-%s.example.com, got %s", suffix, created.Domain)
+	}
+	if created.Status != "pending" {
+		t.Fatalf("expected pending status, got %s", created.Status)
+	}
+	if created.DKIMPublicKey == "" {
+		t.Fatalf("expected server-generated DKIM public key, got empty value")
 	}
 	domainID := created.ID
-
-	w = doRequest(t, s, "GET", "/api/v1/domains", "", token)
-	assertStatus(t, w, http.StatusOK)
+	var encryptedPrivateKey string
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT dkim_private_key FROM sending_domains WHERE id = $1 AND organization_id = $2
+	`, domainID, orgID).Scan(&encryptedPrivateKey); err != nil {
+		t.Fatalf("read generated encrypted private key: %v", err)
+	}
+	if encryptedPrivateKey == "" || strings.Contains(encryptedPrivateKey, "PRIVATE KEY") {
+		t.Fatal("expected generated DKIM private key to be encrypted at rest")
+	}
 
 	w = doRequest(t, s, "GET", "/api/v1/domains/"+domainID+"/dns-records", "", token)
 	assertStatus(t, w, http.StatusOK)
+	var recordsResp struct {
+		Domain     sendingDomain `json:"domain"`
+		DNSRecords []dnsRecord   `json:"dns_records"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &recordsResp); err != nil {
+		t.Fatalf("decode dns-records response: %v; body: %s", err, w.Body.String())
+	}
+	if len(recordsResp.DNSRecords) != 4 {
+		t.Fatalf("expected 4 dns records, got %d: %s", len(recordsResp.DNSRecords), w.Body.String())
+	}
+	verificationRecord := recordsResp.DNSRecords[3]
+	if verificationRecord.Type != "TXT" || !strings.HasPrefix(verificationRecord.Name, "_sendwise-verification.") {
+		t.Fatalf("expected verification TXT record, got %+v", verificationRecord)
+	}
+	if !strings.Contains(recordsResp.DNSRecords[1].Value, created.DKIMPublicKey) {
+		t.Fatalf("DKIM record does not contain generated public key: %+v", recordsResp.DNSRecords[1])
+	}
 
+	s.dnsResolver = &fakeDNSResolver{records: map[string][]string{
+		created.Domain: {"v=spf1 mx ~all"},
+	}}
 	w = doRequest(t, s, "POST", "/api/v1/domains/"+domainID+"/verify", "", token)
 	assertStatus(t, w, http.StatusOK)
+	var partialResp struct {
+		Domain     sendingDomain `json:"domain"`
+		DNSRecords []dnsRecord   `json:"dns_records"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &partialResp); err != nil {
+		t.Fatalf("decode partial DNS verification: %v", err)
+	}
+	if partialResp.Domain.Status != "misconfigured" || partialResp.Domain.SPFStatus != "verified" ||
+		partialResp.Domain.DKIMStatus != "missing" || partialResp.Domain.VerificationStatus != "missing" {
+		t.Fatalf("unexpected partial DNS result: %+v", partialResp.Domain)
+	}
+
+	s.dnsResolver = &fakeDNSResolver{records: map[string][]string{
+		created.Domain: {"v=spf1 mx ~all"},
+		created.DKIMSelector + "._domainkey." + created.Domain: {dkimRecordValue(created.DKIMPublicKey)},
+		"_dmarc." + created.Domain:                             {"v=DMARC1; p=quarantine"},
+		"_sendwise-verification." + created.Domain:             {"v=sendwise-verification " + created.Domain},
+	}}
+	w = doRequest(t, s, "POST", "/api/v1/domains/"+domainID+"/verify", "", token)
+	assertStatus(t, w, http.StatusOK)
+	var verifiedResp struct {
+		Domain     sendingDomain `json:"domain"`
+		DNSRecords []dnsRecord   `json:"dns_records"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &verifiedResp); err != nil {
+		t.Fatalf("decode full DNS verification: %v", err)
+	}
+	if verifiedResp.Domain.Status != "verified" || verifiedResp.Domain.VerificationStatus != "verified" {
+		t.Fatalf("expected fully verified domain, got %+v", verifiedResp.Domain)
+	}
+	if len(verifiedResp.DNSRecords) != 4 {
+		t.Fatalf("expected four verified DNS records, got %+v", verifiedResp.DNSRecords)
+	}
+	if verifiedResp.DNSRecords[3].Status != "verified" {
+		t.Fatalf("verification TXT record status = %q, want verified", verifiedResp.DNSRecords[3].Status)
+	}
+
+	// Cross-tenant isolation: another organization cannot verify this domain.
+	var orgID2 string
+	if err := integrationPool.QueryRow(context.Background(), `
+		INSERT INTO organizations (name, slug)
+		VALUES ($1, 'domains-test-' || gen_random_uuid()::text)
+		RETURNING id
+	`, "Domains Org Two "+suffix).Scan(&orgID2); err != nil {
+		t.Fatalf("create second sending domains organization: %v", err)
+	}
+	token2 := integrationToken(t, orgID2, "owner")
+	w = doRequest(t, s, "POST", "/api/v1/domains/"+domainID+"/verify", "", token2)
+	assertStatus(t, w, http.StatusNotFound)
+	w = doRequest(t, s, "GET", "/api/v1/domains/"+domainID+"/dns-records", "", token2)
+	assertStatus(t, w, http.StatusNotFound)
+}
+
+func mustDomainID(t *testing.T, orgID, domain string) string {
+	t.Helper()
+	var id string
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT id FROM sending_domains WHERE organization_id = $1 AND domain = $2
+	`, orgID, domain).Scan(&id); err != nil {
+		t.Fatalf("look up sending domain ID: %v", err)
+	}
+	return id
 }
 
 func TestAnalyticsOverviewIntegration(t *testing.T) {

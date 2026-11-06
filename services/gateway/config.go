@@ -45,6 +45,9 @@ func LoadConfig() (Config, error) {
 
 	// Fail fast in production when required configuration is absent.
 	if base.Env == "production" {
+		if base.JWTSecret == "" {
+			return Config{}, fmt.Errorf("JWT_SECRET is required in production")
+		}
 		if cfg.IdentityURL == "" {
 			return Config{}, fmt.Errorf("IDENTITY_URL is required in production")
 		}

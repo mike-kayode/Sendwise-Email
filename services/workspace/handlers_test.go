@@ -267,21 +267,31 @@ type testEnv struct {
 	handler http.Handler
 	store   *fakeStore
 	tokens  *kit.Manager
+	mail    *httptest.Server
 }
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	store := newFakeStore()
+	mail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/mail/invitation" || r.Header.Get("X-Service-Token") != "svc-secret" {
+			http.Error(w, "unexpected invitation mail request", http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(mail.Close)
 	cfg := Config{
 		BaseConfig:     kit.BaseConfig{JWTSecret: "test-secret", JWTIssuer: "email-platform"},
 		InvitationTTL:  24 * time.Hour,
 		AppBaseURL:     "http://localhost:3000",
 		AccessTokenTTL: 15 * time.Minute,
 		ServiceToken:   "svc-secret",
+		IdentityURL:    mail.URL,
 	}
 	tokens := kit.NewManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL)
 	handler := NewHandler(store, tokens, cfg, kit.NewTestLogger())
-	return &testEnv{handler: handler.Routes(), store: store, tokens: tokens}
+	return &testEnv{handler: handler.Routes(), store: store, tokens: tokens, mail: mail}
 }
 
 func bearer(t *testing.T, env *testEnv, userID, email, orgID, role string) string {
@@ -328,6 +338,44 @@ func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 }
 
 // --- tests -----------------------------------------------------------------
+
+func TestInvitationDeliveryFailureRevokesInvitation(t *testing.T) {
+	store := newFakeStore()
+	orgID := fakeUUID(10)
+	store.orgs[orgID] = &Organization{ID: orgID, Name: "Email Failure Workspace", Slug: "email-failure"}
+	mail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "mail unavailable", http.StatusBadGateway)
+	}))
+	defer mail.Close()
+	cfg := Config{
+		BaseConfig:    kit.BaseConfig{JWTSecret: "test-secret", JWTIssuer: "email-platform"},
+		InvitationTTL: 24 * time.Hour,
+		AppBaseURL:    "http://localhost:3000",
+		ServiceToken:  "svc-secret",
+		IdentityURL:   mail.URL,
+	}
+	tokens := kit.NewManager(cfg.JWTSecret, cfg.JWTIssuer, time.Minute)
+	handler := NewHandler(store, tokens, cfg, kit.NewTestLogger())
+	token, err := tokens.IssueAccess(fakeUUID(11), "owner@example.test", orgID, "owner", "")
+	if err != nil {
+		t.Fatalf("issue owner token: %v", err)
+	}
+	rec := doJSON(t, handler.Routes(), http.MethodPost, "/invitations",
+		`{"email":"invitee@example.test","role":"admin"}`, func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer "+token)
+		})
+	if rec.Code != http.StatusBadGateway || errorCode(t, rec) != "email_delivery_failed" {
+		t.Fatalf("invite response = %d %s, want 502 email_delivery_failed", rec.Code, rec.Body.String())
+	}
+	if len(store.invitations) != 1 {
+		t.Fatalf("stored invitations = %d, want 1 revoked invitation", len(store.invitations))
+	}
+	for _, invitation := range store.invitations {
+		if invitation.Status != "revoked" {
+			t.Fatalf("undelivered invitation status = %q, want revoked", invitation.Status)
+		}
+	}
+}
 
 func TestSlugify(t *testing.T) {
 	cases := map[string]string{

@@ -19,6 +19,12 @@ import (
 // NewPostgres creates an isolated schema in TEST_DATABASE_URL, runs all real
 // migrations there, and drops only that schema when the test ends.
 func NewPostgres(t *testing.T) *pgxpool.Pool {
+	return NewPostgresWithMigrations(t, "migrations")
+}
+
+// NewPostgresWithMigrations creates an isolated schema and applies the named
+// repository migration directory.
+func NewPostgresWithMigrations(t *testing.T, migrationPath string) *pgxpool.Pool {
 	t.Helper()
 	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
 	if databaseURL == "" {
@@ -48,7 +54,11 @@ func NewPostgres(t *testing.T) *pgxpool.Pool {
 		_ = admin.Close(ctx)
 		t.Fatalf("configure test schema: %v", err)
 	}
-	if err := db.Migrate(ctx, testURL, migrationsDirectory(t)); err != nil {
+	migrationsDir := migrationPath
+	if !filepath.IsAbs(migrationsDir) {
+		migrationsDir = filepath.Join(filepath.Dir(migrationsDirectory(t)), migrationPath)
+	}
+	if err := db.Migrate(ctx, testURL, migrationsDir); err != nil {
 		_, _ = admin.Exec(ctx, "DROP SCHEMA "+pgx.Identifier{schema}.Sanitize()+" CASCADE")
 		_ = admin.Close(ctx)
 		t.Fatalf("apply migrations in test schema: %v", err)

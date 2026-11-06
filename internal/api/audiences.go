@@ -21,14 +21,24 @@ type audienceList struct {
 }
 
 func (s *Server) listAudienceLists(w http.ResponseWriter, r *http.Request) {
+	limit, offset := pagination(r)
+	var total int
+	if err := s.pool.QueryRow(r.Context(), `
+		SELECT count(*) FROM contact_lists WHERE organization_id = $1
+	`, s.organizationID(r)).Scan(&total); err != nil {
+		s.logger.Error("count audiences", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load lists.")
+		return
+	}
 	rows, err := s.pool.Query(r.Context(), `
 		SELECT l.id, l.name, l.description, count(m.contact_id), l.created_at, l.updated_at
 		FROM contact_lists l
-		LEFT JOIN contact_list_members m ON m.list_id = l.id
+		LEFT JOIN contact_list_members m ON m.list_id = l.id AND m.organization_id = l.organization_id
 		WHERE l.organization_id = $1
 		GROUP BY l.id
 		ORDER BY l.created_at DESC
-	`, s.organizationID(r))
+		LIMIT $2 OFFSET $3
+	`, s.organizationID(r), limit, offset)
 	if err != nil {
 		s.logger.Error("list audiences", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load lists.")
@@ -46,7 +56,14 @@ func (s *Server) listAudienceLists(w http.ResponseWriter, r *http.Request) {
 		lists = append(lists, l)
 	}
 
-	httpx.JSON(w, http.StatusOK, map[string]any{"data": lists})
+	if err := rows.Err(); err != nil {
+		s.logger.Error("iterate audiences", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load lists.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, listResponse[audienceList]{
+		Data: lists, Pagination: paginationResponse{Total: total, Limit: limit, Offset: offset},
+	})
 }
 
 type audienceListInput struct {
@@ -111,6 +128,15 @@ type tag struct {
 }
 
 func (s *Server) listTags(w http.ResponseWriter, r *http.Request) {
+	limit, offset := pagination(r)
+	var total int
+	if err := s.pool.QueryRow(r.Context(), `
+		SELECT count(*) FROM tags WHERE organization_id = $1
+	`, s.organizationID(r)).Scan(&total); err != nil {
+		s.logger.Error("count tags", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load tags.")
+		return
+	}
 	rows, err := s.pool.Query(r.Context(), `
 		SELECT t.id, t.name, t.color, count(ct.contact_id), t.created_at
 		FROM tags t
@@ -118,7 +144,8 @@ func (s *Server) listTags(w http.ResponseWriter, r *http.Request) {
 		WHERE t.organization_id = $1
 		GROUP BY t.id
 		ORDER BY t.name
-	`, s.organizationID(r))
+		LIMIT $2 OFFSET $3
+	`, s.organizationID(r), limit, offset)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load tags.")
 		return
@@ -135,7 +162,14 @@ func (s *Server) listTags(w http.ResponseWriter, r *http.Request) {
 		tags = append(tags, t)
 	}
 
-	httpx.JSON(w, http.StatusOK, map[string]any{"data": tags})
+	if err := rows.Err(); err != nil {
+		s.logger.Error("iterate tags", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load tags.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, listResponse[tag]{
+		Data: tags, Pagination: paginationResponse{Total: total, Limit: limit, Offset: offset},
+	})
 }
 
 type tagInput struct {
@@ -235,27 +269,36 @@ func (s *Server) deleteTag(w http.ResponseWriter, r *http.Request) {
 }
 
 type segment struct {
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Rules       json.RawMessage `json:"rules"`
-	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	Rules        json.RawMessage `json:"rules"`
+	ContactCount int             `json:"contact_count"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
 func (s *Server) listSegments(w http.ResponseWriter, r *http.Request) {
+	limit, offset := pagination(r)
+	var total int
+	if err := s.pool.QueryRow(r.Context(), `
+		SELECT count(*) FROM segments WHERE organization_id = $1
+	`, s.organizationID(r)).Scan(&total); err != nil {
+		s.logger.Error("count segments", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load segments.")
+		return
+	}
 	rows, err := s.pool.Query(r.Context(), `
 		SELECT id, name, description, rules, created_at, updated_at
 		FROM segments
 		WHERE organization_id = $1
 		ORDER BY created_at DESC
-	`, s.organizationID(r))
+		LIMIT $2 OFFSET $3
+	`, s.organizationID(r), limit, offset)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load segments.")
 		return
 	}
-	defer rows.Close()
-
 	segments := make([]segment, 0)
 	for rows.Next() {
 		var item segment
@@ -268,7 +311,24 @@ func (s *Server) listSegments(w http.ResponseWriter, r *http.Request) {
 		segments = append(segments, item)
 	}
 
-	httpx.JSON(w, http.StatusOK, map[string]any{"data": segments})
+	if err := rows.Err(); err != nil {
+		s.logger.Error("iterate segments", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load segments.")
+		return
+	}
+	rows.Close()
+	for i := range segments {
+		count, err := s.countSegmentContacts(r.Context(), s.organizationID(r), segments[i].Rules)
+		if err != nil {
+			s.logger.Error("count segment contacts", "error", err, "segment_id", segments[i].ID)
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not evaluate segment contacts.")
+			return
+		}
+		segments[i].ContactCount = count
+	}
+	httpx.JSON(w, http.StatusOK, listResponse[segment]{
+		Data: segments, Pagination: paginationResponse{Total: total, Limit: limit, Offset: offset},
+	})
 }
 
 type segmentInput struct {

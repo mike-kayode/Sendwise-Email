@@ -162,7 +162,123 @@ NOT done / not verified in P1:
 - The progress bar's visual rendering is not asserted by Playwright (the worker
   finishes within one poll interval).
 
-  ## P4 — Signup forms (verified 2026-11-06)
+## P2 — Account sync, sessions, and email (verified locally 2026-11-06)
+
+Each required P2 path below has a Postgres or browser proof:
+
+1. **Backfill and self-healing — Done.** `TestRunProjectsIdentityAndWorkspaceIdempotently`
+   ran twice against local Postgres and verified one user, organization, and
+   membership. `TestLegacyActorSelfHealsThroughGateway` exercised GET lists
+   (200), POST contacts (201), and POST contacts/import (202) through the gateway
+   for an identity actor missing from the legacy tables.
+2. **Sessions and logout — Done.** `TestPostgresLogoutRevokesAccessToken` proves
+   an access token works before logout and returns `401 session_revoked` after.
+   `TestSessionMiddlewareFailsClosed` and
+   `TestOptionalSessionMiddlewareFailsClosed` prove unavailable, inactive, and
+   sessionless tokens do not reach protected handlers. Staging/production
+   configuration now requires the Identity URL and service token.
+3. **Refresh rotation — Done.** `TestPostgresRefreshRotationAndReuseRevokesSessionFamily`
+   proves rotation, Secure/HttpOnly/SameSite=Lax cookie attributes, and family
+   revocation on reuse. The browser test below asserts simultaneous protected
+   requests share one refresh and do not loop.
+4. **Transactional email — Done for the configured SMTP/Mailpit path.**
+   Registration verification, password reset, and workspace invitation mail
+   all arrived through Mailpit in the browser test. The Mailpit service was
+   already present in both Compose files. Production SMTP and Resend variables
+   and validation are documented in `.env.example`. Live Resend delivery was
+   not exercised because no external Resend account was provided.
+5. **Rate limits — Done.** `TestGatewayAuthRateLimit` asserts `Retry-After: 60`;
+   `TestGatewayNormalAuthPageLoadStaysUnderRateLimit` makes ten `/auth/me`
+   requests under the configured 60/minute limit.
+
+Proof output:
+
+```
+$ TEST_DATABASE_URL=<local Docker Postgres> go test ./internal/backfill ./internal/api ./services/identity -run 'TestRunProjectsIdentityAndWorkspaceIdempotently|TestLegacyActorSelfHealsThroughGateway|TestPostgres' -v
+--- PASS: TestRunProjectsIdentityAndWorkspaceIdempotently
+--- PASS: TestLegacyActorSelfHealsThroughGateway
+--- PASS: TestPostgresLogoutRevokesAccessToken
+--- PASS: TestPostgresRefreshRotationAndReuseRevokesSessionFamily
+PASS
+```
+
+```
+$ go test ./internal/kit -run 'Test(SessionMiddleware|OptionalSession)' -v
+--- PASS: TestSessionMiddlewareFailsClosed
+--- PASS: TestOptionalSessionMiddlewareFailsClosed
+PASS
+
+$ go test ./services/identity ./services/workspace -run 'TestInternalInvitationEmailUsesConfiguredMailer|TestInvitationDeliveryFailureRevokesInvitation' -v
+--- PASS: TestInternalInvitationEmailUsesConfiguredMailer
+--- PASS: TestInvitationDeliveryFailureRevokesInvitation
+PASS
+
+$ go test ./services/gateway -run 'TestGateway(AuthRateLimit|NormalAuthPageLoadStaysUnderRateLimit)|TestLoadConfig' -v
+--- PASS: TestGatewayAuthRateLimit
+--- PASS: TestGatewayNormalAuthPageLoadStaysUnderRateLimit
+PASS
+```
+
+```
+$ E2E_BASE_URL=http://localhost:3000 E2E_API_ORIGIN=http://localhost:8084 MAILPIT_API_URL=http://localhost:8025 npm run test:e2e -- --grep 'P2 account email'
+✓  1 [chromium] › e2e/p2-auth.spec.ts › P2 account email, password reset, and logout journey
+1 passed
+```
+
+The browser flow registers, reads and opens the Mailpit verification link,
+signs in, reads and submits a reset link, signs in with the new password, sends
+an invitation through the workspace/Identity mail path, simulates a stale access
+token and checks single-flight refresh, signs out, and confirms the same access
+token is rejected with `session_revoked`.
+
+The P2 changes pass `go vet ./...` and `go test ./...`; the web typecheck,
+lint, unit tests (10/10), and production build also pass. The repo-wide
+`gofmt -l cmd internal services shared` still reports the untouched files
+`internal/api/automations.go` and `internal/automations/service.go`; those are
+outside P2. Every Go file changed for P2 is formatted.
+
+## P3 — Lists, tags, and segments (verified locally 2026-11-06)
+
+The Postgres integration test exercises list create/rename/delete, accurate
+member counts, paginated membership, add/remove, CSV export, tag assignment and
+unassignment with updated counts, six segment-rule shapes with expected
+contacts, OR evaluation, a ten-contact preview cap, malformed-rule 400s, and
+cross-tenant 404s. It ran against local Docker Postgres with no skipped test.
+The browser journey creates and edits a list, imports three CSV contacts into
+it, exports its members, creates and assigns a tag, previews the
+`tag is X AND list is Y` segment as exactly one contact, saves it, and confirms
+the saved segment count before deleting the list through its confirmation.
+
+```
+$ TEST_DATABASE_URL=<local Docker Postgres> go test ./internal/api -run TestP3AudienceEndpointsAndTenantIsolationIntegration -count=1 -v
+=== RUN   TestP3AudienceEndpointsAndTenantIsolationIntegration
+=== RUN   TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_email
+=== RUN   TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_status
+=== RUN   TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_tag
+=== RUN   TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_list
+=== RUN   TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_created_at
+=== RUN   TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_custom_field
+--- PASS: TestP3AudienceEndpointsAndTenantIsolationIntegration (0.92s)
+    --- PASS: TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_email (0.01s)
+    --- PASS: TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_status (0.01s)
+    --- PASS: TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_tag (0.01s)
+    --- PASS: TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_list (0.01s)
+    --- PASS: TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_created_at (0.01s)
+    --- PASS: TestP3AudienceEndpointsAndTenantIsolationIntegration/segment_custom_field (0.01s)
+PASS
+ok      github.com/khayode/email-platform/internal/api    1.724s
+```
+
+```
+$ E2E_BASE_URL=http://localhost:3000 E2E_API_ORIGIN=http://localhost:8084 npm run test:e2e -- --grep 'P3 list import'
+✓  1 [chromium] › e2e/audience.spec.ts › P3 list import, tag assignment, and segment preview
+1 passed (22.0s)
+```
+
+The OpenAPI YAML parses successfully. `docs/api/openapi.yaml` and the API
+catalog document the audience routes and grouped segment schema.
+
+## P4 — Signup forms (verified 2026-11-06)
 
   Proof gate output:
 
@@ -260,6 +376,43 @@ all mismatched or missing records are classified correctly. This closes the
 remaining P6 verification gap that previously relied only on SPF/DKIM/DMARC while
 ignoring the ownership token.
 
+### Task D follow-up — domain records and page stability (2026-11-06)
+
+The domains UI now renders the API's DNS record response, including the ownership
+TXT record, and no longer asks users to paste a DKIM key. Domain creation
+generates a 2048-bit RSA keypair and stores the private key encrypted with
+`DKIM_ENCRYPTION_KEY`. SPF records use the configured `SPF_INCLUDE` or `mx`
+mechanism; DNS lookup errors are shown separately from missing records.
+
+Evidence:
+
+```
+$ TEST_DATABASE_URL=<local Compose Postgres URL> go test -count=1 ./internal/api -run 'Domain|DNSRecords|NormalizeDkim|GenerateDKIM' -v
+--- PASS: TestDomainsIntegration
+--- PASS: TestCheckDomainDNSVerified
+--- PASS: TestCheckDomainDNSReportsMismatchesAndMissing
+--- PASS: TestCheckDomainDNSRejectsUnconfiguredSPFInclude
+--- PASS: TestCheckDomainDNSReportsLookupFailed
+--- PASS: TestCheckDomainDNSNotFoundIsMissing
+--- PASS: TestDNSRecordsForIncludesSendwiseVerificationRecord
+--- PASS: TestDNSRecordsForTrackingCNAMEAndConfiguredSPF
+--- PASS: TestNormalizeDkimTXTValuePreservesCaseAndJoinsChunks
+--- PASS: TestGenerateDKIMKeyPairUses2048BitRSAAndEncryptedPrivateKey
+PASS
+
+$ cd apps/web && npm run test:e2e -- e2e/domains.spec.ts
+✓ 1 [chromium] › sending domains: generated records, verification, and no browser errors
+1 passed
+```
+
+Production-mode reproduction with pending, verified, misconfigured, NULL/empty
+DKIM keys, NULL check timestamps, and mixed DNS statuses produced no browser
+`pageerror` or `console.error`; the reported exception was not reproducible in
+the current worktree. The Playwright test stubs the verify response to exercise
+the UI state; the database-backed Go integration test exercises the resolver
+with partial and fully matching fake DNS records. The browser gate now fails on
+either browser error.
+
 ## P7 — Automation runtime and due-step execution (done)
 
 Proof gate (real Postgres + Mailpit):
@@ -301,11 +454,20 @@ $ cd apps/web && npm run typecheck && npm run lint && npm test -- --runInBand &&
 ... pass ...
 ```
 
-Fix declaration: the settings, billing, and reports pages are wired and the app source is clean of placeholder text. The Playwright config is host-overridable and defaults to the browser-visible local endpoint so the test suite can run on either a developer workstation or the Compose stack.
+The settings page and selected workspace flows are wired; billing and reporting
+remain partial. No claim is made here that every page is complete or that the
+app-wide source is free of placeholders. The Playwright config is
+host-overridable and defaults to the browser-visible local endpoint.
 
-## P9 — End-to-end suite and release gate (done)
+## P9 — End-to-end suite and release gate (partly verified)
 
 Proof gate:
+
+The repository does have Playwright E2E tests; the suite is not a complete
+product-wide journey. Verified browser flows include forms, imports, P2 account
+email/session behavior, P3 audience management, and the sending-domain UI
+response path. Treat each flow as verified only to the scope of its recorded
+test output below or in the corresponding P2/P3/P6 section.
 
 ```
 $ make e2e
@@ -322,13 +484,18 @@ $ scripts/smoke-prod.sh
 [2026-11-06 11:03:59] Production smoke checks passed
 ```
 
-Fix declaration: the repository now includes a browser-based E2E smoke suite for the critical registration/form and import journeys, a `make e2e` shortcut for local validation, a CI gate that starts the stack and runs the Playwright suite, and a `scripts/smoke-prod.sh` read-only production smoke script for post-deploy verification.
+The browser E2E suite, `make e2e` shortcut, CI gate, and read-only production
+smoke script exist and the outputs above passed. The full cross-module
+registration-to-delivery journey is not yet covered, so P9 is not marked Done.
 
 ## Build / checks
 
 - `go vet ./...` — pass
-- `gofmt -l cmd internal services shared` — empty
-- `go test ./...` — all packages pass (internal/api, auth, campaigns, contacts, etc.)
+- `gofmt -l cmd internal services shared` — reports the pre-existing,
+  untouched `internal/api/automations.go` and `internal/automations/service.go`;
+  no P2/P3-modified Go files are reported.
+- `go test ./...` — all packages pass; Postgres-backed integration proofs are
+  run separately with `TEST_DATABASE_URL` and recorded above.
 - web: `npm run typecheck` — pass
 - web: `npm run lint` — pass (tsc --noEmit)
 - web: `npm run build` — pass
@@ -336,7 +503,8 @@ Fix declaration: the repository now includes a browser-based E2E smoke suite for
 
 ## Modules
 
-- Auth: email verification, password reset, refresh rotation, logout, role checks — implemented in services/identity + internal/auth; tests `internal/auth` pass.
+- Auth: email verification, password reset, refresh rotation, logout, and
+  fail-closed session revocation — P2 Postgres and Mailpit proofs above.
 - Contacts CSV import: worker consumes queued imports; tests in `internal/contacts` pass; row errors reported.
 - Forms: Done; CRUD, globally unique public slugs, hosted submissions,
   suppression/rate-limit handling, and double-opt-in confirmation are covered by
@@ -344,17 +512,25 @@ Fix declaration: the repository now includes a browser-based E2E smoke suite for
   `apps/web/e2e/forms.spec.ts`.
 - Automations: runtime engine and trigger flow are implemented and proven via `TestServiceProcessDueSendsEmailForActiveAutomation` and `TestServiceProcessDueSkipsPausedAutomations`.
 - Campaigns: editor/preview/test send; backend campaigns package tests pass.
-- Lists/tags/segments: CRUD + segment rules server-side; tests `internal/contacts` segments pass.
-- Templates: pages present.
-- Sending domains: pages present.
-- Settings/billing: pages present.
-- Reports: page present.
+- Lists/tags/segments: list CRUD/membership/export, tag CRUD and contact
+  assignments, grouped segment evaluation, preview, and pagination — proven by
+  the P3 Postgres and Playwright outputs above.
+- Templates: list/create UI and backend exist; update/delete, full design
+  editing, and end-to-end template delivery from the UI remain incomplete or
+  unverified.
+- Sending domains: CRUD/DNS record UI and backend verification are implemented;
+  DNS resolution has fake-resolver integration coverage, while live DNS and
+  production-provider behavior remain unverified. See P6 evidence above.
+- Settings: workspace settings and membership/invitation flows are wired and
+  exercised in the P2 browser journey. Billing/usage is partial and has no
+  billing-provider end-to-end proof.
+- Reports: reporting page and API are present; report accuracy and complete
+  campaign analytics remain unverified.
 - Delivery: worker + suppression; tests pass.
 - Projections backfill: `internal/projections` tests pass.
 
 ## Not working / known limitations
 
-- Full e2e Playwright suite not yet added.
 - Some module backends remain partial; see code.
 
 ## Deploy steps

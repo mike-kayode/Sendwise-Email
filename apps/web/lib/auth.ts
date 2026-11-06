@@ -66,6 +66,18 @@ function isRefreshablePath(path: string): boolean {
   ].some((authPath) => path === authPath || path.startsWith(`${authPath}?`));
 }
 
+function shouldAttachAccessToken(path: string): boolean {
+  return ![
+    "/auth/login",
+    "/auth/register",
+    "/auth/refresh",
+    "/auth/verify",
+    "/auth/resend-verification",
+    "/auth/forgot-password",
+    "/auth/reset-password",
+  ].some((authPath) => path === authPath || path.startsWith(`${authPath}?`));
+}
+
 async function refreshAccessToken(): Promise<string | null> {
   if (!refreshInFlight) {
     refreshInFlight = (async () => {
@@ -114,7 +126,7 @@ export async function apiFetch<T>(
     });
   };
 
-  const token = getAccessToken();
+  const token = shouldAttachAccessToken(path) ? getAccessToken() : null;
   let response = await send(token);
   if (response.status === 401 && token && isRefreshablePath(path)) {
     const refreshedToken = await refreshAccessToken();
@@ -146,6 +158,7 @@ export type Contact = {
   status: string;
   custom_fields: Json;
   source?: string;
+  tags?: Array<{ id: string; name: string; color: string }>;
   created_at: string;
   updated_at: string;
 };
@@ -201,6 +214,7 @@ export type SendingDomain = {
   spf_status?: string;
   dkim_status?: string;
   dmarc_status?: string;
+  verification_status?: string;
   last_checked_at?: string;
   verified_at?: string;
   created_at: string;

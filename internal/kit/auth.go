@@ -25,14 +25,25 @@ type Claims struct {
 
 // Manager issues and validates JWTs.
 type Manager struct {
-	secret []byte
-	issuer string
-	ttl    time.Duration
+	secret       []byte
+	issuer       string
+	ttl          time.Duration
+	sessionStore SessionStore
+}
+
+// SessionStore checks whether an access-token session is still active.
+type SessionStore interface {
+	Active(context.Context, string, string) (bool, error)
 }
 
 // NewManager creates a token manager for the given shared secret and issuer.
 func NewManager(secret, issuer string, ttl time.Duration) *Manager {
 	return &Manager{secret: []byte(secret), issuer: issuer, ttl: ttl}
+}
+
+// WithSessionStore returns a manager that checks session revocation in middleware.
+func (m *Manager) WithSessionStore(store SessionStore) *Manager {
+	return &Manager{secret: m.secret, issuer: m.issuer, ttl: m.ttl, sessionStore: store}
 }
 
 // TTL returns the configured access-token lifetime.
@@ -97,7 +108,59 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 			Error(w, http.StatusUnauthorized, "invalid_token", "The access token is invalid or expired.")
 			return
 		}
+		if m.sessionStore != nil {
+			if claims.SessionID == "" {
+				Error(w, http.StatusUnauthorized, "session_revoked", "The session has been revoked. Sign in again.")
+				return
+			}
+			active, err := m.sessionStore.Active(r.Context(), claims.Subject, claims.SessionID)
+			if err != nil {
+				Error(w, http.StatusServiceUnavailable, "session_check_unavailable", "The session could not be verified.")
+				return
+			}
+			if !active {
+				Error(w, http.StatusUnauthorized, "session_revoked", "The session has been revoked. Sign in again.")
+				return
+			}
+		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), claimsKey{}, claims)))
+	})
+}
+
+// OptionalSessionMiddleware validates any bearer token present on a proxied
+// request. Requests without a bearer token continue to the owning service.
+func (m *Manager) OptionalSessionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := strings.TrimSpace(r.Header.Get("Authorization"))
+		if header == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !strings.HasPrefix(header, "Bearer ") {
+			Error(w, http.StatusUnauthorized, "invalid_token", "The access token is invalid or expired.")
+			return
+		}
+		claims, err := m.Parse(strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")))
+		if err != nil || (claims.TokenType != "" && claims.TokenType != "access") {
+			Error(w, http.StatusUnauthorized, "invalid_token", "The access token is invalid or expired.")
+			return
+		}
+		if m.sessionStore != nil {
+			if claims.SessionID == "" {
+				Error(w, http.StatusUnauthorized, "session_revoked", "The session has been revoked. Sign in again.")
+				return
+			}
+			active, err := m.sessionStore.Active(r.Context(), claims.Subject, claims.SessionID)
+			if err != nil {
+				Error(w, http.StatusServiceUnavailable, "session_check_unavailable", "The session could not be verified.")
+				return
+			}
+			if !active {
+				Error(w, http.StatusUnauthorized, "session_revoked", "The session has been revoked. Sign in again.")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

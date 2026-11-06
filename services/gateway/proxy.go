@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/khayode/email-platform/internal/kit"
+	"github.com/khayode/email-platform/internal/session"
 )
 
 // Gateway is the single public entry point. It routes browser and API traffic
@@ -21,6 +22,7 @@ type Gateway struct {
 	proxy    *httputil.ReverseProxy
 	upstream map[string]*url.URL
 	handler  http.Handler
+	tokens   *kit.Manager
 }
 
 // New builds the gateway handler for the given configuration.
@@ -42,6 +44,10 @@ func New(cfg Config, logger *slog.Logger) (*Gateway, error) {
 	}
 
 	g := &Gateway{cfg: cfg, logger: logger, upstream: upstream}
+	if cfg.JWTSecret != "" && cfg.ServiceToken != "" {
+		g.tokens = kit.NewManager(cfg.JWTSecret, cfg.JWTIssuer, 0).
+			WithSessionStore(session.NewHTTPStore(cfg.IdentityURL, cfg.ServiceToken))
+	}
 	g.proxy = &httputil.ReverseProxy{
 		Rewrite:      g.rewrite,
 		ErrorHandler: g.handleError,
@@ -129,8 +135,14 @@ func (g *Gateway) buildHandler() http.Handler {
 	mux.Handle("/metrics", kit.MetricsHandler())
 
 	// Auth endpoints get an extra abuse-protection layer on top of Identity's.
-	mux.Handle("/api/v1/auth/", authRate(g.proxy))
-	mux.Handle("/api/", g.proxy)
+	authProxy := http.Handler(g.proxy)
+	apiProxy := http.Handler(g.proxy)
+	if g.tokens != nil {
+		authProxy = g.tokens.OptionalSessionMiddleware(authProxy)
+		apiProxy = g.tokens.OptionalSessionMiddleware(apiProxy)
+	}
+	mux.Handle("/api/v1/auth/", authRate(authProxy))
+	mux.Handle("/api/", apiProxy)
 	mux.Handle("/", g.proxy)
 
 	return kit.Chain(

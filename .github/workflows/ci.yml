@@ -115,6 +115,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix apps/web install --no-fund --no-audit
       - name: Start local stack
+        env:
+          DKIM_ENCRYPTION_KEY: ci-only-dkim-encryption-key-do-not-use-in-production
         run: docker compose up -d postgres redis nats mailpit migrate api worker web
       - name: Run browser E2E smoke suite
         env:

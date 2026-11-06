@@ -151,6 +151,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-}
       SERVICE_TOKEN: ${SERVICE_TOKEN:?Set SERVICE_TOKEN in .env}
       JWT_ISSUER: ${JWT_ISSUER:-email-platform}
+      IDENTITY_URL: http://identity:8080
     depends_on:
       workspace-db-migrate:
         condition: service_completed_successfully
@@ -171,6 +172,8 @@ services:
       WORKSPACE_URL: http://workspace:8080
       LEGACY_API_URL: http://api:8080
       SERVICE_TOKEN: ${SERVICE_TOKEN:?Set SERVICE_TOKEN in .env}
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_ISSUER: ${JWT_ISSUER:-email-platform}
     depends_on:
       identity:
         condition: service_started
@@ -179,6 +182,14 @@ services:
     ports:
       - "127.0.0.1:8084:8080"
     restart: unless-stopped
+
+  api:
+    environment:
+      IDENTITY_URL: http://identity:8080
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?Set SERVICE_TOKEN in .env}
+    depends_on:
+      identity:
+        condition: service_started
 
   web:
     build:

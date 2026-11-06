@@ -102,13 +102,25 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/lists", protect(s.listAudienceLists))
 	mux.Handle("POST /api/v1/lists", protect(s.createAudienceList, audienceManagers...))
+	mux.Handle("GET /api/v1/lists/{id}", protect(s.getAudienceList))
+	mux.Handle("PATCH /api/v1/lists/{id}", protect(s.updateAudienceList, audienceManagers...))
+	mux.Handle("GET /api/v1/lists/{id}/contacts", protect(s.listAudienceListContacts))
+	mux.Handle("POST /api/v1/lists/{id}/contacts", protect(s.addAudienceListContacts, audienceManagers...))
+	mux.Handle("DELETE /api/v1/lists/{id}/contacts/{contactID}", protect(s.removeAudienceListContact, audienceManagers...))
+	mux.Handle("GET /api/v1/lists/{id}/contacts/export", protect(s.exportAudienceListContacts))
 	mux.Handle("DELETE /api/v1/lists/{id}", protect(s.deleteAudienceList, audienceManagers...))
 	mux.Handle("GET /api/v1/tags", protect(s.listTags))
 	mux.Handle("POST /api/v1/tags", protect(s.createTag, audienceManagers...))
 	mux.Handle("PATCH /api/v1/tags/{id}", protect(s.updateTag, audienceManagers...))
 	mux.Handle("DELETE /api/v1/tags/{id}", protect(s.deleteTag, audienceManagers...))
+	mux.Handle("GET /api/v1/contacts/{id}/tags", protect(s.listContactTags))
+	mux.Handle("POST /api/v1/contacts/tags", protect(s.bulkAssignContactTag, audienceManagers...))
+	mux.Handle("POST /api/v1/contacts/{id}/tags/{tagID}", protect(s.assignContactTag, audienceManagers...))
+	mux.Handle("DELETE /api/v1/contacts/{id}/tags/{tagID}", protect(s.unassignContactTag, audienceManagers...))
 	mux.Handle("GET /api/v1/segments", protect(s.listSegments))
 	mux.Handle("POST /api/v1/segments", protect(s.createSegment, audienceManagers...))
+	mux.Handle("POST /api/v1/segments/preview", protect(s.previewSegment))
+	mux.Handle("GET /api/v1/segments/{id}/contacts", protect(s.listSegmentContacts))
 	// Forms module (protected).
 	mux.Handle("GET /api/v1/forms", protect(s.listForms))
 	mux.Handle("POST /api/v1/forms", protect(s.createForm, audienceManagers...))
@@ -153,7 +165,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/domains", protect(s.createDomain, domainManagers...))
 	mux.Handle("POST /api/v1/domains/{id}/verify", protect(s.verifyDomain, domainManagers...))
 	mux.Handle("GET /api/v1/domains/{id}/dns-records", protect(s.domainDNSRecords))
-	mux.Handle("POST /api/v1/domains/{id}/dkim-key", protect(s.updateDomainDKIM, domainManagers...))
 
 	// Dead-letter queue and suppression management (protected).
 	mux.Handle("GET /api/v1/delivery/dead-letter", protect(s.delivery.listDeadLetter, audienceManagers...))

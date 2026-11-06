@@ -6,6 +6,7 @@ import { Download, Plus, Search, Upload, UserCheck, UserMinus, Users } from "luc
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
 import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/badge";
 import { Table, Thead, Tbody, Tr, Th, Td } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -38,6 +39,18 @@ type ContactStats = {
   bouncedOrComplained: number;
 };
 
+type ContactTag = {
+  id: string;
+  name: string;
+  color: string;
+  contact_count: number;
+};
+
+type ContactTagPage = {
+  data: ContactTag[];
+  pagination: { total: number; limit: number; offset: number };
+};
+
 export default function ContactsPage() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
@@ -46,6 +59,8 @@ export default function ContactsPage() {
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [viewingId, setViewingId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [selectedContactIDs, setSelectedContactIDs] = useState<string[]>([]);
+  const [selectedTagID, setSelectedTagID] = useState("");
   const { toast } = useToast();
 
   const query = useQuery({
@@ -89,6 +104,15 @@ export default function ContactsPage() {
     queryFn: async () => apiFetch<Contact>(`/contacts/${viewingId}`),
     enabled: viewingId !== null,
   });
+  const tagsQuery = useQuery({
+    queryKey: ["tags"],
+    queryFn: () => apiFetch<ContactTagPage>("/tags?limit=200"),
+  });
+  const contactTagsQuery = useQuery({
+    queryKey: ["contact", viewingId, "tags"],
+    queryFn: () => apiFetch<ContactTagPage>(`/contacts/${viewingId}/tags?limit=200`),
+    enabled: viewingId !== null,
+  });
 
   const contacts = query.data?.data ?? [];
   const total = query.data?.pagination.total ?? 0;
@@ -97,6 +121,31 @@ export default function ContactsPage() {
   const refreshAll = () => {
     void query.refetch();
     void statsQuery.refetch();
+  };
+
+  const assignTagToSelected = async () => {
+    if (!selectedTagID || selectedContactIDs.length === 0) return;
+    try {
+      await apiFetch("/contacts/tags", {
+        method: "POST",
+        body: JSON.stringify({ tag_id: selectedTagID, contact_ids: selectedContactIDs }),
+      });
+      setSelectedContactIDs([]);
+      await Promise.all([tagsQuery.refetch(), query.refetch()]);
+      toast({ title: "Tag assigned", description: `Tag applied to ${selectedContactIDs.length} selected contacts.` });
+    } catch (error) {
+      toast({ title: "Tag assignment failed", description: error instanceof Error ? error.message : "The tag could not be assigned.", variant: "destructive" });
+    }
+  };
+
+  const updateContactTag = async (tagID: string, assign: boolean) => {
+    if (!viewingId) return;
+    try {
+      await apiFetch(`/contacts/${viewingId}/tags/${tagID}`, { method: assign ? "POST" : "DELETE" });
+      await Promise.all([contactTagsQuery.refetch(), tagsQuery.refetch(), query.refetch()]);
+    } catch (error) {
+      toast({ title: "Tag update failed", description: error instanceof Error ? error.message : "The contact tag could not be updated.", variant: "destructive" });
+    }
   };
 
   const handleExport = async () => {
@@ -243,12 +292,44 @@ export default function ContactsPage() {
             Showing {contacts.length} of {total}
           </p>
         </div>
+        {selectedContactIDs.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 bg-indigo-50 px-4 py-3">
+            <span className="text-sm text-indigo-900">{selectedContactIDs.length} selected</span>
+            <select
+              aria-label="Tag to assign"
+              value={selectedTagID}
+              onChange={(event) => setSelectedTagID(event.target.value)}
+              className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm"
+              disabled={tagsQuery.isLoading || tagsQuery.data?.data.length === 0}
+            >
+              <option value="">Choose a tag</option>
+              {(tagsQuery.data?.data ?? []).map((tag) => <option key={tag.id} value={tag.id}>{tag.name}</option>)}
+            </select>
+            <button
+              type="button"
+              className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+              disabled={!selectedTagID}
+              onClick={() => void assignTagToSelected()}
+            >
+              Assign tag
+            </button>
+            <button type="button" className="text-sm text-slate-600" onClick={() => setSelectedContactIDs([])}>Clear selection</button>
+            {tagsQuery.error ? <span role="alert" className="text-xs text-rose-700">Could not load tags.</span> : null}
+          </div>
+        ) : null}
 
         <Table>
           <Thead>
             <Tr>
               <Th className="w-8">
-                <input type="checkbox" aria-label="Select all contacts" />
+                <input
+                  type="checkbox"
+                  aria-label="Select all contacts on this page"
+                  checked={contacts.length > 0 && contacts.every((contact) => selectedContactIDs.includes(contact.id))}
+                  onChange={(event) => setSelectedContactIDs((current) => event.target.checked
+                    ? Array.from(new Set([...current, ...contacts.map((contact) => contact.id)]))
+                    : current.filter((id) => !contacts.some((contact) => contact.id === id)))}
+                />
               </Th>
               <Th>Contact</Th>
               <Th>Status</Th>
@@ -269,7 +350,14 @@ export default function ContactsPage() {
               contacts.map((contact, index) => (
                 <Tr key={contact.id}>
                   <Td>
-                    <input type="checkbox" aria-label={`Select ${contact.email}`} />
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${contact.email}`}
+                      checked={selectedContactIDs.includes(contact.id)}
+                      onChange={(event) => setSelectedContactIDs((current) => event.target.checked
+                        ? [...current, contact.id]
+                        : current.filter((id) => id !== contact.id))}
+                    />
                   </Td>
                   <Td>
                     <div className="flex items-center gap-2.5">
@@ -291,7 +379,12 @@ export default function ContactsPage() {
                   </Td>
                   <Td>
                     <div className="flex flex-wrap gap-1">
-                      <span className="text-xs text-slate-400">—</span>
+                      {(contact.tags ?? []).length === 0 ? <span className="text-xs text-slate-400">—</span> : null}
+                      {(contact.tags ?? []).map((tag) => (
+                        <span key={tag.id} className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: tag.color, backgroundColor: `${tag.color}1a` }}>
+                          {tag.name}
+                        </span>
+                      ))}
                     </div>
                   </Td>
                   <Td className="text-xs text-slate-600">{contact.source || "—"}</Td>
@@ -385,6 +478,33 @@ export default function ContactsPage() {
                     <span className="text-right font-medium text-slate-900">{row.value}</span>
                   </div>
                 ))}
+              </div>
+              <div>
+                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">Tags</p>
+                {contactTagsQuery.isLoading ? <p className="text-xs text-slate-500">Loading tags...</p> : null}
+                {contactTagsQuery.error ? <p role="alert" className="text-xs text-rose-700">Unable to load contact tags.</p> : null}
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {(contactTagsQuery.data?.data ?? []).map((tag) => (
+                    <span key={tag.id} className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-2.5 py-1 text-xs">
+                      <span style={{ color: tag.color }}>{tag.name}</span>
+                      <button type="button" aria-label={`Remove ${tag.name} tag`} onClick={() => void updateContactTag(tag.id, false)} className="text-slate-500">×</button>
+                    </span>
+                  ))}
+                  {contactTagsQuery.data?.data.length === 0 ? <span className="text-xs text-slate-500">No tags assigned.</span> : null}
+                </div>
+                <div className="flex gap-2">
+                  <select
+                    aria-label="Tag to assign to contact"
+                    value={selectedTagID}
+                    onChange={(event) => setSelectedTagID(event.target.value)}
+                    className="h-9 min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 text-xs"
+                  >
+                    <option value="">Choose a tag</option>
+                    {(tagsQuery.data?.data ?? []).filter((tag) => !(contactTagsQuery.data?.data ?? []).some((current) => current.id === tag.id))
+                      .map((tag) => <option key={tag.id} value={tag.id}>{tag.name}</option>)}
+                  </select>
+                  <Button size="sm" disabled={!selectedTagID} onClick={() => void updateContactTag(selectedTagID, true)}>Assign</Button>
+                </div>
               </div>
               <div>
                 <p className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-400">

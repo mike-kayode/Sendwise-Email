@@ -11,6 +11,7 @@ import (
 
 type Claims struct {
 	OrganizationID string `json:"org,omitempty"`
+	Email          string `json:"email,omitempty"`
 	Role           string `json:"role,omitempty"`
 	CampaignID     string `json:"cmp,omitempty"`
 	ContactID      string `json:"cid,omitempty"`
@@ -39,6 +40,7 @@ func NewManagerWithStore(secret, issuer string, ttl time.Duration, sessionStore 
 		issuer:       issuer,
 		ttl:          ttl,
 		sessionStore: sessionStore,
+		logger:       slog.Default(),
 	}
 }
 
@@ -53,6 +55,7 @@ func (m *Manager) WithSessionStore(sessionStore SessionStore) *Manager {
 		issuer:       m.issuer,
 		ttl:          m.ttl,
 		sessionStore: sessionStore,
+		logger:       m.logger,
 	}
 }
 
