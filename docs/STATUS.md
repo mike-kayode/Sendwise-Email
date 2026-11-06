@@ -554,7 +554,7 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
    `go test ./internal/api -run Domain -count=1 -v` — `TestDomainsIntegration`
    and all five DNS resolver tests pass.
 
-2. **CI and formatting — Not done; local proof passes, Actions pending.**
+2. **CI and formatting — Done for code SHA `30c0866`; status-only commit follows.**
    `gofmt -l cmd internal services shared` returned no paths. The old
    integration-test registration flow and API-key creation defects were fixed;
    the concurrent 401 refresh race now reuses a token another request has
@@ -627,9 +627,20 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
    shared the gateway's production-default 60/minute limit. The E2E-only
    Compose override now raises the limit/burst; gateway unit tests still verify
    the production default and Retry-After behavior. A Mailpit service and
-   explicit SMTP test settings are also included. The next Actions run is
-   pending. Do not treat this blocker as Done until Actions is green for the
-   final SHA.
+   explicit SMTP test settings are also included. Actions run
+   [#31](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42252436239)
+   completed successfully for SHA `30c0866`; all five jobs passed:
+
+   ```
+   lint: success
+   test-go: success
+   test-web: success
+   e2e: success
+   docker-build: success
+   ```
+
+   This status-only commit must also receive a green Actions run before the
+   final SHA is considered verified.
 
 3. **DKIM signing — Not done.** Outbound messages have not been verified against
    the per-domain public key. Signer selection and implementation are pending.
