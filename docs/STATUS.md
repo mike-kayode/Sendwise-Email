@@ -708,9 +708,25 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
    available or accessed; migrations 0013–0015 have not been run against a
    restored production copy.
 
-7. **Backfill on production copy — Not done.** The production database is out
-   of scope and unavailable. Backfill has not been run on a production copy or
-   server.
+7. **Backfill deployment path — Partly done; production proof not done.**
+   Added an opt-in `backfill` Compose service and `DEPLOY_BACKFILL=1` deploy
+   step, which runs after migrations and before application startup. The
+   container target and local idempotent backfill tests pass:
+
+   ```
+   $ TEST_DATABASE_URL=<local Compose Postgres URL> go test ./internal/backfill ./cmd/backfill -count=1
+   ok   github.com/khayode/email-platform/internal/backfill  4.396s
+   ?    github.com/khayode/email-platform/cmd/backfill       [no test files]
+   $ bash -n scripts/deploy.sh
+   (no output; exit status 0)
+   $ docker compose build backfill
+   Image email-platform-backfill Built
+   ```
+
+   Compose validation also passed for the base and merged configurations.
+   No production data was accessed. The blocker remains not done until this
+   command is run against a scratch copy of production data and verified by
+   row counts, then run during deployment with before/after counts.
 
 ### Remaining non-blocking limitations
 

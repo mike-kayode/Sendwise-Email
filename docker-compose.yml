@@ -83,6 +83,22 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # One-shot Identity/Workspace -> legacy projection. Never starts with the
+  # stack; only `docker compose run --rm backfill` (or DEPLOY_BACKFILL=1 on
+  # scripts/deploy.sh) executes it. Idempotent: re-running updates in place.
+  backfill:
+    build:
+      context: .
+      target: backfill
+    environment:
+      IDENTITY_DATABASE_URL: postgres://${POSTGRES_USER:-email}:${POSTGRES_PASSWORD:-email}@postgres:5432/identity?sslmode=disable
+      WORKSPACE_DATABASE_URL: postgres://${POSTGRES_USER:-email}:${POSTGRES_PASSWORD:-email}@postgres:5432/workspace?sslmode=disable
+      LEGACY_DATABASE_URL: postgres://${POSTGRES_USER:-email}:${POSTGRES_PASSWORD:-email}@postgres:5432/${POSTGRES_DB:-email}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build:
       context: .

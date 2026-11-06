@@ -11,6 +11,8 @@ set -euo pipefail
 #   ./scripts/deploy.sh backup           # take a DB backup only
 #   ./scripts/deploy.sh rollback --yes   # DESTRUCTIVE: restore the latest DB backup
 #   ./scripts/deploy.sh production       # deploy with production env validation
+#   DEPLOY_BACKFILL=1 ./scripts/deploy.sh  # additionally run the identity/workspace
+#                                        #   -> legacy backfill after migrations
 #
 # Deploy order: environment validation -> both Compose-file checks -> image
 # snapshot -> database backup -> build -> migrations -> up --no-deps -> smoke.
@@ -169,8 +171,12 @@ take_backup() {
 }
 
 build_images() {
-  log "Building images (migrate services, api, worker, identity, workspace, gateway, web)..."
-  "${COMPOSE[@]}" build migrate identity-db-migrate workspace-db-migrate api worker identity workspace gateway web
+  local targets=(migrate identity-db-migrate workspace-db-migrate api worker identity workspace gateway web)
+  if [ "${DEPLOY_BACKFILL:-0}" = "1" ]; then
+    targets+=(backfill)
+  fi
+  log "Building images (${targets[*]})..."
+  "${COMPOSE[@]}" build "${targets[@]}"
 }
 
 capture_previous_images() {
@@ -274,6 +280,17 @@ run_migrations() {
   "${COMPOSE[@]}" run --rm identity-db-migrate
   "${COMPOSE[@]}" run --rm workspace-db-migrate
   log "Migrations applied"
+}
+
+# Optional (blocker 7): project Identity/Workspace into the legacy database
+# after migrations. Opt-in because it writes to the legacy schema: set
+# DEPLOY_BACKFILL=1 to run it, or run it standalone with
+# `docker compose run --rm backfill`. Safe to re-run — it upserts by ID.
+run_backfill() {
+  [ "${DEPLOY_BACKFILL:-0}" = "1" ] || return 0
+  log "DEPLOY_BACKFILL=1 — projecting identity/workspace into the legacy database..."
+  "${COMPOSE[@]}" run --rm backfill
+  log "Backfill applied"
 }
 
 start_stack() {
@@ -389,6 +406,7 @@ case "$COMMAND" in
     take_backup
     build_images
     run_migrations
+    run_backfill
     start_stack
     smoke_tests
     DEPLOY_IN_PROGRESS=0
