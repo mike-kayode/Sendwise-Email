@@ -168,3 +168,41 @@ func TestCSVReaderHonorsExplicitHeaderlessMapping(t *testing.T) {
 		t.Fatalf("first name = %q, want Ada", row.FirstName)
 	}
 }
+
+// TestImportCSVReaderPassesDuplicatesAndRejectsInvalidRows documents the
+// parser's role in the import pipeline: duplicate rows are passed through
+// (de-duplication happens in the database on conflict), invalid email rows
+// return an error so the worker can count them as invalid with a row number.
+func TestImportCSVReaderPassesDuplicatesAndRejectsInvalidRows(t *testing.T) {
+	source := "email,first_name\nada@example.test,Ada\nada@example.test,Ada\nnot-an-email,Broken\n"
+	reader, mapping, err := NewCSVReader(strings.NewReader(source), nil)
+	if err != nil {
+		t.Fatalf("NewCSVReader() error = %v", err)
+	}
+	if mapping.HasHeader == nil || !*mapping.HasHeader {
+		t.Fatal("header row was not detected")
+	}
+
+	first, err := reader.Read()
+	if err != nil {
+		t.Fatalf("first Read() error = %v", err)
+	}
+	if first.Email != "ada@example.test" {
+		t.Fatalf("first row email = %q", first.Email)
+	}
+
+	duplicate, err := reader.Read()
+	if err != nil {
+		t.Fatalf("duplicate row Read() error = %v, duplicates must pass through to the DB", err)
+	}
+	if duplicate.Email != first.Email {
+		t.Fatalf("duplicate row email = %q, want %q", duplicate.Email, first.Email)
+	}
+
+	if _, err := reader.Read(); err == nil || !strings.Contains(err.Error(), "invalid email address") {
+		t.Fatalf("invalid row Read() error = %v, want invalid email address", err)
+	}
+	if _, err := reader.Read(); err != io.EOF {
+		t.Fatalf("final Read() error = %v, want EOF", err)
+	}
+}

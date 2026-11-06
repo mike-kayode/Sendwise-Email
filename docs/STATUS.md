@@ -82,6 +82,86 @@ Notes:
   typecheck/lint/test/build and `docker compose config -q`.
 - Stray files removed and gitignored: `email.csv`, `"`, `test-results/`.
 
+## P1 — CSV import end to end (verified 2026-11-06)
+
+Proof gate output:
+
+```
+$ TEST_DATABASE_URL=postgres://email:email@localhost:5432/email_test?sslmode=disable \
+    go test ./internal/contacts ./internal/worker ./internal/api -run Import -v -count=1
+=== RUN   TestImportCSVReaderPassesDuplicatesAndRejectsInvalidRows
+--- PASS: TestImportCSVReaderPassesDuplicatesAndRejectsInvalidRows (0.00s)
+PASS
+ok  	github.com/khayode/email-platform/internal/contacts	0.681s
+=== RUN   TestContactImportWorkerPersistsPendingContactsAndResults
+--- PASS: TestContactImportWorkerPersistsPendingContactsAndResults (0.71s)
+=== RUN   TestContactImportRecoversJobStuckInProcessing
+--- PASS: TestContactImportRecoversJobStuckInProcessing (0.35s)
+=== RUN   TestContactImportEndToEndFromUploadToContacts
+--- PASS: TestContactImportEndToEndFromUploadToContacts (0.36s)
+=== RUN   TestCountContactImportRows
+--- PASS: TestCountContactImportRows (0.00s)
+=== RUN   TestCountContactImportRowsStopsAtLimit
+--- PASS: TestCountContactImportRowsStopsAtLimit (0.08s)
+=== RUN   TestAppendImportErrorCapsStoredDetails
+--- PASS: TestAppendImportErrorCapsStoredDetails (0.00s)
+PASS
+ok  	github.com/khayode/email-platform/internal/worker	2.290s
+=== RUN   TestContactImportAPIQueuesAndScopesProgress
+--- PASS: TestContactImportAPIQueuesAndScopesProgress (0.50s)
+PASS
+ok  	github.com/khayode/email-platform/internal/api	1.272s
+(0 skipped; TEST_DATABASE_URL set)
+
+$ cd apps/web && npx playwright test
+Running 1 test using 1 worker
+  ✓  1 [chromium] › e2e/import.spec.ts:8:1 › CSV import: upload a 3-row file, see Import complete and 2 contacts (15.7s)
+  1 passed (16.4s)
+```
+
+Test coverage behind the gate:
+
+- `TestContactImportEndToEndFromUploadToContacts` — POST /api/v1/contacts/import
+  (multipart, header + 2 valid + 1 invalid + 1 duplicate row) -> worker run once
+  -> GET /api/v1/contact-imports/{id}: completed, total=4, imported=2, invalid=1,
+  skipped=1, single row error with row=4 (header counted), contacts exist only in
+  the importing organization, 2 list memberships.
+- `TestContactImportRecoversJobStuckInProcessing` — a job stuck in `processing`
+  with an expired lease is re-claimed and completed (crash recovery; the claim
+  query uses FOR UPDATE SKIP LOCKED with a 5-minute lease).
+- `TestImportCSVReaderPassesDuplicatesAndRejectsInvalidRows` — parser passes
+  duplicates through (DB de-dupes) and errors on invalid emails.
+- `TestContactImportAPIQueuesAndScopesProgress` — upload contract + cross-tenant
+  404 on the status endpoint.
+- Playwright `e2e/import.spec.ts` — logs in, uploads a 3-row CSV, sees
+  "Import Complete" with Imported=2, then sees both contacts in the table.
+
+Bugs found and fixed while running the real path:
+
+1. `internal/db/migrate.go` — concurrent migrators (parallel `go test` packages)
+   raced on `CREATE EXTENSION` and failed with
+   `duplicate key value violates unique constraint "pg_extension_name_index"`.
+   Fixed with a session-level `pg_advisory_lock` around the migration run.
+2. `services/gateway/proxy.go` — the gateway's CORS middleware set
+   `Access-Control-Allow-Origin` and the reverse proxy then copied the legacy
+   API's own CORS headers with `Add`, producing
+   `Access-Control-Allow-Origin: http://localhost:3000, http://localhost:3000`.
+   Browsers reject that, so every cross-origin browser call to legacy endpoints
+   failed (the import POST reached the server, but the UI saw a network error).
+   Fixed with `ModifyResponse: stripUpstreamCORSHeaders` — the gateway is the
+   single CORS authority. Regression test: `TestGatewayStripsUpstreamCORSHeaders`.
+3. `import-dialog.tsx` — added a progress bar from `processed_rows/total_rows`,
+   a real failed state (rose icon + `last_error` instead of a green check),
+   and a 16 MiB-specific size message. Terminal statuses (completed/failed) stop
+   polling; per-row error table + CSV error report already existed.
+
+NOT done / not verified in P1:
+
+- The >16 MiB server rejection (413) and wrong-file-type rejection are enforced
+  in code (`maxCSVImportBytes`, `.csv` check) but have no automated test yet.
+- The progress bar's visual rendering is not asserted by Playwright (the worker
+  finishes within one poll interval).
+
 ## Build / checks
 
 - `go vet ./...` — pass

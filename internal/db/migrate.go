@@ -27,6 +27,18 @@ func Migrate(ctx context.Context, databaseURL, dir string) error {
 	}
 	defer conn.Close(ctx)
 
+	// Serialize migrators that share a database (parallel `go test` packages,
+	// concurrent deploy containers). Without this, concurrent runs race on
+	// CREATE EXTENSION / CREATE TABLE IF NOT EXISTS and fail with duplicate
+	// key errors on Postgres catalog indexes. The lock is session-scoped and
+	// released on unlock or connection close.
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(827164500913)`); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer func() {
+		_, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock(827164500913)`)
+	}()
+
 	if _, err := conn.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version    text PRIMARY KEY,

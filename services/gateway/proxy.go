@@ -45,9 +45,31 @@ func New(cfg Config, logger *slog.Logger) (*Gateway, error) {
 	g.proxy = &httputil.ReverseProxy{
 		Rewrite:      g.rewrite,
 		ErrorHandler: g.handleError,
+		// The gateway owns CORS (kit.CORS in buildHandler). Upstream services
+		// may emit their own Access-Control-* headers; ReverseProxy copies
+		// them with Add, which would duplicate Access-Control-Allow-Origin
+		// next to the gateway's own value — and browsers reject responses
+		// where the header contains more than one value.
+		ModifyResponse: stripUpstreamCORSHeaders,
 	}
 	g.handler = g.buildHandler()
 	return g, nil
+}
+
+var upstreamCORSHeaders = []string{
+	"Access-Control-Allow-Origin",
+	"Access-Control-Allow-Credentials",
+	"Access-Control-Allow-Headers",
+	"Access-Control-Allow-Methods",
+	"Access-Control-Expose-Headers",
+	"Access-Control-Max-Age",
+}
+
+func stripUpstreamCORSHeaders(resp *http.Response) error {
+	for _, header := range upstreamCORSHeaders {
+		resp.Header.Del(header)
+	}
+	return nil
 }
 
 func errInvalidUpstream(name, raw string) error {

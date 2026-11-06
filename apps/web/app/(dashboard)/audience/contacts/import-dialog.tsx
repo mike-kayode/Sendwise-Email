@@ -130,7 +130,7 @@ export function ImportDialog({
       return;
     }
     if (selectedFile.size > 16 * 1024 * 1024) {
-      setFileError("File too large. Max 16 MB.");
+      setFileError("File too large. CSV files are limited to 16 MiB.");
       return;
     }
     setFile(selectedFile);
@@ -251,7 +251,11 @@ export function ImportDialog({
           setStep("complete");
           const ok = result.status === "completed";
           toast.toast({
-            title: ok ? "Import complete" : "Import finished with errors",
+            title: ok
+              ? "Import complete"
+              : result.status === "failed"
+                ? "Import failed"
+                : "Import finished with errors",
             description: `Imported ${result.imported} contacts (${result.skipped} skipped, ${result.invalid} invalid).`,
             variant: ok ? "default" : "destructive",
           });
@@ -526,6 +530,39 @@ export function ImportDialog({
             <div className="p-6 flex flex-col items-center justify-center min-h-[300px]">
               <Loader2 className="h-8 w-8 animate-spin text-indigo-600 mb-4" />
               <p className="text-sm text-slate-600">Processing your import...</p>
+              <div className="mt-4 w-full max-w-md" data-testid="import-progress">
+                {importResult && importResult.total_rows > 0 ? (
+                  <>
+                    <div className="mb-1 flex justify-between text-xs text-slate-500">
+                      <span>
+                        {importResult.processed_rows} of {importResult.total_rows} rows
+                      </span>
+                      <span>
+                        {Math.min(
+                          100,
+                          Math.round((importResult.processed_rows / importResult.total_rows) * 100),
+                        )}
+                        %
+                      </span>
+                    </div>
+                    <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                      <div
+                        className="h-2 rounded-full bg-indigo-600 transition-all duration-500"
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            Math.round((importResult.processed_rows / importResult.total_rows) * 100),
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                    <div className="h-2 w-1/3 animate-pulse rounded-full bg-indigo-600" />
+                  </div>
+                )}
+              </div>
               <p className="text-xs text-slate-400 mt-2">
                 This may take a moment for large files.
               </p>
@@ -534,13 +571,30 @@ export function ImportDialog({
           {step === "complete" && importResult && (
             <div className="p-6">
               <div className="flex items-center justify-center mb-6">
-                <div className="w-12 h-12 rounded-full bg-emerald-100 flex items-center justify-center">
-                  <CheckCircle className="h-6 w-6 text-emerald-600" />
+                <div
+                  className={`w-12 h-12 rounded-full flex items-center justify-center ${
+                    importResult.status === "failed" ? "bg-rose-100" : "bg-emerald-100"
+                  }`}
+                >
+                  {importResult.status === "failed" ? (
+                    <AlertCircle className="h-6 w-6 text-rose-600" />
+                  ) : (
+                    <CheckCircle className="h-6 w-6 text-emerald-600" />
+                  )}
                 </div>
               </div>
-              <h3 className="text-lg font-semibold text-slate-900 mb-2">
-                Import {importResult.status === "completed" ? "Complete" : "Completed"}
+              <h3 className="text-lg font-semibold text-slate-900 mb-2 text-center">
+                {importResult.status === "completed"
+                  ? "Import Complete"
+                  : importResult.status === "failed"
+                    ? "Import Failed"
+                    : "Import Completed"}
               </h3>
+              {importResult.status === "failed" && importResult.last_error && (
+                <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 p-4">
+                  <p className="text-sm text-rose-700">{importResult.last_error}</p>
+                </div>
+              )}
               <div className="grid gap-4">
                 <div className="rounded-lg border border-slate-200 p-4">
                   <p className="text-xs text-slate-500 uppercase">Total rows</p>
@@ -608,7 +662,7 @@ export function ImportDialog({
                 <Button variant="outline" onClick={restart}>
                   Import another file
                 </Button>
-                <Button onClick={() => {
+                <Button data-testid="import-close" onClick={() => {
                   setIsOpen(false);
                   onImportComplete?.();
                 }}>

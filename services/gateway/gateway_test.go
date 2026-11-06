@@ -340,3 +340,48 @@ func TestReadyzReportsLegacyReachability(t *testing.T) {
 		t.Errorf("503 body must name the down upstream: %s", body)
 	}
 }
+
+// TestGatewayStripsUpstreamCORSHeaders proves the gateway is the single CORS
+// authority: when an upstream (like the legacy API) also emits
+// Access-Control-* headers, the gateway must not forward them next to its own
+// or the browser sees multiple Access-Control-Allow-Origin values and rejects
+// the response.
+func TestGatewayStripsUpstreamCORSHeaders(t *testing.T) {
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		w.Header().Add("Access-Control-Allow-Origin", origin)
+		w.Header().Add("Access-Control-Allow-Credentials", "true")
+		w.Header().Add("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Add("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer legacy.Close()
+	identity := newEchoServer(&[]upstreamEcho{})
+	defer identity.Close()
+	workspace := newEchoServer(&[]upstreamEcho{})
+	defer workspace.Close()
+
+	server, _ := newTestGateway(t, Config{
+		IdentityURL:  identity.URL,
+		WorkspaceURL: workspace.URL,
+		LegacyAPIURL: legacy.URL,
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/contacts", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxied request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	values := resp.Header.Values("Access-Control-Allow-Origin")
+	if len(values) != 1 || values[0] != "http://localhost:3000" {
+		t.Fatalf("Access-Control-Allow-Origin values = %#v, want exactly [http://localhost:3000]", values)
+	}
+	if got := len(resp.Header.Values("Access-Control-Allow-Credentials")); got != 1 {
+		t.Fatalf("Access-Control-Allow-Credentials repeated %d times, want 1", got)
+	}
+}

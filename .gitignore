@@ -31,4 +31,5 @@ backups/
 # stray/local artifacts
 email.csv
 test-results/
+playwright-report/
 "
