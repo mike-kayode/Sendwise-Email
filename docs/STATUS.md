@@ -554,14 +554,64 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
    `go test ./internal/api -run Domain -count=1 -v` — `TestDomainsIntegration`
    and all five DNS resolver tests pass.
 
-2. **CI and formatting — Not done.** The two identified Go files have not yet
-   been formatted, and a green Actions run for a final SHA has not been
-   confirmed. `go vet ./...` passed. Full `go test ./...` currently fails in
-   legacy auth integration tests (`TestAuthRegisterLoginMeIntegration`,
-   `TestContactsCRUDIntegration`, `TestCampaignsLifecycleIntegration`,
-   `TestAnalyticsOverviewIntegration`, and `TestAPIKeyLifecycleIntegration`);
-   these still expect the retired registration response and reuse hard-coded
-   accounts. This must be reconciled before treating the release gate as green.
+2. **CI and formatting — Not done; local proof passes, Actions pending.**
+   `gofmt -l cmd internal services shared` returned no paths. The old
+   integration-test registration flow and API-key creation defects were fixed;
+   the concurrent 401 refresh race now reuses a token another request has
+   already refreshed. `go vet ./...` and `go test ./...` passed against a
+   newly created, isolated local Postgres database (`TEST_DATABASE_URL` set,
+   no tests skipped). Web typecheck, lint, unit tests (10 passed), and
+   production build passed. Full local Playwright passed all five tests:
+
+   ```
+   $ go vet ./...
+   (no diagnostics; exit status 0)
+   $ go test ./...
+   ok  github.com/khayode/email-platform/internal/api
+   ok  github.com/khayode/email-platform/internal/auth
+   ok  github.com/khayode/email-platform/internal/automations
+   ok  github.com/khayode/email-platform/internal/backfill
+   ok  github.com/khayode/email-platform/internal/campaigns
+   ok  github.com/khayode/email-platform/internal/config
+   ok  github.com/khayode/email-platform/internal/contacts
+   ok  github.com/khayode/email-platform/internal/db
+   ok  github.com/khayode/email-platform/internal/delivery
+   ok  github.com/khayode/email-platform/internal/kit
+   ok  github.com/khayode/email-platform/internal/outbox
+   ok  github.com/khayode/email-platform/internal/projections
+   ok  github.com/khayode/email-platform/internal/worker
+   ok  github.com/khayode/email-platform/services/gateway
+   ok  github.com/khayode/email-platform/services/identity
+   ok  github.com/khayode/email-platform/services/identity/cmd/devseed
+   ok  github.com/khayode/email-platform/services/workspace
+   ok  github.com/khayode/email-platform/shared/contracts/events
+
+   $ npm run typecheck
+   > tsc --noEmit
+   (exit status 0)
+   $ npm run lint
+   > tsc --noEmit
+   (exit status 0)
+   $ npm test
+   ℹ tests 10
+   ℹ pass 10
+   ℹ fail 0
+
+   $ npm run test:e2e -- --reporter=line
+   Running 5 tests using 1 worker
+   [1/5] audience.spec.ts — passed
+   [2/5] domains.spec.ts — passed
+   [3/5] forms.spec.ts — passed
+   [4/5] import.spec.ts — passed
+   [5/5] p2-auth.spec.ts — passed
+   5 passed (31.5s)
+   ```
+
+   One earlier full-suite attempt timed out at the second smoke-account login
+   in `forms.spec.ts`; that test passed alone and the complete suite passed on
+   rerun. CI workflow changes are included in the local blocker commit but have
+   not yet run in GitHub Actions. Do not treat this blocker as Done until
+   Actions is green for the final pushed SHA.
 
 3. **DKIM signing — Not done.** Outbound messages have not been verified against
    the per-domain public key. Signer selection and implementation are pending.

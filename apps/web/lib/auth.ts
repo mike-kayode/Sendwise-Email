@@ -129,7 +129,9 @@ export async function apiFetch<T>(
   const token = shouldAttachAccessToken(path) ? getAccessToken() : null;
   let response = await send(token);
   if (response.status === 401 && token && isRefreshablePath(path)) {
-    const refreshedToken = await refreshAccessToken();
+    const currentToken = getAccessToken();
+    const refreshedToken =
+      currentToken && currentToken !== token ? currentToken : await refreshAccessToken();
     if (refreshedToken) response = await send(refreshedToken);
     if (response.status === 401) {
       removeAccessToken();

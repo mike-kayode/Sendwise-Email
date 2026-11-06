@@ -75,6 +75,7 @@ jobs:
       - name: Go test
         env:
           DATABASE_URL: postgres://email:email@localhost:5432/email?sslmode=disable
+          TEST_DATABASE_URL: postgres://email:email@localhost:5432/email?sslmode=disable
           REDIS_URL: redis://localhost:6379/0
           NATS_URL: nats://localhost:4222
           JWT_SECRET: test-secret-do-not-use-in-production
@@ -116,12 +117,56 @@ jobs:
         run: npm --prefix apps/web install --no-fund --no-audit
       - name: Start local stack
         env:
+          APP_ENV: development
+          API_BASE_URL: http://localhost:8084
+          APP_BASE_URL: http://localhost:3000
+          CORS_ORIGINS: http://localhost:3000
           DKIM_ENCRYPTION_KEY: ci-only-dkim-encryption-key-do-not-use-in-production
-        run: docker compose up -d postgres redis nats mailpit migrate api worker web
+          JWT_SECRET: ci-only-jwt-secret-do-not-use-in-production
+          SERVICE_TOKEN: ci-only-service-token
+          WEBHOOK_SECRET: ci-only-webhook-secret
+          MAIL_PROVIDER: smtp
+          SMTP_ADDR: mailpit:1025
+          SMTP_HOST: mailpit
+          SMTP_USERNAME: ""
+          SMTP_PASSWORD: ""
+          SMTP_FROM: ci@sendwise.test
+        run: docker compose -f docker-compose.yml -f docker-compose.microservices.yml up -d postgres redis nats mailpit migrate identity-db-migrate workspace-db-migrate identity workspace gateway api worker web
+      - name: Seed E2E account
+        env:
+          APP_ENV: development
+          DATABASE_URL: postgres://email:email@localhost:5432/identity?sslmode=disable
+          DEV_SEED_EMAIL: smoke@sendwise.test
+          DEV_SEED_PASSWORD: SmokeTest2026!
+          DEV_SEED_NAME: CI Smoke User
+          DEV_SEED_ORGANIZATION: CI Smoke Workspace
+        run: go run ./services/identity/cmd/devseed
+      - name: Wait for seeded account membership
+        env:
+          DEV_SEED_EMAIL: smoke@sendwise.test
+          DEV_SEED_PASSWORD: SmokeTest2026!
+        run: |
+          for attempt in $(seq 1 30); do
+            status=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'Content-Type: application/json' \
+              --data "{\"email\":\"$DEV_SEED_EMAIL\",\"password\":\"$DEV_SEED_PASSWORD\"}" \
+              http://localhost:8084/api/v1/auth/login)
+            if [ "$status" = 200 ]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Seeded account did not become available through the gateway"
+          exit 1
       - name: Run browser E2E smoke suite
         env:
+          APP_ENV: development
+          SERVICE_TOKEN: ci-only-service-token
+          WEBHOOK_SECRET: ci-only-webhook-secret
+          DKIM_ENCRYPTION_KEY: ci-only-dkim-encryption-key-do-not-use-in-production
           E2E_BASE_URL: http://localhost:3000
-          E2E_API_ORIGIN: http://localhost
+          E2E_API_ORIGIN: http://localhost:8084
+          MAILPIT_API_URL: http://localhost:8025
           DEPLOY_SMOKE_EMAIL: smoke@sendwise.test
           DEPLOY_SMOKE_PASSWORD: SmokeTest2026!
         run: npm --prefix apps/web run test:e2e -- --reporter=line

@@ -1,9 +1,23 @@
 package auth
 
 import (
+	"encoding/hex"
 	"strings"
 	"testing"
 )
+
+func TestRandomHexReturnsRequestedEntropy(t *testing.T) {
+	value, err := randomHex(apiKeyEntropy)
+	if err != nil {
+		t.Fatalf("randomHex() error = %v", err)
+	}
+	if len(value) != apiKeyEntropy*2 {
+		t.Fatalf("randomHex() length = %d, want %d", len(value), apiKeyEntropy*2)
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		t.Fatalf("randomHex() returned non-hex data: %v", err)
+	}
+}
 
 func TestAPIKeyHashAndVerify(t *testing.T) {
 	key := "sk_0123456789abcdef0123456789abcdef"

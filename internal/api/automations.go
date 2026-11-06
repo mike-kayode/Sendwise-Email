@@ -13,10 +13,10 @@ import (
 )
 
 type automationInput struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	Status      string                 `json:"status"`
-	Trigger     json.RawMessage        `json:"trigger"`
+	Name        string                `json:"name"`
+	Description string                `json:"description"`
+	Status      string                `json:"status"`
+	Trigger     json.RawMessage       `json:"trigger"`
 	Steps       []automationStepInput `json:"steps"`
 }
 
@@ -27,15 +27,15 @@ type automationStepInput struct {
 }
 
 type automationResponse struct {
-	ID          string                 `json:"id"`
-	OrganizationID string             `json:"organization_id"`
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	Status      string                 `json:"status"`
-	Trigger     json.RawMessage        `json:"trigger"`
-	CreatedAt   time.Time              `json:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at"`
-	Steps       []automationStepValue `json:"steps,omitempty"`
+	ID             string                `json:"id"`
+	OrganizationID string                `json:"organization_id"`
+	Name           string                `json:"name"`
+	Description    string                `json:"description"`
+	Status         string                `json:"status"`
+	Trigger        json.RawMessage       `json:"trigger"`
+	CreatedAt      time.Time             `json:"created_at"`
+	UpdatedAt      time.Time             `json:"updated_at"`
+	Steps          []automationStepValue `json:"steps,omitempty"`
 }
 
 type automationStepValue struct {

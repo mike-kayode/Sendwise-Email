@@ -20,16 +20,16 @@ var ErrNotFound = errors.New("automation not found")
 
 // Automation mirrors the legacy schema in migrations/0001_init.sql.
 type Automation struct {
-	ID              string          `json:"id"`
-	OrganizationID  string          `json:"organization_id"`
-	CreatedBy       string          `json:"created_by,omitempty"`
-	Name            string          `json:"name"`
-	Description     string          `json:"description"`
-	Status          string          `json:"status"`
-	Trigger         json.RawMessage `json:"trigger"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
-	Steps           []Step          `json:"steps,omitempty"`
+	ID             string          `json:"id"`
+	OrganizationID string          `json:"organization_id"`
+	CreatedBy      string          `json:"created_by,omitempty"`
+	Name           string          `json:"name"`
+	Description    string          `json:"description"`
+	Status         string          `json:"status"`
+	Trigger        json.RawMessage `json:"trigger"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+	Steps          []Step          `json:"steps,omitempty"`
 }
 
 type Step struct {
@@ -41,17 +41,17 @@ type Step struct {
 }
 
 type Execution struct {
-	ID            string     `json:"id"`
+	ID             string     `json:"id"`
 	OrganizationID string     `json:"organization_id"`
-	AutomationID  string     `json:"automation_id"`
-	ContactID     string     `json:"contact_id"`
-	Status        string     `json:"status"`
-	CurrentStep   int        `json:"current_step"`
-	NextRunAt     *time.Time `json:"next_run_at,omitempty"`
-	LastError     string     `json:"last_error,omitempty"`
-	StartedAt     time.Time  `json:"started_at"`
-	CompletedAt   *time.Time `json:"completed_at,omitempty"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	AutomationID   string     `json:"automation_id"`
+	ContactID      string     `json:"contact_id"`
+	Status         string     `json:"status"`
+	CurrentStep    int        `json:"current_step"`
+	NextRunAt      *time.Time `json:"next_run_at,omitempty"`
+	LastError      string     `json:"last_error,omitempty"`
+	StartedAt      time.Time  `json:"started_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 type Service struct {
@@ -461,9 +461,9 @@ func (s *Service) sendEmailStep(ctx context.Context, orgID, executionID, contact
 		fromAddress = v
 	}
 	renderMap := map[string]string{
-		"{{first_name}}": firstName,
-		"{{last_name}}": lastName,
-		"{{email}}": email,
+		"{{first_name}}":      firstName,
+		"{{last_name}}":       lastName,
+		"{{email}}":           email,
 		"{{unsubscribe_url}}": s.appBaseURL + "/unsubscribe?email=" + email,
 	}
 	subject = renderTemplate(subject, renderMap)

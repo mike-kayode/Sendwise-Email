@@ -219,6 +219,62 @@ func assertStatus(t *testing.T, w *httptest.ResponseRecorder, expected ...int) {
 	}
 }
 
+func registerIntegrationUser(t *testing.T, s *Server, email, password, name, organizationName string) authResponse {
+	t.Helper()
+	parts := strings.SplitN(email, "@", 2)
+	if len(parts) != 2 {
+		t.Fatalf("invalid integration email %q", email)
+	}
+	email = parts[0] + "-" + uuid.NewString() + "@" + parts[1]
+	organizationName += " " + uuid.NewString()
+
+	body, err := json.Marshal(registerInput{
+		Email: email, Password: password, Name: name, OrganizationName: organizationName,
+	})
+	if err != nil {
+		t.Fatalf("encode registration request: %v", err)
+	}
+	w := doRequest(t, s, http.MethodPost, "/api/v1/auth/register", string(body), "")
+	assertStatus(t, w, http.StatusCreated)
+	var registered struct {
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &registered); err != nil {
+		t.Fatalf("decode registration response: %v", err)
+	}
+	if registered.Email != email {
+		t.Fatalf("registration email = %q, want %q", registered.Email, email)
+	}
+
+	var verificationToken string
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT token FROM verification_tokens
+		WHERE email = $1 AND purpose = 'account_verification'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, email).Scan(&verificationToken); err != nil {
+		t.Fatalf("load registration verification token: %v", err)
+	}
+	w = doRequest(t, s, http.MethodGet, "/api/v1/auth/verify?token="+verificationToken, "", "")
+	assertStatus(t, w, http.StatusOK)
+
+	body, err = json.Marshal(loginInput{Email: email, Password: password})
+	if err != nil {
+		t.Fatalf("encode login request: %v", err)
+	}
+	w = doRequest(t, s, http.MethodPost, "/api/v1/auth/login", string(body), "")
+	assertStatus(t, w, http.StatusOK)
+	var authenticated authResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &authenticated); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if authenticated.AccessToken == "" || authenticated.User.Email != email ||
+		authenticated.Organization.Name != organizationName || authenticated.Organization.Role != "owner" {
+		t.Fatalf("unexpected login response: %+v", authenticated)
+	}
+	return authenticated
+}
+
 func assertJSONBody(t *testing.T, w *httptest.ResponseRecorder, key string) string {
 	t.Helper()
 	var m map[string]json.RawMessage
@@ -238,43 +294,14 @@ func TestAuthRegisterLoginMeIntegration(t *testing.T) {
 	s := newIntegrationServer(t)
 
 	orgName := "Integration Test Org"
-	regBody := `{"email":"integration@example.com","password":"integration-password","name":"Integration User","organization_name":"` + orgName + `"}`
-	w := doRequest(t, s, "POST", "/api/v1/auth/register", regBody, "")
-	assertStatus(t, w, http.StatusCreated)
-
-	var regResp struct {
-		AccessToken string `json:"access_token"`
-		User        struct {
-			ID    string `json:"id"`
-			Email string `json:"email"`
-			Name  string `json:"name"`
-		} `json:"user"`
-		Organization struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-			Role string `json:"role"`
-		} `json:"organization"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &regResp); err != nil {
-		t.Fatalf("register response invalid JSON: %v", err)
-	}
-	if regResp.User.Email != "integration@example.com" {
-		t.Fatalf("expected email integration@example.com, got %s", regResp.User.Email)
-	}
-	if regResp.Organization.Name != orgName {
-		t.Fatalf("expected org %s, got %s", orgName, regResp.Organization.Name)
-	}
-	if regResp.Organization.Role != "owner" {
-		t.Fatalf("expected role owner, got %s", regResp.Organization.Role)
+	registered := registerIntegrationUser(
+		t, s, "integration@example.com", "integration-password", "Integration User", orgName,
+	)
+	if registered.User.Name != "Integration User" {
+		t.Fatalf("expected user name Integration User, got %s", registered.User.Name)
 	}
 
-	token := regResp.AccessToken
-
-	loginBody := `{"email":"integration@example.com","password":"integration-password"}`
-	w = doRequest(t, s, "POST", "/api/v1/auth/login", loginBody, "")
-	assertStatus(t, w, http.StatusOK)
-
-	w = doRequest(t, s, "GET", "/api/v1/auth/me", "", token)
+	w := doRequest(t, s, "GET", "/api/v1/auth/me", "", registered.AccessToken)
 	assertStatus(t, w, http.StatusOK)
 	var meResp struct {
 		User         userSummary         `json:"user"`
@@ -283,7 +310,7 @@ func TestAuthRegisterLoginMeIntegration(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &meResp); err != nil {
 		t.Fatalf("me response invalid JSON: %v", err)
 	}
-	if meResp.Organization.ID != regResp.Organization.ID {
+	if meResp.Organization.ID != registered.Organization.ID {
 		t.Fatalf("org ID mismatch")
 	}
 }
@@ -294,20 +321,13 @@ func TestContactsCRUDIntegration(t *testing.T) {
 	}
 	s := newIntegrationServer(t)
 
-	regBody := `{"email":"contacts-owner@example.com","password":"contacts-password","name":"Contacts Owner","organization_name":"Contacts Org"}`
-	w := doRequest(t, s, "POST", "/api/v1/auth/register", regBody, "")
-	assertStatus(t, w, http.StatusCreated)
-	var regResp struct {
-		AccessToken  string `json:"access_token"`
-		Organization struct {
-			ID string `json:"id"`
-		} `json:"organization"`
-	}
-	json.Unmarshal(w.Body.Bytes(), &regResp)
-	token := regResp.AccessToken
+	registered := registerIntegrationUser(
+		t, s, "contacts-owner@example.com", "contacts-password", "Contacts Owner", "Contacts Org",
+	)
+	token := registered.AccessToken
 
 	createBody := `{"email":"alice@example.com","first_name":"Alice","last_name":"Smith","status":"subscribed","source":"integration_test","custom_fields":{"city":"Portland"},"consent":{"source":"integration_test","purpose":"marketing","evidence":{"form":"integration_test","confirmed":true}}}`
-	w = doRequest(t, s, "POST", "/api/v1/contacts", createBody, token)
+	w := doRequest(t, s, "POST", "/api/v1/contacts", createBody, token)
 	assertStatus(t, w, http.StatusCreated)
 	var created struct {
 		ID     string `json:"id"`
@@ -355,14 +375,10 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 	}
 	s := newIntegrationServer(t)
 
-	regBody := `{"email":"campaigns-owner@example.com","password":"campaigns-password","name":"Campaigns Owner","organization_name":"Campaigns Org"}`
-	w := doRequest(t, s, "POST", "/api/v1/auth/register", regBody, "")
-	assertStatus(t, w, http.StatusCreated)
-	var regResp struct {
-		AccessToken string `json:"access_token"`
-	}
-	json.Unmarshal(w.Body.Bytes(), &regResp)
-	token := regResp.AccessToken
+	registered := registerIntegrationUser(
+		t, s, "campaigns-owner@example.com", "campaigns-password", "Campaigns Owner", "Campaigns Org",
+	)
+	token := registered.AccessToken
 
 	createBody := `{
 		"name":"Integration Campaign",
@@ -373,7 +389,7 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 		"track_clicks":true,
 		"content":{"version":1,"blocks":[{"type":"heading","content":"Hello {{first_name}}"},{"type":"paragraph","content":"Welcome!"}]}
 	}`
-	w = doRequest(t, s, "POST", "/api/v1/campaigns", createBody, token)
+	w := doRequest(t, s, "POST", "/api/v1/campaigns", createBody, token)
 	assertStatus(t, w, http.StatusCreated)
 	var created struct {
 		ID     string `json:"id"`
@@ -395,7 +411,11 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 	w = doRequest(t, s, "POST", "/api/v1/campaigns/"+campaignID+"/validate", "", token)
 	assertStatus(t, w, http.StatusOK)
 
-	w = doRequest(t, s, "POST", "/api/v1/campaigns/"+campaignID+"/schedule", "", token)
+	scheduleBody, err := json.Marshal(scheduleInput{ScheduledAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("encode campaign schedule: %v", err)
+	}
+	w = doRequest(t, s, "POST", "/api/v1/campaigns/"+campaignID+"/schedule", string(scheduleBody), token)
 	assertStatus(t, w, http.StatusOK, http.StatusAccepted)
 
 	updateBody := `{"name":"Updated Integration Campaign"}`
@@ -624,16 +644,12 @@ func TestAnalyticsOverviewIntegration(t *testing.T) {
 	}
 	s := newIntegrationServer(t)
 
-	regBody := `{"email":"analytics-owner@example.com","password":"analytics-password","name":"Analytics Owner","organization_name":"Analytics Org"}`
-	w := doRequest(t, s, "POST", "/api/v1/auth/register", regBody, "")
-	assertStatus(t, w, http.StatusCreated)
-	var regResp struct {
-		AccessToken string `json:"access_token"`
-	}
-	json.Unmarshal(w.Body.Bytes(), &regResp)
-	token := regResp.AccessToken
+	registered := registerIntegrationUser(
+		t, s, "analytics-owner@example.com", "analytics-password", "Analytics Owner", "Analytics Org",
+	)
+	token := registered.AccessToken
 
-	w = doRequest(t, s, "GET", "/api/v1/analytics/overview", "", token)
+	w := doRequest(t, s, "GET", "/api/v1/analytics/overview", "", token)
 	assertStatus(t, w, http.StatusOK)
 	var overview struct {
 		Contacts   int64   `json:"contacts"`
@@ -650,17 +666,11 @@ func TestAPIKeyLifecycleIntegration(t *testing.T) {
 		t.Skip("no database available")
 	}
 	s := newIntegrationServer(t)
-	registration := `{"email":"api-key-owner@example.test","password":"api-key-integration-password","name":"API Key Owner","organization_name":"API Key Workspace"}`
-	w := doRequest(t, s, http.MethodPost, "/api/v1/auth/register", registration, "")
-	assertStatus(t, w, http.StatusCreated)
-	var registered struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &registered); err != nil {
-		t.Fatalf("decode registration response: %v", err)
-	}
+	registered := registerIntegrationUser(
+		t, s, "api-key-owner@example.test", "api-key-integration-password", "API Key Owner", "API Key Workspace",
+	)
 
-	w = doRequest(t, s, http.MethodPost, "/api/v1/api-keys", `{"name":"integration key"}`, registered.AccessToken)
+	w := doRequest(t, s, http.MethodPost, "/api/v1/api-keys", `{"name":"integration key"}`, registered.AccessToken)
 	assertStatus(t, w, http.StatusCreated)
 	var created struct {
 		ID     string   `json:"id"`

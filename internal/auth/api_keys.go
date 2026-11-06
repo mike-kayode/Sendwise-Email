@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -55,7 +56,11 @@ func NewAPIKeyService(pool *pgxpool.Pool, logger *slog.Logger) *Service {
 
 // Create generates a new API key, stores its hash, and returns the plain key once.
 func (s *Service) Create(ctx context.Context, orgID, name string, scopes []string, expiresAt *time.Time) (*APIKey, string, error) {
-	raw := apiKeyPrefix + randomHex(apiKeyEntropy)
+	keyEntropy, err := randomHex(apiKeyEntropy)
+	if err != nil {
+		return nil, "", fmt.Errorf("generate API key: %w", err)
+	}
+	raw := apiKeyPrefix + keyEntropy
 	prefix := raw[:8] + "…"
 	hash, err := hashAPIKey(raw)
 	if err != nil {
@@ -85,7 +90,7 @@ func (s *Service) Create(ctx context.Context, orgID, name string, scopes []strin
 		RevokedAt:      nil,
 		CreatedAt:      createdAt,
 		PlainKey:       raw,
-	}, "", nil
+	}, raw, nil
 }
 
 // List returns all API keys for an organization (without plain keys).
@@ -177,12 +182,12 @@ func (s *Service) Authenticate(ctx context.Context, key string) (string, []strin
 }
 
 // randomHex generates n bytes of hex-encoded random data.
-func randomHex(n int) string {
+func randomHex(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("generate random: %v", err))
+		return "", fmt.Errorf("generate random data: %w", err)
 	}
-	return base64.RawURLEncoding.EncodeToString(b)[:n*2]
+	return hex.EncodeToString(b), nil
 }
 
 func hashAPIKey(key string) (string, error) {
