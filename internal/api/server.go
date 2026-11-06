@@ -103,6 +103,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/segments", protect(s.listSegments))
 	mux.Handle("POST /api/v1/segments", protect(s.createSegment, audienceManagers...))
 	// Forms module (protected).
+	mux.Handle("GET /api/v1/forms", protect(s.listForms))
+	mux.Handle("POST /api/v1/forms", protect(s.createForm, audienceManagers...))
+	mux.Handle("GET /api/v1/forms/{id}", protect(s.getForm))
+	mux.Handle("PATCH /api/v1/forms/{id}", protect(s.updateForm, audienceManagers...))
+	mux.Handle("DELETE /api/v1/forms/{id}", protect(s.deleteForm, audienceManagers...))
+	mux.Handle("POST /api/v1/forms/{id}/publish", protect(s.publishForm, audienceManagers...))
 
 	mux.Handle("DELETE /api/v1/segments/{id}", protect(s.deleteSegment, audienceManagers...))
 	mux.Handle("GET /api/v1/templates", protect(s.listTemplates))
