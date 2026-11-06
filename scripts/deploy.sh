@@ -165,13 +165,34 @@ capture_previous_images() {
   local service container image_ref image_id tag
   ROLLBACK_STAMP="$(date +%Y%m%d%H%M%S)"
   for service in "${ROLLBACK_SERVICES[@]}"; do
-    container="$("${COMPOSE[@]}" ps -q "$service")"
-    [ -n "$container" ] || fail "cannot guarantee image rollback: $service has no running container"
+    container="$("${COMPOSE[@]}" ps -q "$service" 2>/dev/null || true)"
+    if [ -z "$container" ]; then
+      # First deploy: nothing is running yet, so there is no image to roll back to.
+      log "  $service: no running container; nothing to preserve (first deploy)"
+      ROLLBACK_IMAGE_REFS+=("")
+      ROLLBACK_IMAGE_IDS+=("")
+      ROLLBACK_TAGS+=("")
+      continue
+    fi
     image_ref="$(docker inspect --format '{{.Config.Image}}' "$container")"
     image_id="$(docker inspect --format '{{.Image}}' "$container")"
-    [ -n "$image_ref" ] && [ -n "$image_id" ] || fail "cannot identify the previous image for $service"
+    if [ -z "$image_ref" ] || [ -z "$image_id" ]; then
+      fail "cannot identify the previous image for $service"
+    fi
     tag="sendwise-rollback:${ROLLBACK_STAMP}-${service}"
-    docker image tag "$image_id" "$tag" || fail "could not preserve the previous image for $service"
+    if docker image tag "$image_id" "$tag" 2>/dev/null; then
+      :
+    elif docker commit --pause=false "$container" "$tag" >/dev/null 2>&1; then
+      # The image layer was pruned while the container kept running: snapshot
+      # the container itself so rollback still has a restore point.
+      log "  $service: image $image_id missing locally; snapshotted running container instead"
+    else
+      log "  WARNING: could not preserve the previous image for $service; rollback will skip it"
+      ROLLBACK_IMAGE_REFS+=("")
+      ROLLBACK_IMAGE_IDS+=("")
+      ROLLBACK_TAGS+=("")
+      continue
+    fi
     ROLLBACK_IMAGE_REFS+=("$image_ref")
     ROLLBACK_IMAGE_IDS+=("$image_id")
     ROLLBACK_TAGS+=("$tag")
@@ -182,21 +203,34 @@ capture_previous_images() {
 cleanup_rollback_tags() {
   local tag
   for tag in "${ROLLBACK_TAGS[@]}"; do
+    [ -n "$tag" ] || continue
     docker image rm "$tag" >/dev/null 2>&1 || log "WARNING: could not remove temporary rollback tag $tag"
   done
 }
 
 rollback_images() {
   local i failed=0
+  local restore_services=()
   log "Restoring previous application images..."
   for ((i = 0; i < ${#ROLLBACK_SERVICES[@]}; i++)); do
+    if [ -z "${ROLLBACK_TAGS[$i]}" ]; then
+      log "  ${ROLLBACK_SERVICES[$i]}: no preserved image (first deploy); skipping"
+      continue
+    fi
     if ! docker image tag "${ROLLBACK_TAGS[$i]}" "${ROLLBACK_IMAGE_REFS[$i]}"; then
       log "ERROR: could not restore image for ${ROLLBACK_SERVICES[$i]}"
       failed=1
+      continue
     fi
+    restore_services+=("${ROLLBACK_SERVICES[$i]}")
   done
+  if [ "${#restore_services[@]}" -eq 0 ]; then
+    log "No previous images were preserved; nothing to restore"
+    cleanup_rollback_tags
+    return 0
+  fi
   if [ "$failed" -eq 0 ]; then
-    if ! "${COMPOSE[@]}" up -d --no-deps --force-recreate --no-build "${ROLLBACK_SERVICES[@]}"; then
+    if ! "${COMPOSE[@]}" up -d --no-deps --force-recreate --no-build "${restore_services[@]}"; then
       log "ERROR: previous images were restored, but the application containers could not be restarted"
       failed=1
     fi
