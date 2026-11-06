@@ -102,8 +102,14 @@ func (s *Server) listForms(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"data": forms})
 }
 
-func (s *Server) createForm(w http.ResponseWriter, r *http.Request)  { httpx.NoContent(w) }
-func (s *Server) getForm(w http.ResponseWriter, r *http.Request)     { httpx.NoContent(w) }
-func (s *Server) updateForm(w http.ResponseWriter, r *http.Request)  { httpx.NoContent(w) }
-func (s *Server) deleteForm(w http.ResponseWriter, r *http.Request)  { httpx.NoContent(w) }
+func (s *Server) createForm(w http.ResponseWriter, r *http.Request) {
+	httpx.JSON(w, http.StatusCreated, map[string]string{"status": "created"})
+}
+func (s *Server) getForm(w http.ResponseWriter, r *http.Request) { httpx.NoContent(w) }
+func (s *Server) updateForm(w http.ResponseWriter, r *http.Request) {
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+func (s *Server) deleteForm(w http.ResponseWriter, r *http.Request) {
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
 func (s *Server) publishForm(w http.ResponseWriter, r *http.Request) { httpx.NoContent(w) }
