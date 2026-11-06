@@ -620,8 +620,14 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
    [#28](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42251089769)
    passed Compose validation and all web checks, but Go integration tests failed
    because CI had no Mailpit service (`SMTP 127.0.0.1:1025` refused connections;
-   the automation send test processed zero executions). A Mailpit service and
-   explicit SMTP test settings are now included; the next Actions run is
+   the automation send test processed zero executions). Run
+   [#30](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42251455277)
+   passed Go, lint, web, and Docker-build jobs, but the aggregate E2E run hit
+   HTTP 429 on its final revoked-token assertion after the five browser specs
+   shared the gateway's production-default 60/minute limit. The E2E-only
+   Compose override now raises the limit/burst; gateway unit tests still verify
+   the production default and Retry-After behavior. A Mailpit service and
+   explicit SMTP test settings are also included. The next Actions run is
    pending. Do not treat this blocker as Done until Actions is green for the
    final SHA.
 

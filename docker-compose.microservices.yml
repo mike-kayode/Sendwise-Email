@@ -174,6 +174,8 @@ services:
       SERVICE_TOKEN: ${SERVICE_TOKEN:?Set SERVICE_TOKEN in .env}
       JWT_SECRET: ${JWT_SECRET:-}
       JWT_ISSUER: ${JWT_ISSUER:-email-platform}
+      GATEWAY_AUTH_RATE_PER_MINUTE: ${GATEWAY_AUTH_RATE_PER_MINUTE:-60}
+      GATEWAY_AUTH_BURST: ${GATEWAY_AUTH_BURST:-20}
     depends_on:
       identity:
         condition: service_started
