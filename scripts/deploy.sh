@@ -96,7 +96,7 @@ validate_config() {
   local var
   for var in JWT_SECRET SERVICE_TOKEN POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB \
             IDENTITY_DB_USER IDENTITY_DB_PASSWORD WORKSPACE_DB_USER WORKSPACE_DB_PASSWORD \
-            WEBHOOK_SECRET; do
+            WEBHOOK_SECRET DKIM_ENCRYPTION_KEY; do
     [ -n "${!var:-}" ] || fail "required variable $var is not set in .env"
   done
   if [ "$ENVIRONMENT" = "production" ]; then
@@ -110,6 +110,18 @@ validate_config() {
       || fail "gateway upstream URLs must all be set in production"
   fi
   log "Configuration validation passed"
+}
+
+# Same gate as `scripts/check-env.sh`, run automatically so a deploy cannot
+# skip it. --no-local matches SENDWISE_ENV_FILE runs (server semantics).
+run_check_env() {
+  log "Running scripts/check-env.sh..."
+  if [ "$USE_ENV_LOCAL" -eq 1 ]; then
+    "$ROOT/scripts/check-env.sh"
+  else
+    "$ROOT/scripts/check-env.sh" --no-local
+  fi
+  log "  check-env.sh passed"
 }
 
 validate_smoke_credentials() {
@@ -355,6 +367,7 @@ case "$COMMAND" in
   backup)
     validate_env_keys
     validate_config
+    run_check_env
     take_backup
     ;;
   smoke)
@@ -367,6 +380,7 @@ case "$COMMAND" in
   deploy)
     validate_env_keys
     validate_config
+    run_check_env
     validate_smoke_credentials
     check_compose_config
     capture_previous_images

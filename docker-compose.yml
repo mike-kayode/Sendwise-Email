@@ -128,6 +128,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:?Set WEBHOOK_SECRET in .env}
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost}
+      API_BASE_URL: ${API_BASE_URL:-http://localhost}
       TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost}
       SMTP_ADDR: ${SMTP_ADDR:-mailpit:1025}
       SMTP_HOST: ${SMTP_HOST:-mailpit}

@@ -193,6 +193,16 @@ services:
       identity:
         condition: service_started
 
+  # The worker loads the shared API config, which requires the identity
+  # upstream in staging/production; without these it exits at startup.
+  worker:
+    environment:
+      IDENTITY_URL: http://identity:8080
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?Set SERVICE_TOKEN in .env}
+    depends_on:
+      identity:
+        condition: service_started
+
   web:
     build:
       context: ./apps/web
