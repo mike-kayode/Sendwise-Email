@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net"
+	"net/mail"
 	"net/smtp"
 	"net/textproto"
 	"sort"
@@ -78,10 +79,18 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 		}
 	}
 
-	if err := client.Mail(sanitizeHeader(msg.From)); err != nil {
+	envelopeFrom, err := parseEnvelopeAddress(msg.From)
+	if err != nil {
+		return nil, classifySMTP(fmt.Errorf("smtp mail from: invalid sender address: %w", err))
+	}
+	if err := client.Mail(envelopeFrom); err != nil {
 		return nil, classifySMTP(fmt.Errorf("smtp mail from: %w", err))
 	}
-	if err := client.Rcpt(sanitizeHeader(msg.To)); err != nil {
+	envelopeTo, err := parseEnvelopeAddress(msg.To)
+	if err != nil {
+		return nil, classifySMTP(fmt.Errorf("smtp rcpt to: invalid recipient address: %w", err))
+	}
+	if err := client.Rcpt(envelopeTo); err != nil {
 		return nil, classifySMTP(fmt.Errorf("smtp rcpt to: %w", err))
 	}
 
@@ -167,6 +176,14 @@ func writePart(mw *multipart.Writer, contentType, body string) error {
 		return err
 	}
 	return qp.Close()
+}
+
+func parseEnvelopeAddress(value string) (string, error) {
+	address, err := mail.ParseAddress(sanitizeHeader(value))
+	if err != nil {
+		return "", err
+	}
+	return address.Address, nil
 }
 
 func sanitizeHeader(value string) string {

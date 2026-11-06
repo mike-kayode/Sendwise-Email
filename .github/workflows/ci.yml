@@ -101,6 +101,29 @@ jobs:
       - name: Build
         run: npm --prefix apps/web run build
 
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [lint, test-go, test-web]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install frontend dependencies
+        run: npm --prefix apps/web install --no-fund --no-audit
+      - name: Start local stack
+        run: docker compose up -d postgres redis nats mailpit migrate api worker web
+      - name: Run browser E2E smoke suite
+        env:
+          E2E_BASE_URL: http://localhost:3000
+          E2E_API_ORIGIN: http://localhost
+          DEPLOY_SMOKE_EMAIL: smoke@sendwise.test
+          DEPLOY_SMOKE_PASSWORD: SmokeTest2026!
+        run: npm --prefix apps/web run test:e2e -- --reporter=line
+
   docker-build:
     runs-on: ubuntu-latest
     needs: [lint, test-go]

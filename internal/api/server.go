@@ -19,13 +19,15 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	pool      *pgxpool.Pool
-	tokens    *auth.Manager
-	campaigns *campaigns.Service
-	apiKeys   *auth.Service
-	delivery  *DeliveryHandler
-	logger    *slog.Logger
+	cfg                    config.Config
+	pool                   *pgxpool.Pool
+	tokens                 *auth.Manager
+	campaigns              *campaigns.Service
+	apiKeys                *auth.Service
+	delivery               *DeliveryHandler
+	dnsResolver            DNSResolver
+	logger                 *slog.Logger
+	formConfirmationSender func(context.Context, string, string, string) error
 }
 
 func New(
@@ -37,15 +39,20 @@ func New(
 	publisher publisher,
 	logger *slog.Logger,
 ) *Server {
-	return &Server{
-		cfg:       cfg,
-		pool:      pool,
-		tokens:    tokens,
-		campaigns: campaignService,
-		apiKeys:   apiKeyService,
-		delivery:  NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret),
-		logger:    logger,
+	server := &Server{
+		cfg:         cfg,
+		pool:        pool,
+		tokens:      tokens,
+		campaigns:   campaignService,
+		apiKeys:     apiKeyService,
+		delivery:    NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret),
+		dnsResolver: newDNSResolver(cfg.DNSResolverAddr, cfg.DNSResolverTimeout),
+		logger:      logger,
 	}
+	server.formConfirmationSender = func(ctx context.Context, to, formName, confirmURL string) error {
+		return sendFormConfirmationEmail(ctx, cfg, to, formName, confirmURL)
+	}
+	return server
 }
 
 func (s *Server) Handler() http.Handler {
@@ -109,10 +116,26 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/v1/forms/{id}", protect(s.updateForm, audienceManagers...))
 	mux.Handle("DELETE /api/v1/forms/{id}", protect(s.deleteForm, audienceManagers...))
 	mux.Handle("POST /api/v1/forms/{id}/publish", protect(s.publishForm, audienceManagers...))
+	mux.Handle("POST /api/v1/forms/{id}/unpublish", protect(s.unpublishForm, audienceManagers...))
+	mux.Handle("GET /api/v1/forms/{id}/submissions", protect(s.listFormSubmissions))
+	mux.HandleFunc("GET /api/v1/public/forms/{slug}", s.publicForm)
+	mux.HandleFunc("POST /api/v1/public/forms/{slug}/submit", s.submitPublicForm)
+	mux.HandleFunc("GET /api/v1/public/forms/{slug}/confirm", s.confirmPublicForm)
 
 	mux.Handle("DELETE /api/v1/segments/{id}", protect(s.deleteSegment, audienceManagers...))
 	mux.Handle("GET /api/v1/templates", protect(s.listTemplates))
 	mux.Handle("POST /api/v1/templates", protect(s.createTemplate, campaignEditors...))
+
+	mux.Handle("GET /api/v1/automations", protect(s.listAutomations))
+	mux.Handle("POST /api/v1/automations", protect(s.createAutomation, campaignEditors...))
+	mux.Handle("GET /api/v1/automations/{id}", protect(s.getAutomation))
+	mux.Handle("PATCH /api/v1/automations/{id}", protect(s.updateAutomation, campaignEditors...))
+	mux.Handle("DELETE /api/v1/automations/{id}", protect(s.deleteAutomation, campaignManagers...))
+	mux.Handle("GET /api/v1/automations/{id}/executions", protect(s.listAutomationExecutions))
+	mux.Handle("POST /api/v1/automations/{id}/trigger", protect(s.triggerAutomation, campaignEditors...))
+	mux.Handle("POST /api/v1/automations/{id}/activate", protect(s.activateAutomation, campaignManagers...))
+	mux.Handle("POST /api/v1/automations/{id}/pause", protect(s.pauseAutomation, campaignManagers...))
+	mux.Handle("POST /api/v1/automations/process-due", protect(s.processDueAutomations, campaignManagers...))
 
 	mux.Handle("GET /api/v1/campaigns", protect(s.listCampaigns))
 	mux.Handle("POST /api/v1/campaigns", protect(s.createCampaign, campaignEditors...))

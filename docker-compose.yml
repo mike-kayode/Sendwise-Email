@@ -39,6 +39,13 @@ services:
     volumes:
       - nats-data:/data
 
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+    restart: unless-stopped
+
   stalwart:
     image: stalwartlabs/stalwart:latest
     hostname: mail.localhost
@@ -92,8 +99,8 @@ services:
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost}
       API_BASE_URL: ${API_BASE_URL:-http://localhost}
       TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost}
-      SMTP_ADDR: stalwart:587
-      SMTP_HOST: stalwart
+      SMTP_ADDR: ${SMTP_ADDR:-mailpit:1025}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-newsletter@example.com}
@@ -119,8 +126,8 @@ services:
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:?Set WEBHOOK_SECRET in .env}
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost}
       TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost}
-      SMTP_ADDR: stalwart:587
-      SMTP_HOST: stalwart
+      SMTP_ADDR: ${SMTP_ADDR:-mailpit:1025}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-newsletter@example.com}

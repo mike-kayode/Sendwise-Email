@@ -47,3 +47,12 @@ func TestFormatMessageID(t *testing.T) {
 		t.Fatalf("formatMessageID() = %q, want %q", got, want)
 	}
 }
+
+func TestParseEnvelopeAddress(t *testing.T) {
+	if got, err := parseEnvelopeAddress("Sendwise <hello@example.com>"); err != nil || got != "hello@example.com" {
+		t.Fatalf("parseEnvelopeAddress(\"Sendwise <hello@example.com>\") = (%q, %v), want (\"hello@example.com\", nil)", got, err)
+	}
+	if got, err := parseEnvelopeAddress("hello@example.com"); err != nil || got != "hello@example.com" {
+		t.Fatalf("parseEnvelopeAddress(\"hello@example.com\") = (%q, %v), want (\"hello@example.com\", nil)", got, err)
+	}
+}

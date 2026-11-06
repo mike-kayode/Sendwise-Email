@@ -9,6 +9,7 @@
 | Health | `GET /healthz`, `/readyz`, `/metrics` | Public health; readiness checks PostgreSQL |
 | Auth | `POST /api/v1/auth/register`, `/login`, `/refresh`, `/verify`, `/resend-verification`, `/forgot-password`, `/reset-password`, `/logout`; `GET /api/v1/auth/me` | Access token uses bearer JWT; refresh token is an HttpOnly cookie. Handler tests exist; database/provider end-to-end flow is unverified. |
 | Public audience | `POST /api/v1/public/subscribe`; GET/POST unsubscribe | Public token/path; GET currently mutates |
+| Forms | `GET/POST /api/v1/forms`, `GET/PATCH/DELETE /api/v1/forms/{id}`, publish/unpublish, paginated submissions; public definition, submit, and confirm under `/api/v1/public/forms/{slug}` | JWT and audience-manager writes; public slugs are globally unique; published forms only; submission validates consent, honeypot, rate limits, suppression, and double opt-in |
 | Tracking | `GET /t/open/{token}`, `/t/click/{token}` | Signed tokens; event dedup/bot filtering incomplete |
 | Contacts/imports | contacts CRUD, import, import status, export | JWT; mutation roles and tenant scoping in handlers |
 | Lists/tags/segments | list/tag/segment read/create and some deletes | JWT; membership and management operations incomplete |
@@ -40,4 +41,4 @@
 
 ## Missing target routes
 
-Workspace/membership/invitations; complete audience membership/tag/field operations; template update/version/preview; campaign duplication/approval/test-send; automation runtime; hosted/embed form management; billing/subscriptions; outbound webhook administration; platform administration; API-key authentication; session/device/MFA controls.
+Workspace/membership/invitations; complete audience membership/tag/field operations; template update/version/preview; campaign duplication/approval/test-send; automation runtime; billing/subscriptions; outbound webhook administration; platform administration; API-key authentication; session/device/MFA controls.

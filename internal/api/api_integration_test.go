@@ -24,6 +24,9 @@ var integrationCfg config.Config
 
 func TestMain(m *testing.M) {
 	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("TEST_DATABASE_URL")
+	}
 	var pool *pgxpool.Pool
 	if databaseURL != "" {
 		var err error

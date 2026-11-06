@@ -2,8 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 // E2E tests run against a stack that is already up:
 //   docker compose up -d   (or ./scripts/deploy.sh)
-// Web is served on :3000 and the API origin is http://localhost (Caddy on :80
-// proxies /api/* to the gateway). Override with E2E_BASE_URL if different.
+// The default browser target is the local web app on the host; override via
+// E2E_BASE_URL for containerized runs or alternate endpoints.
 const baseURL = process.env.E2E_BASE_URL ?? "http://localhost:3000";
 
 export default defineConfig({

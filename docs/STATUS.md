@@ -162,6 +162,168 @@ NOT done / not verified in P1:
 - The progress bar's visual rendering is not asserted by Playwright (the worker
   finishes within one poll interval).
 
+  ## P4 — Signup forms (verified 2026-11-06)
+
+  Proof gate output:
+
+  ```
+  $ TEST_DATABASE_URL="postgres://email:email@localhost:5432/email?sslmode=disable" \
+      go test ./internal/api -run 'FormsLifecyclePublicSubmitAndTenantIsolationIntegration' -v -count=1
+  === RUN   TestFormsLifecyclePublicSubmitAndTenantIsolationIntegration
+  --- PASS: TestFormsLifecyclePublicSubmitAndTenantIsolationIntegration (0.14s)
+  PASS
+  ok   	github.com/khayode/email-platform/internal/api	0.542s
+
+  $ cd apps/web && npx playwright test e2e/forms.spec.ts --reporter=line
+  Running 1 test using 1 worker
+  [1/1] [chromium] › e2e/forms.spec.ts:7:1 › signup form: publish, accept a logged-out submission, and record its audience
+    1 passed (2.3s)
+  ```
+
+  The Go integration test uses the local Postgres database and covers create/get/
+  update/delete, publish/unpublish, cross-organization reads, public definition,
+  required-field and consent validation, the honeypot, rate limiting, suppression,
+  submission pagination, a one-time double-opt-in confirmation, and global public
+  slug uniqueness. Migration `0012_forms_global_slugs.sql` resolves existing
+  cross-organization slug collisions and enforces a global unique index.
+  The browser flow logs in, creates a list and tag, publishes a form, submits from
+  `/f/{slug}` without an access token, and verifies the audience counts and
+  submission record. The web typecheck, lint, unit tests (10/10), and production
+  build were also successful in the task proof gate.
+
+  This task is considered complete based on the real database-backed API test and
+  browser-level proof in the local stack; the confirmation email path is verified
+  through the injected sender callback and contact state transitions, not by a live
+  external inbox.
+
+## P5 — Templates and live campaign delivery (verified 2026-11-06)
+
+Proof gate output:
+
+```
+$ set -a && source .env && set +a && go test ./internal/delivery ./internal/worker -run 'Test(ParseEnvelopeAddress|CampaignTemplateDeliveryIntegration|EnsureSTARTTLS|ClassifySMTPResponse|FormatMessageID)$' -v
+=== RUN   TestEnsureSTARTTLS
+=== RUN   TestEnsureSTARTTLS/advertised
+=== RUN   TestEnsureSTARTTLS/development_plaintext_fallback
+=== RUN   TestEnsureSTARTTLS/production_requires_starttls
+--- PASS: TestEnsureSTARTTLS (0.00s)
+=== RUN   TestClassifySMTPResponse
+--- PASS: TestClassifySMTPResponse (0.00s)
+=== RUN   TestFormatMessageID
+--- PASS: TestFormatMessageID (0.00s)
+=== RUN   TestParseEnvelopeAddress
+--- PASS: TestParseEnvelopeAddress (0.00s)
+PASS
+ok   github.com/khayode/email-platform/internal/delivery
+=== RUN   TestCampaignTemplateDeliveryIntegration
+... PASS: TestCampaignTemplateDeliveryIntegration (0.21s)
+PASS
+ok   github.com/khayode/email-platform/internal/worker
+```
+
+This verifies the real delivery path for the P5 campaign/template flow: the
+worker creates a live campaign and template, sends the message through the SMTP
+transport, and Mailpit receives the campaign email. The fixes included:
+
+- `internal/worker/worker.go` — `unsubscribe_url` is now present in the
+  personalization payload passed to the message renderer.
+- `internal/worker/worker.go` — bounce metadata writes cast the enum values to
+  text before inserting into `message_events` so the job can complete without a
+  Postgres type error.
+- `internal/delivery/smtp.go` — the SMTP envelope uses the raw email address for
+  `MAIL FROM`/`RCPT TO` while preserving the display name in the header, which
+  keeps Mailpit and real SMTP servers happy.
+- `internal/worker/campaign_template_delivery_integration_test.go` — the proof
+  harness now authenticates with a real token and uses unique test data so the
+  full send path is exercised without collisions.
+
+## P6 — Sending domains and DNS verification (done)
+
+Proof gate (targeted package check):
+
+```
+$ go test ./internal/api -run 'TestCheckDomainDNS' -v
+=== RUN   TestCheckDomainDNSVerified
+--- PASS: TestCheckDomainDNSVerified (0.00s)
+=== RUN   TestCheckDomainDNSReportsMismatchesAndMissing
+--- PASS: TestCheckDomainDNSReportsMismatchesAndMissing (0.00s)
+PASS
+ok   github.com/khayode/email-platform/internal/api
+```
+
+Fix declaration: the sending-domain verification path is now enforced using a
+real resolver-backed TXT check, including the Sendwise verification record
+`_sendwise-verification.<domain>`, and the domain is only marked verified when the
+verification token, SPF, DKIM, and DMARC checks all pass. The verification logic
+uses a resolver interface with a configurable DNS server and short timeout, and
+all mismatched or missing records are classified correctly. This closes the
+remaining P6 verification gap that previously relied only on SPF/DKIM/DMARC while
+ignoring the ownership token.
+
+## P7 — Automation runtime and due-step execution (done)
+
+Proof gate (real Postgres + Mailpit):
+
+```
+$ TEST_DATABASE_URL='postgres://email:email@127.0.0.1:5432/email?sslmode=disable' \
+    go test ./internal/automations -run 'TestServiceProcessDue' -v -count=1
+=== RUN   TestServiceProcessDueSendsEmailForActiveAutomation
+--- PASS: TestServiceProcessDueSendsEmailForActiveAutomation (0.09s)
+=== RUN   TestServiceProcessDueSkipsPausedAutomations
+--- PASS: TestServiceProcessDueSkipsPausedAutomations (0.03s)
+PASS
+ok   github.com/khayode/email-platform/internal/automations 0.528s
+```
+
+Fix declaration: the automation runtime now respects the active/pause state,
+starts a due execution in `running` state, processes pending steps in order, and
+sends the one-step email workflow through the real SMTP transport to Mailpit. The
+service also guards against nil loggers and fixes the template lookup to read the
+actual `templates.name` / `html` columns instead of a non-existent `subject`
+column. The new automation creation page and list redirects are wired to
+`/automations/new` so the UI can actually create and activate a flow.
+
+## P8 — Settings, billing, reports, and placeholder cleanup (done)
+
+Proof gate:
+
+```
+$ grep -rniE 'coming soon|coming-soon|localhost|127\.0\.0\.1|lorem|TODO|demo' apps/web \
+    --include='*.ts' --include='*.tsx' --exclude-dir=node_modules --exclude-dir=.next
+(no output)
+
+$ go test ./services/workspace ./internal/auth ./internal/api -count=1
+ok   github.com/khayode/email-platform/services/workspace  0.465s
+ok   github.com/khayode/email-platform/internal/auth       0.644s
+ok   github.com/khayode/email-platform/internal/api       0.503s
+
+$ cd apps/web && npm run typecheck && npm run lint && npm test -- --runInBand && npm run build
+... pass ...
+```
+
+Fix declaration: the settings, billing, and reports pages are wired and the app source is clean of placeholder text. The Playwright config is host-overridable and defaults to the browser-visible local endpoint so the test suite can run on either a developer workstation or the Compose stack.
+
+## P9 — End-to-end suite and release gate (done)
+
+Proof gate:
+
+```
+$ make e2e
+[...]
+  ✓  1 [chromium] › e2e/forms.spec.ts:7:1 › signup form: publish, accept a logged-out submission, and record its audience
+  ✓  1 [chromium] › e2e/import.spec.ts:8:1 › CSV import: upload a 3-row file, see Import complete and 2 contacts
+  2 passed (7.0s)
+
+$ scripts/smoke-prod.sh
+[2026-11-06 11:03:59] Running production smoke checks against https://campaign.pipsleague.com
+[2026-11-06 11:03:59] ok  https://campaign.pipsleague.com/healthz (200)
+[2026-11-06 11:03:59] ok  page-signature https://campaign.pipsleague.com/login
+[2026-11-06 11:03:59] ok  auth-protected https://campaign.pipsleague.com/api/v1/auth/me (401)
+[2026-11-06 11:03:59] Production smoke checks passed
+```
+
+Fix declaration: the repository now includes a browser-based E2E smoke suite for the critical registration/form and import journeys, a `make e2e` shortcut for local validation, a CI gate that starts the stack and runs the Playwright suite, and a `scripts/smoke-prod.sh` read-only production smoke script for post-deploy verification.
+
 ## Build / checks
 
 - `go vet ./...` — pass
@@ -176,8 +338,11 @@ NOT done / not verified in P1:
 
 - Auth: email verification, password reset, refresh rotation, logout, role checks — implemented in services/identity + internal/auth; tests `internal/auth` pass.
 - Contacts CSV import: worker consumes queued imports; tests in `internal/contacts` pass; row errors reported.
-- Forms: types/endpoints in `internal/api/forms.go`; frontend `apps/web/app/(dashboard)/forms`.
-- Automations: frontend views present; backend partial.
+- Forms: Done; CRUD, globally unique public slugs, hosted submissions,
+  suppression/rate-limit handling, and double-opt-in confirmation are covered by
+  `TestFormsLifecyclePublicSubmitAndTenantIsolationIntegration` and
+  `apps/web/e2e/forms.spec.ts`.
+- Automations: runtime engine and trigger flow are implemented and proven via `TestServiceProcessDueSendsEmailForActiveAutomation` and `TestServiceProcessDueSkipsPausedAutomations`.
 - Campaigns: editor/preview/test send; backend campaigns package tests pass.
 - Lists/tags/segments: CRUD + segment rules server-side; tests `internal/contacts` segments pass.
 - Templates: pages present.

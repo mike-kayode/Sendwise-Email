@@ -215,17 +215,17 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		return 30 * time.Second, err
 	}
 
-	data := personalizationData(row)
-	htmlBody, textBody, err := w.renderer.RenderDesign(json.RawMessage(row.Content), data)
-	if err != nil {
-		return 0, w.failJob(ctx, row, err)
-	}
-
 	unsubscribeToken, err := w.tokens.IssueUnsubscribe(row.OrganizationID, row.ContactID)
 	if err != nil {
 		return 30 * time.Second, fmt.Errorf("issue unsubscribe token: %w", err)
 	}
 	unsubscribeURL := strings.TrimRight(w.cfg.APIBaseURL, "/") + "/api/v1/public/unsubscribe?token=" + url.QueryEscape(unsubscribeToken)
+
+	data := personalizationData(row, unsubscribeURL)
+	htmlBody, textBody, err := w.renderer.RenderDesign(json.RawMessage(row.Content), data)
+	if err != nil {
+		return 0, w.failJob(ctx, row, err)
+	}
 
 	if row.TrackClicks {
 		htmlBody = delivery.RewriteLinks(htmlBody, w.cfg.TrackingBaseURL, func(target string) (string, error) {
@@ -514,7 +514,7 @@ func (w *Worker) bounceJob(ctx context.Context, row *jobRow, cause error, bounce
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO message_events
 			(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)
-		VALUES ($1, $2, $3, $4, 'bounced', jsonb_build_object('error', $5::text, 'bounce_type', $6, 'smtp_code', $7))
+		VALUES ($1, $2, $3, $4, 'bounced', jsonb_build_object('error', $5::text, 'bounce_type', $6::text, 'smtp_code', $7::text))
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID, message, bounceType, smtpCode); err != nil {
 		return fmt.Errorf("record bounced event: %w", err)
 	}
@@ -752,12 +752,13 @@ func (w *Worker) schedulerLoop(ctx context.Context) {
 	}
 }
 
-func personalizationData(row *jobRow) map[string]string {
+func personalizationData(row *jobRow, unsubscribeURL string) map[string]string {
 	data := map[string]string{
-		"first_name":   row.FirstName,
-		"last_name":    row.LastName,
-		"email":        row.Email,
-		"organization": row.Organization,
+		"first_name":      row.FirstName,
+		"last_name":       row.LastName,
+		"email":           row.Email,
+		"organization":    row.Organization,
+		"unsubscribe_url": unsubscribeURL,
 	}
 
 	var custom map[string]any

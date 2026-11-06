@@ -31,6 +31,8 @@ type Config struct {
 	SMTPPassword           string
 	SMTPFrom               string
 	DKIMSelector           string
+	DNSResolverAddr        string
+	DNSResolverTimeout     time.Duration
 	SendingRate            int
 	MaxDeliveryAttempts    int
 	SchedulerInterval      time.Duration
@@ -89,6 +91,10 @@ func load(lookup func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	dnsResolverTimeout, err := getenvDuration(lookup, "DNS_RESOLVER_TIMEOUT", 2*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
 	maxBounceRate, err := getenvFloat(lookup, "MAX_BOUNCE_RATE", 0.05)
 	if err != nil {
 		return Config{}, err
@@ -133,6 +139,8 @@ func load(lookup func(string) string) (Config, error) {
 		SMTPPassword:           getenv(lookup, "SMTP_PASSWORD", ""),
 		SMTPFrom:               getenv(lookup, "SMTP_FROM", "newsletter@example.com"),
 		DKIMSelector:           getenv(lookup, "DKIM_SELECTOR", "mail"),
+		DNSResolverAddr:        getenv(lookup, "DNS_RESOLVER_ADDR", ""),
+		DNSResolverTimeout:     dnsResolverTimeout,
 		SendingRate:            sendingRate,
 		MaxDeliveryAttempts:    maxDeliveryAttempts,
 		SchedulerInterval:      schedulerInterval,
@@ -205,6 +213,9 @@ func load(lookup func(string) string) (Config, error) {
 	}
 	if _, err := mail.ParseAddress(cfg.SMTPFrom); err != nil {
 		return cfg, fmt.Errorf("SMTP_FROM must be a valid email address")
+	}
+	if cfg.DNSResolverTimeout <= 0 {
+		cfg.DNSResolverTimeout = 2 * time.Second
 	}
 
 	return cfg, nil

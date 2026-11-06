@@ -16,6 +16,7 @@ tags:
   - name: auth
   - name: contacts
   - name: audiences
+  - name: forms
   - name: campaigns
   - name: templates
   - name: domains
@@ -114,6 +115,58 @@ components:
         name: { type: string }
         description: { type: string }
         contact_count: { type: integer }
+    SignupFormField:
+      type: object
+      required: [field_type, label]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        field_type: { type: string, enum: [email, first_name, last_name, phone, company, country, custom] }
+        label: { type: string }
+        placeholder: { type: string }
+        required: { type: boolean }
+        position: { type: integer }
+        custom_key: { type: string }
+        options: { type: array, items: {} }
+    SignupForm:
+      type: object
+      required: [id, name, slug, status, fields]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string, description: Globally unique public form slug }
+        description: { type: string }
+        status: { type: string, enum: [draft, published, unpublished] }
+        list_id: { type: string, format: uuid }
+        success_message: { type: string }
+        redirect_url: { type: string, format: uri }
+        consent_text: { type: string }
+        spam_protection: { type: boolean }
+        double_opt_in: { type: boolean }
+        fields: { type: array, items: { $ref: '#/components/schemas/SignupFormField' } }
+        tag_ids: { type: array, items: { type: string, format: uuid } }
+    SignupFormInput:
+      type: object
+      required: [name, fields]
+      properties:
+        name: { type: string, maxLength: 120 }
+        description: { type: string, maxLength: 2000 }
+        list_id: { type: string, format: uuid }
+        success_message: { type: string, maxLength: 1000 }
+        redirect_url: { type: string, format: uri }
+        consent_text: { type: string, maxLength: 1000 }
+        spam_protection: { type: boolean }
+        double_opt_in: { type: boolean }
+        fields: { type: array, minItems: 1, maxItems: 30, items: { $ref: '#/components/schemas/SignupFormField' } }
+        tag_ids: { type: array, items: { type: string, format: uuid } }
+    SignupFormSubmission:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        form_id: { type: string, format: uuid }
+        data: { type: object, additionalProperties: { type: string } }
+        consent: { type: boolean }
+        created_at: { type: string, format: date-time }
     Campaign:
       type: object
       required: [name, subject, sender_name, sender_email, status]
@@ -401,6 +454,81 @@ paths:
       summary: Create a tag
       responses:
         '201': { description: Tag created }
+  /api/v1/forms:
+    get:
+      tags: [forms]
+      summary: List signup forms in the authenticated organization
+      responses:
+        '200': { description: Signup forms }
+        '401': { description: Authentication required }
+    post:
+      tags: [forms]
+      summary: Create a signup form and its fields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SignupFormInput' }
+      responses:
+        '201': { description: Signup form created }
+        '400': { description: Invalid form or audience association }
+        '409': { description: Form slug already exists }
+  /api/v1/forms/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [forms]
+      summary: Get a signup form and its field configuration
+      responses:
+        '200': { description: Signup form with fields and audience configuration }
+        '404': { description: Form not found in the authenticated organization }
+    patch:
+      tags: [forms]
+      summary: Update a signup form and replace its ordered fields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SignupFormInput' }
+      responses:
+        '200': { description: Updated signup form }
+        '400': { description: Invalid form configuration }
+        '404': { description: Form not found in the authenticated organization }
+    delete:
+      tags: [forms]
+      summary: Delete a signup form and its submissions
+      responses:
+        '204': { description: Form deleted }
+        '404': { description: Form not found in the authenticated organization }
+  /api/v1/forms/{id}/publish:
+    post:
+      tags: [forms]
+      summary: Publish a signup form
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Form published }
+        '404': { description: Form not found }
+  /api/v1/forms/{id}/unpublish:
+    post:
+      tags: [forms]
+      summary: Unpublish a signup form
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Form unpublished }
+        '404': { description: Form not found }
+  /api/v1/forms/{id}/submissions:
+    get:
+      tags: [forms]
+      summary: List a form's submissions
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated form submissions }
+        '404': { description: Form not found in the authenticated organization }
   /api/v1/segments:
     get:
       tags: [audiences]
@@ -614,6 +742,52 @@ paths:
       security: []
       responses:
         '200': { description: Subscription accepted }
+  /api/v1/public/forms/{slug}:
+    get:
+      tags: [forms, public]
+      summary: Get the public definition for a published form
+      security: []
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Public form definition }
+        '404': { description: Form is unpublished or unavailable }
+  /api/v1/public/forms/{slug}/submit:
+    post:
+      tags: [forms, public]
+      summary: Submit a public signup form
+      security: []
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                data: { type: object, additionalProperties: { type: string } }
+                consent: { type: boolean }
+                website: { type: string, description: Honeypot field; must be empty }
+      responses:
+        '200': { description: Submission accepted }
+        '202': { description: Confirmation email sent for double opt-in }
+        '400': { description: Invalid field, email, or consent }
+        '404': { description: Form is unpublished or unavailable }
+        '429': { description: Submission rate limit exceeded }
+        '502': { description: Confirmation email could not be sent }
+  /api/v1/public/forms/{slug}/confirm:
+    get:
+      tags: [forms, public]
+      summary: Confirm a double opt-in signup
+      security: []
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Subscription confirmed }
+        '404': { description: Confirmation token is invalid or already used }
+        '410': { description: Confirmation token has expired }
   /api/v1/public/unsubscribe:
     get:
       tags: [public]

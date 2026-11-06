@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: help install dev-up dev-down migrate api worker web build test typecheck fmt up down logs
+.PHONY: help install dev-up dev-down migrate api worker web build test typecheck fmt up down logs e2e
 
 help:
 	@echo "install     Install frontend dependencies"
@@ -59,3 +59,8 @@ down:
 
 logs:
 	docker compose logs -f --tail=200
+
+e2e:
+	docker compose up -d postgres redis nats mailpit migrate api worker web
+	npm --prefix apps/web install --no-fund --no-audit
+	npm --prefix apps/web run test:e2e -- --reporter=line

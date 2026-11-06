@@ -83,7 +83,7 @@ func TestPersonalizationData(t *testing.T) {
 		CustomFields: []byte(`{"company":"Acme Corp","country":"US"}`),
 	}
 
-	data := personalizationData(row)
+	data := personalizationData(row, "https://example.test/unsubscribe?token=abc")
 
 	if data["first_name"] != "John" {
 		t.Fatalf("first_name = %q, want %q", data["first_name"], "John")
@@ -106,6 +106,9 @@ func TestPersonalizationData(t *testing.T) {
 	if data["company"] != "Acme Corp" {
 		t.Fatalf("company = %q, want %q", data["company"], "Acme Corp")
 	}
+	if data["unsubscribe_url"] != "https://example.test/unsubscribe?token=abc" {
+		t.Fatalf("unsubscribe_url = %q, want %q", data["unsubscribe_url"], "https://example.test/unsubscribe?token=abc")
+	}
 }
 
 func TestPersonalizationDataInvalidJSON(t *testing.T) {
@@ -117,7 +120,7 @@ func TestPersonalizationDataInvalidJSON(t *testing.T) {
 		CustomFields: []byte(`not valid json`),
 	}
 
-	data := personalizationData(row)
+	data := personalizationData(row, "")
 
 	if data["first_name"] != "Jane" {
 		t.Fatalf("first_name = %q, want %q", data["first_name"], "Jane")
@@ -135,13 +138,13 @@ func TestPersonalizationDataEmptyCustomFields(t *testing.T) {
 		CustomFields: []byte(`{}`),
 	}
 
-	data := personalizationData(row)
+	data := personalizationData(row, "")
 
 	if data["first_name"] != "Bob" {
 		t.Fatalf("first_name = %q, want %q", data["first_name"], "Bob")
 	}
-	if len(data) != 4 {
-		t.Fatalf("expected 4 keys, got %d: %v", len(data), data)
+	if len(data) != 5 {
+		t.Fatalf("expected 5 keys, got %d: %v", len(data), data)
 	}
 }
 

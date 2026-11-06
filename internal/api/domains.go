@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"regexp"
@@ -16,8 +17,8 @@ import (
 var domainPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
 
 const domainColumns = `
-	id, domain, status, dkim_selector, spf_status, dkim_status, dmarc_status,
-	last_checked_at, verified_at, created_at
+	id, domain, status, dkim_selector, dkim_public_key, spf_status, dkim_status,
+	dmarc_status, last_checked_at, verified_at, created_at
 `
 
 type sendingDomain struct {
@@ -25,6 +26,7 @@ type sendingDomain struct {
 	Domain        string     `json:"domain"`
 	Status        string     `json:"status"`
 	DKIMSelector  string     `json:"dkim_selector"`
+	DKIMPublicKey string     `json:"dkim_public_key,omitempty"`
 	SPFStatus     string     `json:"spf_status"`
 	DKIMStatus    string     `json:"dkim_status"`
 	DMARCStatus   string     `json:"dmarc_status"`
@@ -36,7 +38,7 @@ type sendingDomain struct {
 func scanDomain(row pgx.Row) (*sendingDomain, error) {
 	var d sendingDomain
 	if err := row.Scan(
-		&d.ID, &d.Domain, &d.Status, &d.DKIMSelector,
+		&d.ID, &d.Domain, &d.Status, &d.DKIMSelector, &d.DKIMPublicKey,
 		&d.SPFStatus, &d.DKIMStatus, &d.DMARCStatus,
 		&d.LastCheckedAt, &d.VerifiedAt, &d.CreatedAt,
 	); err != nil {
@@ -123,12 +125,12 @@ func (s *Server) verifyDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spf, dkim, dmarc := checkDomainDNS(r.Context(), d.Domain, d.DKIMSelector)
+	spf, dkim, dmarc, verification := s.checkDomainDNS(r.Context(), d.Domain, d.DKIMSelector, d.DKIMPublicKey)
 	status := "pending"
 	switch {
-	case spf == "verified" && dkim == "verified" && dmarc == "verified":
+	case spf == "verified" && dkim == "verified" && dmarc == "verified" && verification == "verified":
 		status = "verified"
-	case spf == "verified" || dkim == "verified" || dmarc == "verified":
+	case spf == "verified" || dkim == "verified" || dmarc == "verified" || verification == "verified":
 		status = "misconfigured"
 	}
 
@@ -224,8 +226,46 @@ type dnsRecord struct {
 	Status  string `json:"status"`
 }
 
+type DNSResolver interface {
+	LookupTXT(ctx context.Context, name string) ([]string, error)
+}
+
+type netDNSResolver struct {
+	resolver *net.Resolver
+	timeout  time.Duration
+}
+
+func newDNSResolver(serverAddr string, timeout time.Duration) DNSResolver {
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	resolver := &net.Resolver{PreferGo: true}
+	if serverAddr != "" {
+		resolver.Dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+			dialer := &net.Dialer{Timeout: timeout}
+			return dialer.DialContext(ctx, "udp", serverAddr)
+		}
+	}
+	return &netDNSResolver{resolver: resolver, timeout: timeout}
+}
+
+func (r *netDNSResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	if r == nil || r.resolver == nil {
+		return nil, fmt.Errorf("dns resolver is not configured")
+	}
+	if _, ok := ctx.Deadline(); !ok && r.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.timeout)
+		defer cancel()
+	}
+	return r.resolver.LookupTXT(ctx, name)
+}
+
 func dnsRecordsFor(d sendingDomain) []dnsRecord {
-	dkimValue := "v=DKIM1; k=rsa; p=<PUBLIC_KEY_FROM_STALWART>"
+	dkimValue := strings.TrimSpace(d.DKIMPublicKey)
+	if dkimValue == "" {
+		dkimValue = "v=DKIM1; k=rsa; p=<PUBLIC_KEY_FROM_STALWART>"
+	}
 	return []dnsRecord{
 		{
 			Type:    "TXT",
@@ -249,6 +289,13 @@ func dnsRecordsFor(d sendingDomain) []dnsRecord {
 			Status:  d.DMARCStatus,
 		},
 		{
+			Type:    "TXT",
+			Name:    "_sendwise-verification." + d.Domain,
+			Value:   "v=sendwise-verification " + strings.ToLower(d.Domain),
+			Purpose: "Verification token used to prove domain ownership during DNS checks.",
+			Status:  "pending",
+		},
+		{
 			Type:    "CNAME",
 			Name:    "track." + d.Domain,
 			Value:   "track.yourplatform.com",
@@ -270,33 +317,95 @@ func normalizeDomain(raw string) (string, error) {
 	return domain, nil
 }
 
-func checkDomainDNS(ctx context.Context, domain, selector string) (spf, dkim, dmarc string) {
-	_ = ctx
+func (s *Server) checkDomainDNS(ctx context.Context, domain, selector, expectedPublicKey string) (spf, dkim, dmarc, verification string) {
+	resolver := s.dnsResolver
+	if resolver == nil {
+		resolver = newDNSResolver("", 2*time.Second)
+	}
+
 	spf = "missing"
-	for _, txt := range lookupTXT(domain) {
-		if strings.HasPrefix(strings.ToLower(txt), "v=spf1") {
+	for _, txt := range lookupTXTWithResolver(ctx, resolver, domain) {
+		lower := strings.ToLower(strings.TrimSpace(txt))
+		if strings.HasPrefix(lower, "v=spf1") {
 			spf = "verified"
 			break
+		}
+		if strings.Contains(lower, "v=") {
+			spf = "mismatched"
 		}
 	}
 
 	dkim = "missing"
-	for _, txt := range lookupTXT(selector + "._domainkey." + domain) {
-		lower := strings.ToLower(txt)
+	for _, txt := range lookupTXTWithResolver(ctx, resolver, selector+"._domainkey."+domain) {
+		lower := strings.ToLower(strings.TrimSpace(txt))
 		if strings.Contains(lower, "v=dkim1") && strings.Contains(lower, "p=") {
+			if expectedPublicKey != "" {
+				canonicalKey := normalizeDkimKey(expectedPublicKey)
+				if strings.Contains(lower, "p="+canonicalKey) || strings.Contains(lower, "p=\""+canonicalKey+"\"") {
+					dkim = "verified"
+					break
+				}
+				dkim = "mismatched"
+				continue
+			}
 			dkim = "verified"
 			break
+		}
+		if strings.Contains(lower, "v=") {
+			dkim = "mismatched"
 		}
 	}
 
 	dmarc = "missing"
-	for _, txt := range lookupTXT("_dmarc." + domain) {
-		if strings.HasPrefix(strings.ToLower(txt), "v=dmarc1") {
+	for _, txt := range lookupTXTWithResolver(ctx, resolver, "_dmarc."+domain) {
+		lower := strings.ToLower(strings.TrimSpace(txt))
+		if strings.HasPrefix(lower, "v=dmarc1") {
 			dmarc = "verified"
 			break
 		}
+		if strings.Contains(lower, "v=") {
+			dmarc = "mismatched"
+		}
 	}
-	return spf, dkim, dmarc
+
+	verification = "missing"
+	expectedVerification := strings.ToLower(strings.TrimSpace(domain))
+	for _, txt := range lookupTXTWithResolver(ctx, resolver, "_sendwise-verification."+domain) {
+		lower := strings.ToLower(strings.TrimSpace(txt))
+		if strings.Contains(lower, "v=sendwise-verification") {
+			candidate := strings.TrimSpace(strings.TrimPrefix(lower, "v=sendwise-verification"))
+			candidate = strings.Trim(candidate, " \t\r\n\"'")
+			if candidate == expectedVerification || candidate == "\""+expectedVerification+"\"" {
+				verification = "verified"
+				break
+			}
+			verification = "mismatched"
+		}
+	}
+	return spf, dkim, dmarc, verification
+}
+
+func normalizeDkimKey(key string) string {
+	key = strings.TrimSpace(key)
+	key = strings.ReplaceAll(key, "-----BEGIN PUBLIC KEY-----", "")
+	key = strings.ReplaceAll(key, "-----END PUBLIC KEY-----", "")
+	key = strings.ReplaceAll(key, "\\n", "")
+	key = strings.ReplaceAll(key, "\n", "")
+	key = strings.ReplaceAll(key, " ", "")
+	key = strings.ReplaceAll(key, "\t", "")
+	key = strings.Trim(key, "\r\n ")
+	return strings.ToLower(key)
+}
+
+func lookupTXTWithResolver(ctx context.Context, resolver DNSResolver, name string) []string {
+	if resolver == nil {
+		return nil
+	}
+	values, err := resolver.LookupTXT(ctx, name)
+	if err != nil {
+		return nil
+	}
+	return values
 }
 
 func lookupTXT(name string) []string {
