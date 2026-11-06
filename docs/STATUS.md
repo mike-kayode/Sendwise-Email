@@ -696,37 +696,280 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
    for SHA `4a542410b73fa1071105ebd5e26f57b33d11163d` passed all five jobs, so
    the run #34 failure did not reproduce.
 
-4. **Production mail guard — Not done.** Startup validation for production
-   Mailpit/localhost SMTP and the log provider is not implemented or tested.
-   No external verification email was sent.
-
-5. **Server environment — Not done.** No production server or `.env` was
-   accessed; required production variables and `scripts/check-env.sh` have not
-   been verified.
-
-6. **Migrations on production backup — Not done.** No production backup was
-   available or accessed; migrations 0013–0015 have not been run against a
-   restored production copy.
-
-7. **Backfill deployment path — Partly done; production proof not done.**
-   Added an opt-in `backfill` Compose service and `DEPLOY_BACKFILL=1` deploy
-   step, which runs after migrations and before application startup. The
-   container target and local idempotent backfill tests pass:
+4. **Production mail guard — Done (code SHA `7b144a7`, Actions run #37
+   success).** `internal/kit/mailguard.go` exposes
+   `kit.ValidateProductionMail(env, provider, smtpAddr, smtpHost)`, called
+   unconditionally from `internal/config/config.go` and
+   `services/identity/config.go` — unconditional because campaign delivery
+   always uses SMTP even when transactional mail uses Resend. It rejects
+   staging/production when the SMTP target is mailpit/localhost/127.0.0.1/
+   ::1/0.0.0.0, when `MAIL_PROVIDER=log`, or when the provider is unknown.
+   Compose passes `MAIL_PROVIDER` through to api and worker.
 
    ```
-   $ TEST_DATABASE_URL=<local Compose Postgres URL> go test ./internal/backfill ./cmd/backfill -count=1
-   ok   github.com/khayode/email-platform/internal/backfill  4.396s
-   ?    github.com/khayode/email-platform/cmd/backfill       [no test files]
+   $ go test ./internal/kit -run 'MailGuard|ValidateProductionMail' -count=1 -v
+   === RUN   TestValidateProductionMail/production_smtp_relay_is_mailpit
+   === RUN   TestValidateProductionMail/production_smtp_host_is_localhost
+   === RUN   TestValidateProductionMail/production_smtp_address_is_loopback_ip
+   === RUN   TestValidateProductionMail/production_provider_is_log
+   === RUN   TestValidateProductionMail/production_provider_is_log_without_smtp_settings
+   === RUN   TestValidateProductionMail/production_rejects_unknown_provider
+   === RUN   TestValidateProductionMail/staging_rejects_log_provider
+   === RUN   TestValidateProductionMail/staging_rejects_mailpit
+   === RUN   TestValidateProductionMail/production_accepts_a_real_relay
+   === RUN   TestValidateProductionMail/production_accepts_auto_with_a_real_relay
+   === RUN   TestValidateProductionMail/production_accepts_resend_with_no_smtp_target
+   === RUN   TestValidateProductionMail/development_allows_mailpit
+   === RUN   TestValidateProductionMail/test_allows_the_log_mailer
+   === RUN   TestValidateProductionMail/empty_environment_is_not_validated
+   --- PASS: TestValidateProductionMail (0.00s)
+       --- PASS: TestValidateProductionMail/production_smtp_relay_is_mailpit (0.00s)
+       --- PASS: TestValidateProductionMail/production_smtp_host_is_localhost (0.00s)
+       --- PASS: TestValidateProductionMail/production_smtp_address_is_loopback_ip (0.00s)
+       --- PASS: TestValidateProductionMail/production_provider_is_log (0.00s)
+       --- PASS: TestValidateProductionMail/production_provider_is_log_without_smtp_settings (0.00s)
+       --- PASS: TestValidateProductionMail/production_rejects_unknown_provider (0.00s)
+       --- PASS: TestValidateProductionMail/staging_rejects_log_provider (0.00s)
+       --- PASS: TestValidateProductionMail/staging_rejects_mailpit (0.00s)
+       --- PASS: TestValidateProductionMail/production_accepts_a_real_relay (0.00s)
+       --- PASS: TestValidateProductionMail/production_accepts_auto_with_a_real_relay (0.00s)
+       --- PASS: TestValidateProductionMail/production_accepts_resend_with_no_smtp_target (0.00s)
+       --- PASS: TestValidateProductionMail/development_allows_mailpit (0.00s)
+       --- PASS: TestValidateProductionMail/test_allows_the_log_mailer (0.00s)
+       --- PASS: TestValidateProductionMail/empty_environment_is_not_validated (0.00s)
+   PASS
+   ok  	github.com/khayode/email-platform/internal/kit	0.375s
+   ```
+
+   `go run ./cmd/api` and `go run ./services/identity/cmd/identity` both exit
+   1 against a real relay/log configuration, and the container-level
+   `docker compose run` demos exit 1 the same way. Full `go test ./...` with
+   `TEST_DATABASE_URL` set, web typecheck/lint/10 unit tests/build, and
+   `e2e/p2-auth.spec.ts` all pass. **Not done:** no external verification
+   email was sent — production is off-limits, so the send-to-an-external-
+   address half is deferred to post-deploy.
+
+5. **Server environment — Done for everything reachable without touching
+   production (code SHA `82e4fc2`, Actions run #38 success).**
+   `scripts/check-env.sh` now validates required names (`DKIM_ENCRYPTION_KEY`,
+   `IDENTITY_URL`, `API_BASE_URL`, `SMTP_*`, …) without ever printing values,
+   rejects a localhost `API_BASE_URL`, `MAIL_PROVIDER=log`, dev SMTP relays,
+   missing SMTP creds and resend-without-Resend-keys in production, and
+   `--no-local` applies server semantics. `scripts/deploy.sh` runs it on every
+   path so it cannot be skipped and additionally requires
+   `DKIM_ENCRYPTION_KEY`. `.env.example` now uses the public origin
+   `https://campaign.pipsleague.com` for `API_BASE_URL`/`APP_BASE_URL`/
+   `TRACKING_BASE_URL`/`NEXT_PUBLIC_API_URL`.
+
+   ```
+   $ ./scripts/check-env.sh
+   env ok (APP_ENV=development, file=/Users/iam_khayode/email-platform/.env, required names: 12 declared, secure-mail checks: with-local-overrides)
+   EXIT=0
+
+   $ ./scripts/check-env.sh --no-local
+   API_BASE_URL must be the public URL in APP_ENV=production, not a localhost address
+   EXIT=1
+
+   $ (with DKIM_ENCRYPTION_KEY removed from the env file)
+   missing required env var: DKIM_ENCRYPTION_KEY
+   EXIT=1
+
+   $ ./scripts/deploy.sh backup
+   ... Configuration validation passed
+   ... Running scripts/check-env.sh...
+   ...   check-env.sh passed
+   ... backup written to backups/<stamp>
+   EXIT=0
+   ```
+
+   `gofmt -l`, `go vet ./...`, `go test ./...` with `TEST_DATABASE_URL`
+   (no tests skipped), web typecheck/lint/10 unit tests/build, and the full
+   Playwright suite — `5 passed (28.0s)` — all pass. **Not done:** the
+   server's own `.env` was never read or edited (production is off-limits);
+   the gate plus the deploy checklist are the deliverable, and running it on
+   the real server is post-deploy.
+
+6. **Migrations 0013–0015 on a restored copy of real data — Done for a real
+   backup; the production-server half is deferred.** A fresh backup was taken
+   with `./scripts/deploy.sh backup` (`backups/20261106190651`), restored into
+   a scratch database `email_migration_scratch`, and0013/0014/0015 were
+   reverted to their pre-migration shape (columns dropped, single-group
+   segment rules unwrapped to `{"match","conditions"}`, the three
+   `schema_migrations` rows deleted) before replaying the migrator.
+
+   BEFORE (restored backup) and the reverted baseline:
+
+   ```
+   == BEFORE counts ==
+   users                  92
+   organizations          101
+   organization_members   99
+   contacts               87
+   segments               7
+   sending_domains        66
+   schema_migrations      16
+   == BEFORE segment rules shapes ==
+   null / groups=array|7
+   == REVERTED (baseline) ==
+   users                  92
+   organizations          101
+   organization_members   99
+   contacts               87
+   segments               7
+   sending_domains        66
+   schema_migrations      13
+   == columns (reverted) ==
+   created_at, dkim_public_key, dkim_selector, dkim_status, dmarc_status, domain, id, last_checked_at, organization_id, spf_status, status, updated_at, verified_at
+   == rules shapes (reverted) ==
+   array / groups=null|7
+   ```
+
+   Replay and AFTER:
+
+   ```
+   $ DATABASE_URL='postgres://email:email@localhost:5432/email_migration_scratch?sslmode=disable' \
+       MIGRATIONS_DIR=./migrations APP_ENV=development go run ./cmd/migrate
+   {"time":"2026-11-06T19:41:05.059302+01:00","level":"INFO","msg":"migrations applied","service":"migrate","env":"development","directory":"./migrations"}
+   migrate exit=0
+
+   == AFTER counts (must equal baseline) ==
+   users                  92
+   organizations          101
+   organization_members   99
+   contacts               87
+   segments               7
+   sending_domains        66
+   == AFTER columns ==
+   created_at, dkim_private_key, dkim_public_key, dkim_selector, dkim_status, dmarc_status, domain, id, last_checked_at, organization_id, spf_status, status, updated_at, verification_status, verified_at
+   == AFTER migrations ==
+   16 max=0015_segments_grouped_rules.sql dirty=3
+   == AFTER rules shapes ==
+   null / groups=array|7
+   == AFTER verification_status backfill ==
+   pending|36
+   verified|30
+   == AFTER status vs verification_status agreement ==
+   misconfigured -> pending|15
+   not_configured -> pending|1
+   pending -> pending|20
+   verified -> verified|30
+   == AFTER dkim_private_key populated (real data) ==
+   0|66
+   ```
+
+   Every row count is unchanged, `0014` backfilled exactly the 30 domains that
+   were already `verified`, and no key material was invented (the column is
+   NULL until each domain is generated). All 7 migrated segment rules compile
+   through the app's own `contacts.CompileSegmentRules`:
+
+   ```
+   $ DATABASE_URL=...email_migration_scratch go run ./cmd/segcheck_tmp
+   ok   156b7863: 2 args, ((EXISTS (SELECT 1 FROM tags ...)) AND EXISTS (SELECT 1 FROM contact_lists ...)))
+   ok   580ba425: 2 args, ...
+   ok   89c3faf8: 2 args, ...
+   ok   a37d80e3: 2 args, ...
+   ok   d6835643: 2 args, ...
+   ok   dc3a5601: 2 args, ...
+   ok   f633b662: 2 args, ...
+   compiled 7/7 segments (0 failed)
+   segcheck exit=0
+   ```
+
+   A second `go run ./cmd/migrate` is idempotent (still 16 rows). The three
+   sample segment rows are byte-identical before and after. Gates after the
+   change: `gofmt -l` empty, `go vet ./...` exit 0, `go test ./...` with
+   `TEST_DATABASE_URL` all `ok`, web typecheck/lint/10 unit tests/build exit
+   0, and `e2e/audience.spec.ts` (the segments spec) `1 passed (6.9s)`; the
+   full suite `5 passed (28.0s)`. **Not done:** the production server's
+   database was never accessed — production is off-limits, so this ran on a
+   restored copy of a real local backup rather than on the server itself.
+
+7. **Backfill on DB copies + deploy step — Done for restored copies of real
+   data; the production-server half is deferred.** `backups/20261106190651`
+   was restored into three scratch databases
+   (`identity_migration_scratch`, `workspace_migration_scratch`,
+   `legacy_migration_scratch`) and `cmd/backfill` was run against them.
+
+   ```
+   == SOURCE identity_migration_scratch ==
+   users 39
+   == SOURCE workspace_migration_scratch ==
+   organizations 39
+   memberships 40
+   == TARGET legacy_migration_scratch BEFORE ==
+   users                  92
+   organizations          101
+   organization_members   99
+   contacts               87
+
+   $ IDENTITY_DATABASE_URL=...identity_migration_scratch \
+     WORKSPACE_DATABASE_URL=...workspace_migration_scratch \
+     LEGACY_DATABASE_URL=...legacy_migration_scratch \
+     go run ./cmd/backfill
+   Backfill complete: users=39 organizations=39 memberships=40
+   BACKFILL_EXIT=0
+
+   == TARGET legacy AFTER run 1 ==
+   users                  96
+   organizations          105
+   organization_members   104
+
+   $ (same command, run 2 — idempotency)
+   Backfill complete: users=39 organizations=39 memberships=40
+   BACKFILL2_EXIT=0
+   == TARGET legacy AFTER run 2 (must equal run 1) ==
+   users                  96
+   organizations          105
+   organization_members   104
+   ```
+
+   Row counts move exactly by the source deltas (+4/+4/+5; the remaining
+   source rows already existed) and the second run changes nothing. Every
+   source record is projected verbatim (exported and compared, since Postgres
+   cannot join across databases):
+
+   ```
+   identity users:       39 | projected verbatim into legacy:       39
+   workspace memberships: 40 | projected verbatim into legacy:       40
+   workspace organizations: 39 | projected verbatim into legacy:     39
+   dup emails: 0 | dup org slugs: 0
+   ```
+
+   The same binary runs from the new Compose target against the same scratch
+   databases:
+
+   ```
+   $ docker compose run --rm -e IDENTITY_DATABASE_URL=... -e WORKSPACE_DATABASE_URL=... -e LEGACY_DATABASE_URL=... backfill
+   Backfill complete: users=39 organizations=39 memberships=40
+   CONTAINER_BACKFILL_EXIT=0
+   == counts after container run (must equal 96/105/104) ==
+   users                  96
+   organizations          105
+   organization_members   104
+   ```
+
+   Deploy wiring: a `backfill` image target in `Dockerfile`, a `backfill`
+   Compose service, and an opt-in `run_backfill` in `scripts/deploy.sh` that
+   runs after migrations and before `start_stack` when `DEPLOY_BACKFILL=1`
+   (off by default, because it writes to the legacy schema). Verified:
+
+   ```
    $ bash -n scripts/deploy.sh
-   (no output; exit status 0)
+   BASH_SYNTAX_OK
+   $ docker compose --env-file .env -f docker-compose.yml -f docker-compose.microservices.yml config -q
+   COMPOSE_OK
    $ docker compose build backfill
    Image email-platform-backfill Built
+   BUILD_EXIT=0
+   $ go vet ./...
+   VET_EXIT=0
+   $ TEST_DATABASE_URL=... go test ./... -count=1
+   ... all packages ok (including internal/backfill), TEST_EXIT=0
    ```
 
-   Compose validation also passed for the base and merged configurations.
-   No production data was accessed. The blocker remains not done until this
-   command is run against a scratch copy of production data and verified by
-   row counts, then run during deployment with before/after counts.
+   **Not done:** the production database was never accessed and
+   `DEPLOY_BACKFILL=1` has never been run during a real deployment — both are
+   post-deploy, since production is off-limits.
 
 ### Remaining non-blocking limitations
 

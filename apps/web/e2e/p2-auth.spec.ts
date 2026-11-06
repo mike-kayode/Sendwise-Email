@@ -101,9 +101,14 @@ test("P2 account email, password reset, and logout journey", async ({ page, requ
   const settingsReady = page.waitForResponse((response) =>
     response.url().includes("/api/v1/invitations") && response.status() === 200,
   );
+  // Corrupt only localStorage, without dispatching the sync event: notifying
+  // the still-mounted dashboard wakes providers.tsx -> me() -> a refresh POST
+  // that page.goto then aborts. The server rotates on that aborted request, so
+  // the settings page's own refresh presents a stale cookie and identity's
+  // reuse detection revokes the whole session family. On the fresh settings
+  // load exactly one refresh must recover the session.
   await page.evaluate(() => {
     localStorage.setItem("access_token", "expired-test-token");
-    window.dispatchEvent(new CustomEvent("sendwise:access-token", { detail: "expired-test-token" }));
   });
   await page.goto("/settings");
   await settingsReady;
