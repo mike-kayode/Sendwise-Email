@@ -12,16 +12,20 @@ set -euo pipefail
 #   ./scripts/deploy.sh rollback --yes   # DESTRUCTIVE: restore the latest DB backup
 #   ./scripts/deploy.sh production       # deploy with production env validation
 #
-# Deploy order: .env.example-vs-.env variable check -> config validation ->
-# docker compose config -q -> fresh DB backup -> build -> migrations (legacy +
-# identity + workspace) -> up --no-deps -> seven-endpoint smoke test.
-# Every step refuses to continue on failure.
-#
-# Rollback restores data only; images are not versioned. To roll back code,
-# check out the previous git tag and deploy again.
+# Deploy order: environment validation -> both Compose-file checks -> image
+# snapshot -> database backup -> build -> migrations -> up --no-deps -> smoke.
+# A failed deploy restores the previous application images automatically.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+ROLLBACK_SERVICES=(api worker identity workspace gateway web)
+ROLLBACK_IMAGE_REFS=()
+ROLLBACK_IMAGE_IDS=()
+ROLLBACK_TAGS=()
+ROLLBACK_STAMP=""
+DEPLOY_IN_PROGRESS=0
+SMOKE_TEMP_DIR=""
 
 COMMAND="${1:-deploy}"
 case "$COMMAND" in
@@ -39,12 +43,16 @@ esac
 log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 fail() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; exit 1; }
 
-ENV_FILE="$ROOT/.env"
+ENV_FILE="${SENDWISE_ENV_FILE:-$ROOT/.env}"
 [ -f "$ENV_FILE" ] || fail ".env not found at $ENV_FILE. Copy .env.example and fill in required secrets."
 
-# Later --env-file wins on duplicate keys; .env.local holds localhost overrides.
+# Later --env-file wins on duplicate keys; .env.local is a local override.
 COMPOSE=(docker compose --env-file "$ENV_FILE")
-if [ -f "$ROOT/.env.local" ]; then
+USE_ENV_LOCAL=1
+if [ -n "${SENDWISE_ENV_FILE:-}" ]; then
+  USE_ENV_LOCAL=0
+fi
+if [ "$USE_ENV_LOCAL" -eq 1 ] && [ -f "$ROOT/.env.local" ]; then
   COMPOSE+=(--env-file "$ROOT/.env.local")
 fi
 COMPOSE+=(-f "$ROOT/docker-compose.yml" -f "$ROOT/docker-compose.microservices.yml")
@@ -54,12 +62,12 @@ COMPOSE+=(-f "$ROOT/docker-compose.yml" -f "$ROOT/docker-compose.microservices.y
 command -v curl >/dev/null 2>&1 || fail "curl is required for smoke tests"
 command -v docker >/dev/null 2>&1 || fail "docker is required"
 
-# Load env files for validation only (values are never echoed). Precedence
-# mirrors compose: .env.local, when present, wins on duplicate keys.
+# Load env files for validation only (values are never echoed). All names in
+# .env.example must be declared in .env; .env.local may only override values.
 set -a
 # shellcheck disable=SC1090
 . "$ENV_FILE"
-if [ -f "$ROOT/.env.local" ]; then
+if [ "$USE_ENV_LOCAL" -eq 1 ] && [ -f "$ROOT/.env.local" ]; then
   # shellcheck disable=SC1090
   . "$ROOT/.env.local"
 fi
@@ -68,26 +76,19 @@ set +a
 APP_ENV_VALUE="${APP_ENV:-development}"
 ENVIRONMENT="${ENVIRONMENT_ARG:-$APP_ENV_VALUE}"
 
-# Every variable name documented in .env.example must exist in .env (or the
-# .env.local override). A new required variable that reaches compose and
-# .env.example but never lands in .env is exactly the gap that caused the
-# last outage: containers start, fail config validation, dashboard down.
 validate_env_keys() {
   log "Comparing .env.example variable names against .env..."
   local missing
   missing="$(
     comm -23 \
       <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ROOT/.env.example" | cut -d= -f1 | sort -u) \
-      <(cat \
-          <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | cut -d= -f1) \
-          <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ROOT/.env.local" 2>/dev/null | cut -d= -f1) \
-        | sort -u)
+      <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | cut -d= -f1 | sort -u)
   )"
   if [ -n "$missing" ]; then
     printf '%s\n' "$missing" | sed 's/^/  missing from .env: /' >&2
-    fail "add every variable above to .env (copy values from .env.example)"
+    fail "declare every variable above in .env (copy .env.example)"
   fi
-  log "  every .env.example variable name is present"
+  log "  every .env.example variable name is declared in .env"
 }
 
 validate_config() {
@@ -111,12 +112,25 @@ validate_config() {
   log "Configuration validation passed"
 }
 
+validate_smoke_credentials() {
+  [ -n "${DEPLOY_SMOKE_EMAIL:-}" ] || fail "DEPLOY_SMOKE_EMAIL is required for authenticated smoke tests"
+  [ -n "${DEPLOY_SMOKE_PASSWORD:-}" ] || fail "DEPLOY_SMOKE_PASSWORD is required for authenticated smoke tests"
+}
+
 # Catches interpolation errors (e.g. ${WEBHOOK_SECRET:?...} with an empty
 # value) before any container is built or started.
 check_compose_config() {
-  log "Validating compose configuration (docker compose config -q)..."
+  local base=(docker compose --env-file "$ENV_FILE")
+  if [ "$USE_ENV_LOCAL" -eq 1 ] && [ -f "$ROOT/.env.local" ]; then
+    base+=(--env-file "$ROOT/.env.local")
+  fi
+  log "Validating docker-compose.yml..."
+  "${base[@]}" -f "$ROOT/docker-compose.yml" config -q || fail "docker-compose.yml is invalid"
+  log "Validating docker-compose.microservices.yml..."
+  "${base[@]}" -f "$ROOT/docker-compose.microservices.yml" config -q || fail "docker-compose.microservices.yml is invalid"
+  log "Validating the combined Compose configuration..."
   "${COMPOSE[@]}" config -q || fail "docker compose config is invalid"
-  log "  compose config OK"
+  log "  all Compose configurations are valid"
 }
 
 take_backup() {
@@ -133,10 +147,9 @@ take_backup() {
   done
   local db
   for db in "${POSTGRES_DB:-email}" identity workspace; do
-    "${COMPOSE[@]}" exec -T postgres pg_dump -U "${POSTGRES_USER:-email}" -d "$db" | gzip > "$dir/$db.sql.gz"
-    # pipefail already aborts on pg_dump failure; this also guards a silent
-    # zero-byte dump. Deploy refuses to continue without a real backup.
-    [ -s "$dir/$db.sql.gz" ] || fail "backup for $db is empty: $dir/$db.sql.gz"
+    "${COMPOSE[@]}" exec -T postgres pg_dump -U "${POSTGRES_USER:-email}" -d "$db" > "$dir/$db.sql"
+    [ -s "$dir/$db.sql" ] || fail "backup for $db is empty: $dir/$db.sql"
+    gzip "$dir/$db.sql"
     log "  dumped $db"
   done
   echo "$dir" > "$ROOT/backups/latest"
@@ -148,6 +161,67 @@ build_images() {
   "${COMPOSE[@]}" build migrate identity-db-migrate workspace-db-migrate api worker identity workspace gateway web
 }
 
+capture_previous_images() {
+  local service container image_ref image_id tag
+  ROLLBACK_STAMP="$(date +%Y%m%d%H%M%S)"
+  for service in "${ROLLBACK_SERVICES[@]}"; do
+    container="$("${COMPOSE[@]}" ps -q "$service")"
+    [ -n "$container" ] || fail "cannot guarantee image rollback: $service has no running container"
+    image_ref="$(docker inspect --format '{{.Config.Image}}' "$container")"
+    image_id="$(docker inspect --format '{{.Image}}' "$container")"
+    [ -n "$image_ref" ] && [ -n "$image_id" ] || fail "cannot identify the previous image for $service"
+    tag="sendwise-rollback:${ROLLBACK_STAMP}-${service}"
+    docker image tag "$image_id" "$tag" || fail "could not preserve the previous image for $service"
+    ROLLBACK_IMAGE_REFS+=("$image_ref")
+    ROLLBACK_IMAGE_IDS+=("$image_id")
+    ROLLBACK_TAGS+=("$tag")
+  done
+  log "Previous application images preserved for rollback"
+}
+
+cleanup_rollback_tags() {
+  local tag
+  for tag in "${ROLLBACK_TAGS[@]}"; do
+    docker image rm "$tag" >/dev/null 2>&1 || log "WARNING: could not remove temporary rollback tag $tag"
+  done
+}
+
+rollback_images() {
+  local i failed=0
+  log "Restoring previous application images..."
+  for ((i = 0; i < ${#ROLLBACK_SERVICES[@]}; i++)); do
+    if ! docker image tag "${ROLLBACK_TAGS[$i]}" "${ROLLBACK_IMAGE_REFS[$i]}"; then
+      log "ERROR: could not restore image for ${ROLLBACK_SERVICES[$i]}"
+      failed=1
+    fi
+  done
+  if [ "$failed" -eq 0 ]; then
+    if ! "${COMPOSE[@]}" up -d --no-deps --force-recreate --no-build "${ROLLBACK_SERVICES[@]}"; then
+      log "ERROR: previous images were restored, but the application containers could not be restarted"
+      failed=1
+    fi
+  fi
+  cleanup_rollback_tags
+  if [ "$failed" -eq 0 ]; then
+    log "Previous application images restored"
+    return 0
+  fi
+  return 1
+}
+
+on_exit() {
+  local status="$1"
+  trap - EXIT
+  if [ "$DEPLOY_IN_PROGRESS" -eq 1 ] && [ "$status" -ne 0 ]; then
+    log "Deployment failed; attempting automatic image rollback"
+    rollback_images || log "ERROR: automatic image rollback was incomplete"
+  fi
+  if [ -n "$SMOKE_TEMP_DIR" ]; then
+    rm -rf -- "$SMOKE_TEMP_DIR" || log "WARNING: could not remove temporary smoke files"
+  fi
+  exit "$status"
+}
+
 run_migrations() {
   log "Running database migrations..."
   "${COMPOSE[@]}" run --rm migrate
@@ -157,11 +231,8 @@ run_migrations() {
 }
 
 start_stack() {
-  # Infrastructure first (no application dependencies), then the application
-  # services with --no-deps: migrations already ran explicitly above, so the
-  # one-shot migrate jobs are not re-triggered here.
   log "Starting infrastructure (postgres, redis, nats, stalwart)..."
-  "${COMPOSE[@]}" up -d postgres redis nats stalwart
+  "${COMPOSE[@]}" up -d --no-deps postgres redis nats stalwart
   log "Starting application services (--no-deps)..."
   "${COMPOSE[@]}" up -d --no-deps api worker identity workspace gateway web caddy
   log "Stack started"
@@ -199,12 +270,26 @@ smoke_tests() {
     2*|3*) log "  ok  caddy-edge (status $caddy_status)" ;;
     *) fail "smoke check failed: caddy-edge (status $caddy_status)" ;;
   esac
-  # End-to-end auth path through the gateway: unauthenticated protected route
-  # must reach the legacy API and return 401 (not 5xx/upstream error).
-  local auth_status
-  auth_status="$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:8084/api/v1/contacts || echo 000)"
-  [ "$auth_status" = "401" ] || fail "gateway auth check: expected 401 from /api/v1/contacts, got $auth_status"
-  log "  ok  gateway-auth (401 unauthenticated)"
+  validate_smoke_credentials
+  command -v jq >/dev/null 2>&1 || fail "jq is required for authenticated smoke tests"
+  SMOKE_TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sendwise-smoke.XXXXXX")"
+  jq -n '{email: env.DEPLOY_SMOKE_EMAIL, password: env.DEPLOY_SMOKE_PASSWORD}' > "$SMOKE_TEMP_DIR/login.json"
+  local auth_status access_token endpoint status
+  auth_status="$(curl -sS -m 10 -o "$SMOKE_TEMP_DIR/login-response.json" -w '%{http_code}' \
+    -H 'Content-Type: application/json' --data-binary @"$SMOKE_TEMP_DIR/login.json" \
+    http://127.0.0.1:8084/api/v1/auth/login 2>/dev/null || true)"
+  [ "$auth_status" = "200" ] || fail "gateway login smoke test expected 200, got $auth_status"
+  log "  ok  gateway-login (200)"
+  access_token="$(jq -er '.access_token | select(type == "string" and length > 0)' "$SMOKE_TEMP_DIR/login-response.json" 2>/dev/null)" \
+    || fail "gateway login smoke test returned no access token"
+  printf 'header = "Authorization: Bearer %s"\n' "$access_token" > "$SMOKE_TEMP_DIR/auth.curl"
+  chmod 600 "$SMOKE_TEMP_DIR/auth.curl"
+  for endpoint in lists contacts campaigns domains tags segments; do
+    status="$(curl -sS -m 10 -o /dev/null -w '%{http_code}' --config "$SMOKE_TEMP_DIR/auth.curl" \
+      "http://127.0.0.1:8084/api/v1/$endpoint" 2>/dev/null || true)"
+    [ "$status" = "200" ] || fail "gateway $endpoint smoke test expected 200, got $status"
+    log "  ok  gateway-$endpoint (200)"
+  done
   log "All smoke tests passed"
 }
 
@@ -239,6 +324,7 @@ case "$COMMAND" in
     take_backup
     ;;
   smoke)
+    validate_smoke_credentials
     smoke_tests
     ;;
   rollback)
@@ -247,13 +333,19 @@ case "$COMMAND" in
   deploy)
     validate_env_keys
     validate_config
+    validate_smoke_credentials
     check_compose_config
+    capture_previous_images
+    DEPLOY_IN_PROGRESS=1
+    trap 'on_exit $?' EXIT
     take_backup
     build_images
     run_migrations
     start_stack
     smoke_tests
+    DEPLOY_IN_PROGRESS=0
+    cleanup_rollback_tags
     log "Deploy completed successfully"
-    log "Rollback data with: ./scripts/deploy.sh rollback --yes"
+    log "Previous application images are restored automatically if deployment smoke tests fail"
     ;;
 esac

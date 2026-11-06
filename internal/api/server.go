@@ -84,7 +84,6 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/auth/me", protect(s.me))
 
-
 	mux.Handle("GET /api/v1/contacts", protect(s.listContacts))
 	mux.Handle("POST /api/v1/contacts", protect(s.createContact, audienceManagers...))
 	mux.Handle("POST /api/v1/contacts/import", protect(s.importContacts, audienceManagers...))

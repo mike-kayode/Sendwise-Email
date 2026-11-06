@@ -27,3 +27,8 @@ tmp/
 
 # Deploy backups (contain full database dumps — never commit)
 backups/
+
+# stray/local artifacts
+email.csv
+test-results/
+"

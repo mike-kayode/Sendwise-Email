@@ -20,11 +20,11 @@ type Claims struct {
 }
 
 type Manager struct {
-	secret        []byte
-	issuer        string
-	ttl           time.Duration
-	sessionStore  SessionStore
-	logger        *slog.Logger
+	secret       []byte
+	issuer       string
+	ttl          time.Duration
+	sessionStore SessionStore
+	logger       *slog.Logger
 }
 
 func NewManager(secret, issuer string, ttl time.Duration) *Manager {
@@ -35,9 +35,9 @@ func NewManager(secret, issuer string, ttl time.Duration) *Manager {
 // request. If sessionStore is nil, the middleware skips revocation checks.
 func NewManagerWithStore(secret, issuer string, ttl time.Duration, sessionStore SessionStore) *Manager {
 	return &Manager{
-		secret:      []byte(secret),
-		issuer:      issuer,
-		ttl:         ttl,
+		secret:       []byte(secret),
+		issuer:       issuer,
+		ttl:          ttl,
 		sessionStore: sessionStore,
 	}
 }

@@ -47,17 +47,17 @@ type formSubmission struct {
 }
 
 type formInput struct {
-	Name           string          `json:"name"`
-	Description    string          `json:"description"`
-	Status         string          `json:"status"`
-	ListID         string          `json:"list_id"`
-	SuccessMessage string          `json:"success_message"`
-	RedirectURL    string          `json:"redirect_url"`
-	ConsentText    string          `json:"consent_text"`
-	SpamProtection *bool           `json:"spam_protection"`
-	DoubleOptIn    *bool           `json:"double_opt_in"`
+	Name           string           `json:"name"`
+	Description    string           `json:"description"`
+	Status         string           `json:"status"`
+	ListID         string           `json:"list_id"`
+	SuccessMessage string           `json:"success_message"`
+	RedirectURL    string           `json:"redirect_url"`
+	ConsentText    string           `json:"consent_text"`
+	SpamProtection *bool            `json:"spam_protection"`
+	DoubleOptIn    *bool            `json:"double_opt_in"`
 	Fields         []formFieldInput `json:"fields"`
-	TagIDs         []string        `json:"tag_ids"`
+	TagIDs         []string         `json:"tag_ids"`
 }
 
 type formFieldInput struct {
@@ -69,6 +69,7 @@ type formFieldInput struct {
 	CustomKey   string          `json:"custom_key"`
 	Options     json.RawMessage `json:"options"`
 }
+
 // listForms returns all forms for the authenticated organization.
 func (s *Server) listForms(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.pool.Query(r.Context(), `
@@ -100,4 +101,3 @@ func (s *Server) listForms(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"data": forms})
 }
-
