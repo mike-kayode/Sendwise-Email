@@ -616,9 +616,14 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
    validation because the microservices file is an override and cannot be
    validated alone; the Node 20 web test job also lacks
    `--experimental-strip-types`. CI now validates the base and merged Compose
-   files, uses Node 22, and installs Chromium before browser tests. The
-   corresponding Actions run is pending. Do not treat this blocker as Done
-   until Actions is green for the final SHA.
+   files, uses Node 22, and installs Chromium before browser tests. Run
+   [#28](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42251089769)
+   passed Compose validation and all web checks, but Go integration tests failed
+   because CI had no Mailpit service (`SMTP 127.0.0.1:1025` refused connections;
+   the automation send test processed zero executions). A Mailpit service and
+   explicit SMTP test settings are now included; the next Actions run is
+   pending. Do not treat this blocker as Done until Actions is green for the
+   final SHA.
 
 3. **DKIM signing — Not done.** Outbound messages have not been verified against
    the per-domain public key. Signer selection and implementation are pending.

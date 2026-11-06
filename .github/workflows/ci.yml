@@ -65,6 +65,11 @@ jobs:
         command: "-js"
         ports:
           - 4222:4222
+      mailpit:
+        image: axllent/mailpit:latest
+        ports:
+          - 1025:1025
+          - 8025:8025
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
@@ -78,6 +83,10 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
           NATS_URL: nats://localhost:4222
           JWT_SECRET: test-secret-do-not-use-in-production
+          MAIL_PROVIDER: smtp
+          SMTP_ADDR: 127.0.0.1:1025
+          SMTP_HOST: mailpit
+          SMTP_FROM: ci@sendwise.test
         run: go test ./...
 
   test-web:
