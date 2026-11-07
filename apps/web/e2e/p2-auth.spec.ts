@@ -59,7 +59,8 @@ test("P2 account email, password reset, and logout journey", async ({ page, requ
   await page.getByPlaceholder("Acme Studio").fill(workspaceName);
   await page.getByPlaceholder("••••••••••").fill(initialPassword);
   await page.getByRole("button", { name: "Create workspace" }).click();
-  await page.waitForURL("**/login");
+  await page.waitForURL("**/auth/verify?email=**");
+  await expect(page.getByRole("heading", { name: "Check your inbox" })).toBeVisible();
 
   const verificationToken = tokenFrom(await findMailLink(request, email, "Verify your email address"));
   await page.goto(`/auth/verify?token=${encodeURIComponent(verificationToken)}`);

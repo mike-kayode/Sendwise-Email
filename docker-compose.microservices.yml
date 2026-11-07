@@ -119,6 +119,7 @@ services:
       MAIL_PROVIDER: ${MAIL_PROVIDER:-smtp}
       SMTP_ADDR: ${SMTP_ADDR:-mailpit:1025}
       SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_TLS_MODE: ${SMTP_TLS_MODE:-none}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-hello@pipsleague.com}

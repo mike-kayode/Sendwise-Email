@@ -30,6 +30,20 @@ fi
 set +a
 
 ENV_NAME="${APP_ENV:-development}"
+if [ -z "${SMTP_TLS_MODE:-}" ]; then
+  case "$ENV_NAME" in
+    production|staging) SMTP_TLS_MODE=starttls ;;
+    *) SMTP_TLS_MODE=none ;;
+  esac
+fi
+
+case "$SMTP_TLS_MODE" in
+  none|starttls|tls) ;;
+  *)
+    echo "SMTP_TLS_MODE must be none, starttls, or tls" >&2
+    exit 1
+    ;;
+esac
 
 # --- Required names (values are never echoed) --------------------------------
 # SERVICE_TOKEN      service-to-service auth (gateway, api, identity, workspace)
@@ -48,6 +62,7 @@ required=(
   APP_BASE_URL
   SMTP_ADDR
   SMTP_HOST
+  SMTP_TLS_MODE
   SMTP_FROM
 )
 missing=0
@@ -78,6 +93,10 @@ esac
 
 # --- Secure environments: no development mail path ---------------------------
 if [ "$ENV_NAME" = "production" ] || [ "$ENV_NAME" = "staging" ]; then
+  if [ "$SMTP_TLS_MODE" = "none" ]; then
+    echo "SMTP_TLS_MODE must be starttls or tls in APP_ENV=$ENV_NAME" >&2
+    exit 1
+  fi
   case "${MAIL_PROVIDER:-auto}" in
     log)
       echo "MAIL_PROVIDER=log is not allowed in APP_ENV=$ENV_NAME: it prints messages instead of delivering them" >&2

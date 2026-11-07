@@ -12,7 +12,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { PageHeader } from "@/components/page-header";
 import { CheckCircle2, XCircle } from "lucide-react";
 
-type VerifyState = "loading" | "success" | "error";
+type VerifyState = "loading" | "success" | "error" | "pending";
 
 // The runtime may mount this page more than once per navigation, and each mount
 // would otherwise POST the same one-time token again: the second attempt fails
@@ -32,10 +32,20 @@ export default function VerifyEmailPage() {
   const succeeded = useRef(false);
 
   useEffect(() => {
-    const token = new URLSearchParams(window.location.search).get("token");
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
     if (!token) {
-      setState("error");
-      setMessage("This verification link is missing a token.");
+      setEmail(params.get("email") ?? "");
+      if (params.get("delivery") === "failed") {
+        setState("error");
+        setMessage("Your account was created, but the verification email could not be delivered. Check your address and request a new link.");
+      } else if (params.get("delivery") === "retrying") {
+        setState("pending");
+        setMessage("The mail relay is temporarily unavailable and delivery is retrying. Request another link if this one does not arrive.");
+      } else {
+        setState("pending");
+        setMessage("Check your inbox for a verification link. If it does not arrive, you can request another one below.");
+      }
       return;
     }
 
@@ -88,7 +98,7 @@ export default function VerifyEmailPage() {
       setResendState("sent");
       toast({
         title: "Check your inbox",
-        description: "If that address needs verification, a new link is on its way.",
+        description: "If that address needs verification, a new link will be sent. Try again if it does not arrive shortly.",
       });
     } catch (err: any) {
       setResendState("idle");
@@ -109,7 +119,15 @@ export default function VerifyEmailPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <PageHeader
-            title={state === "loading" ? "Verifying…" : state === "success" ? "Verified" : "Verification failed"}
+            title={
+              state === "loading"
+                ? "Verifying…"
+                : state === "success"
+                  ? "Verified"
+                  : state === "pending"
+                    ? "Check your inbox"
+                    : "Verification failed"
+            }
             description={state === "loading" ? "Checking your verification link." : message}
           />
           {state === "success" && (
@@ -117,11 +135,13 @@ export default function VerifyEmailPage() {
               <CheckCircle2 className="h-10 w-10 text-emerald-600" aria-hidden />
             </div>
           )}
-          {state === "error" && (
+          {(state === "error" || state === "pending") && (
             <>
-              <div className="flex items-center justify-center rounded-lg bg-rose-50 p-6">
-                <XCircle className="h-10 w-10 text-rose-600" aria-hidden />
-              </div>
+              {state === "error" && (
+                <div className="flex items-center justify-center rounded-lg bg-rose-50 p-6">
+                  <XCircle className="h-10 w-10 text-rose-600" aria-hidden />
+                </div>
+              )}
               <form onSubmit={resend} className="space-y-3">
                 <Field>
                   <FieldLabel>Email address</FieldLabel>
@@ -139,8 +159,8 @@ export default function VerifyEmailPage() {
                   {resendState === "sending"
                     ? "Sending…"
                     : resendState === "sent"
-                      ? "Link sent"
-                      : "Send a new verification link"}
+                      ? "Email requested"
+                      : "Resend verification email"}
                 </Button>
               </form>
             </>

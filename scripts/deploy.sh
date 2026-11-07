@@ -353,6 +353,11 @@ smoke_tests() {
     [ "$status" = "200" ] || fail "gateway $endpoint smoke test expected 200, got $status"
     log "  ok  gateway-$endpoint (200)"
   done
+  if [ -n "${DEPLOY_SMOKE_MAIL_TO:-}" ]; then
+    log "Running optional verification-email smoke test..."
+    IDENTITY_SMOKE_URL="${IDENTITY_SMOKE_URL:-http://127.0.0.1:8082}" \
+      "$ROOT/scripts/smoke-mail.sh" "$DEPLOY_SMOKE_MAIL_TO"
+  fi
   log "All smoke tests passed"
 }
 

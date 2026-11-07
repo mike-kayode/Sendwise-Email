@@ -62,6 +62,12 @@ func (rl *RateLimiter) allow(key string) bool {
 	return v.lim.Allow()
 }
 
+// Allow reports whether a request for the given key is within this limiter's
+// token-bucket allowance.
+func (rl *RateLimiter) Allow(key string) bool {
+	return rl.allow(key)
+}
+
 func (rl *RateLimiter) gc(now time.Time) {
 	for key, v := range rl.visitors {
 		if now.Sub(v.lastSeen) > rl.ttl {

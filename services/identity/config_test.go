@@ -45,6 +45,9 @@ func TestLoadConfigValid(t *testing.T) {
 	if cfg.CookieSecure {
 		t.Error("CookieSecure = true in test environment without COOKIE_SECURE")
 	}
+	if cfg.SMTPTLSMode != "none" {
+		t.Errorf("SMTPTLSMode = %q, want none in test environment", cfg.SMTPTLSMode)
+	}
 }
 
 func TestLoadConfigAlwaysSecuresCookiesInProduction(t *testing.T) {
@@ -58,6 +61,7 @@ func TestLoadConfigAlwaysSecuresCookiesInProduction(t *testing.T) {
 	t.Setenv("SMTP_USERNAME", "mailer")
 	t.Setenv("SMTP_PASSWORD", "smtp-secret")
 	t.Setenv("SMTP_FROM", "hello@example.test")
+	t.Setenv("SMTP_TLS_MODE", "starttls")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -65,6 +69,37 @@ func TestLoadConfigAlwaysSecuresCookiesInProduction(t *testing.T) {
 	}
 	if !cfg.CookieSecure {
 		t.Error("CookieSecure = false in production")
+	}
+	if cfg.SMTPTLSMode != "starttls" {
+		t.Errorf("SMTPTLSMode = %q, want starttls", cfg.SMTPTLSMode)
+	}
+}
+
+func TestLoadConfigValidatesSMTPTLSMode(t *testing.T) {
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("SERVICE_TOKEN", "test-service-token")
+	t.Setenv("SMTP_TLS_MODE", "opportunistic")
+
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SMTP_TLS_MODE") {
+		t.Fatalf("LoadConfig() error = %v, want invalid SMTP_TLS_MODE failure", err)
+	}
+}
+
+func TestLoadProductionSMTPRequiresTLS(t *testing.T) {
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("SERVICE_TOKEN", "test-service-token")
+	t.Setenv("MAIL_PROVIDER", "smtp")
+	t.Setenv("SMTP_ADDR", "smtp.example.test:587")
+	t.Setenv("SMTP_HOST", "smtp.example.test")
+	t.Setenv("SMTP_USERNAME", "mailer")
+	t.Setenv("SMTP_PASSWORD", "smtp-secret")
+	t.Setenv("SMTP_FROM", "hello@example.test")
+	t.Setenv("SMTP_TLS_MODE", "none")
+
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SMTP_TLS_MODE") {
+		t.Fatalf("LoadConfig() error = %v, want production SMTP TLS failure", err)
 	}
 }
 

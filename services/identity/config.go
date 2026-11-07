@@ -29,6 +29,7 @@ type Config struct {
 	SMTPUsername    string
 	SMTPPassword    string
 	SMTPFrom        string
+	SMTPTLSMode     string
 	ResendAPIKey    string
 	ResendFromEmail string
 	ResendFromName  string
@@ -56,6 +57,7 @@ func LoadConfig() (Config, error) {
 		SMTPUsername:    kit.Getenv("SMTP_USERNAME", ""),
 		SMTPPassword:    kit.Getenv("SMTP_PASSWORD", ""),
 		SMTPFrom:        kit.Getenv("SMTP_FROM", ""),
+		SMTPTLSMode:     strings.ToLower(strings.TrimSpace(kit.Getenv("SMTP_TLS_MODE", defaultSMTPTLSMode(base.Env)))),
 		ResendAPIKey:    kit.Getenv("RESEND_API_KEY", ""),
 		ResendFromEmail: kit.Getenv("RESEND_FROM_EMAIL", ""),
 		ResendFromName:  kit.Getenv("RESEND_FROM_NAME", "Sendwise"),
@@ -72,6 +74,11 @@ func LoadConfig() (Config, error) {
 	default:
 		return Config{}, fmt.Errorf("MAIL_PROVIDER must be auto, resend, smtp, or log")
 	}
+	switch cfg.SMTPTLSMode {
+	case "none", "starttls", "tls":
+	default:
+		return Config{}, fmt.Errorf("SMTP_TLS_MODE must be none, starttls, or tls")
+	}
 	if base.Env == "production" {
 		provider := cfg.MailProvider
 		if provider == "auto" {
@@ -83,10 +90,14 @@ func LoadConfig() (Config, error) {
 		}
 		switch provider {
 		case "smtp":
+			if cfg.SMTPTLSMode == "none" {
+				return Config{}, fmt.Errorf("SMTP_TLS_MODE must be starttls or tls for production SMTP mail")
+			}
 			if cfg.SMTPAddr == "" || cfg.SMTPHost == "" || cfg.SMTPUsername == "" ||
 				cfg.SMTPPassword == "" || cfg.SMTPFrom == "" {
 				return Config{}, fmt.Errorf("SMTP_ADDR, SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM are required for production SMTP mail")
 			}
+
 		case "resend":
 			if cfg.ResendAPIKey == "" || cfg.ResendFromEmail == "" {
 				return Config{}, fmt.Errorf("RESEND_API_KEY and RESEND_FROM_EMAIL are required for production Resend mail")
@@ -102,4 +113,11 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func defaultSMTPTLSMode(env string) string {
+	if env == "production" || env == "staging" {
+		return "starttls"
+	}
+	return "none"
 }

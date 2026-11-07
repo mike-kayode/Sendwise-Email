@@ -181,12 +181,11 @@ Each required P2 path below has a Postgres or browser proof:
    proves rotation, Secure/HttpOnly/SameSite=Lax cookie attributes, and family
    revocation on reuse. The browser test below asserts simultaneous protected
    requests share one refresh and do not loop.
-4. **Transactional email — Done for the configured SMTP/Mailpit path.**
+4. **Transactional email — Partly done; real Stalwart delivery is not done.**
    Registration verification, password reset, and workspace invitation mail
-   all arrived through Mailpit in the browser test. The Mailpit service was
-   already present in both Compose files. Production SMTP and Resend variables
-   and validation are documented in `.env.example`. Live Resend delivery was
-   not exercised because no external Resend account was provided.
+   arrived through Mailpit in the browser test. This proves local SMTP handoff
+   only, not Stalwart or external delivery. Live Resend delivery was not
+   exercised because no external Resend account was provided.
 5. **Rate limits — Done.** `TestGatewayAuthRateLimit` asserts `Retry-After: 60`;
    `TestGatewayNormalAuthPageLoadStaysUnderRateLimit` makes ten `/auth/me`
    requests under the configured 60/minute limit.
@@ -985,3 +984,85 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
 2. Run `scripts/check-env.sh`.
 3. `scripts/deploy.sh` (backup, build, migrate, up, smoke).
 4. Rollback: `scripts/deploy.sh rollback --yes` (destructive, restores DB backup).
+
+## Transactional email and local Stalwart (Not done)
+
+Implemented: SMTP `none`/STARTTLS/implicit-TLS modes, PLAIN and LOGIN auth,
+credential redaction, SMTP readiness probing, up to five delivery attempts
+with backoff, email/IP resend limits, actionable verification-pending UI, a local-only
+Stalwart provisioning script, and an opt-in deploy smoke hook. The retry queue
+is process-local and is lost if Identity restarts.
+
+Local checks:
+
+```
+$ go test ./services/identity -run 'TestSMTPMailerSupportsPlainAndLogin|TestSMTPProbeAuthenticatesWithoutSending|TestSMTPMailerUsesRequiredSTARTTLS|TestSMTPAuthErrorIncludesCodeAndResponse|TestRegisterQueuesVerificationRetryWhenDeliveryFails|TestRegisterRetriesVerificationDelivery|TestMailRetriesStopAfterFiveAttempts|TestResendVerificationRateLimitsByEmail|TestReadyFailsWhenSMTPProbeFails|TestInternalInvitationEmailUsesConfiguredMailer' -count=1 -v
+=== RUN   TestRegisterQueuesVerificationRetryWhenDeliveryFails
+--- PASS: TestRegisterQueuesVerificationRetryWhenDeliveryFails (0.08s)
+=== RUN   TestRegisterRetriesVerificationDelivery
+--- PASS: TestRegisterRetriesVerificationDelivery (0.06s)
+=== RUN   TestMailRetriesStopAfterFiveAttempts
+--- PASS: TestMailRetriesStopAfterFiveAttempts (0.04s)
+=== RUN   TestResendVerificationRateLimitsByEmail
+--- PASS: TestResendVerificationRateLimitsByEmail (0.03s)
+=== RUN   TestReadyFailsWhenSMTPProbeFails
+--- PASS: TestReadyFailsWhenSMTPProbeFails (0.06s)
+=== RUN   TestInternalInvitationEmailUsesConfiguredMailer
+--- PASS: TestInternalInvitationEmailUsesConfiguredMailer (0.03s)
+=== RUN   TestSMTPMailerSupportsPlainAndLogin
+=== RUN   TestSMTPMailerSupportsPlainAndLogin/PLAIN
+=== RUN   TestSMTPMailerSupportsPlainAndLogin/LOGIN
+--- PASS: TestSMTPMailerSupportsPlainAndLogin (0.00s)
+    --- PASS: TestSMTPMailerSupportsPlainAndLogin/PLAIN
+    --- PASS: TestSMTPMailerSupportsPlainAndLogin/LOGIN
+=== RUN   TestSMTPProbeAuthenticatesWithoutSending
+--- PASS: TestSMTPProbeAuthenticatesWithoutSending (0.00s)
+=== RUN   TestSMTPMailerUsesRequiredSTARTTLS
+--- PASS: TestSMTPMailerUsesRequiredSTARTTLS (0.00s)
+=== RUN   TestSMTPAuthErrorIncludesCodeAndResponse
+--- PASS: TestSMTPAuthErrorIncludesCodeAndResponse (0.00s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity 2.116s
+```
+
+```
+$ E2E_BASE_URL=http://localhost:3000 E2E_API_ORIGIN=http://localhost:8084 MAILPIT_API_URL=http://localhost:8025 npm run test:e2e -- --grep 'P2 account email|queued verification'
+> @email-platform/web@0.1.0 test:e2e
+> playwright test --grep P2 account email|queued verification
+
+Running 2 tests using 1 worker
+
+  ✓  1 [chromium] › e2e/p2-auth.spec.ts:49:1 › P2 account email, password reset, and logout journey (4.1s)
+  ✓  2 [chromium] › e2e/verification-pending.spec.ts:3:1 › queued verification delivery offers a resend action (439ms)
+
+  2 passed (5.4s)
+```
+
+```
+$ recipient="sendwise-smoke-1794062118-32264@example.test"; ./scripts/smoke-mail.sh "$recipient"
+SMTP smoke passed: the configured relay accepted a verification email for sendwise-smoke-1794062118-32264@example.test.
+This confirms SMTP handoff only; it does not prove inbox delivery.
+$ curl -fsS --get --data-urlencode "query=to:$recipient" http://127.0.0.1:8025/api/v1/search | jq --arg recipient "$recipient" '{recipient:$recipient, received:[.messages[]? | select(any(.To[]?; .Address == $recipient))] | length}'
+{
+  "recipient": "sendwise-smoke-1794062118-32264@example.test",
+  "received": 1
+}
+```
+
+`TEST_DATABASE_URL=postgres://email:email@localhost:5432/email?sslmode=disable go test ./... -count=1` passed every package against local Postgres; no tests reported a skip. `go vet ./...`, `gofmt -l cmd internal services shared`, `git diff --check`, and shell syntax checks exited 0. Web `typecheck`, `lint`, unit tests (10 passed, 0 failed, 0 skipped), and production build exited 0.
+
+**Not done / proof gate outstanding:**
+
+- The real Stalwart container is present but remains in first-run mode. The local
+  STARTTLS probe returned `didn't find starttls in server response`; the
+  provisioning script could not run because `stalwart-cli` is not installed.
+- No integration test provisioned Stalwart, sent a verification email through
+  it, and read the message from Stalwart. The successful smoke and browser
+  outputs above are Mailpit-only and are not evidence of Stalwart or external
+  delivery.
+- The relay-down/recovery Playwright test is not complete. The pending-page spec
+  mocks registration/resend responses; it does not stop and restart a real SMTP
+  relay. The retry queue has unit coverage, not an end-to-end relay-recovery
+  proof.
+- The deploy-time `DEPLOY_SMOKE_MAIL_TO` hook was not run. Its standalone local
+  run was against Mailpit only.

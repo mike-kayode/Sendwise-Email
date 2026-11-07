@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/mail"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +26,8 @@ const (
 	refreshCookieName    = "sendwise_refresh"
 )
 
+var ErrMailRetryQueued = errors.New("email delivery failed; retry queued")
+
 // Handler serves the public Identity HTTP contract consumed through the gateway.
 type Handler struct {
 	store     Store
@@ -34,10 +37,35 @@ type Handler struct {
 	cfg       Config
 	logger    *slog.Logger
 
-	authLimiter *kit.RateLimiter
-	dummyHash   string
+	authLimiter        *kit.RateLimiter
+	dummyHash          string
+	resendEmailLimiter *kit.RateLimiter
+	mailRetries        chan mailRetryJob
 	// retryDelay between membership lookup attempts (overridden in tests).
-	retryDelay time.Duration
+	retryDelay     time.Duration
+	mailRetryDelay time.Duration
+}
+
+type mailRetryJob struct {
+	action   string
+	message  MailMessage
+	attempts int
+}
+
+func mailRecipientDomain(address string) string {
+	_, domain, ok := strings.Cut(strings.TrimSpace(address), "@")
+	if !ok || domain == "" {
+		return "unknown"
+	}
+	return strings.ToLower(domain)
+}
+
+func (h *Handler) logMailFailure(action, recipient string, err error) {
+	h.logger.Error(action,
+		"provider", h.mailer.Provider(),
+		"recipient_domain", mailRecipientDomain(recipient),
+		"error", err,
+	)
 }
 
 // NewHandler wires the Identity HTTP handler.
@@ -54,16 +82,86 @@ func NewHandler(store Store, tokens *kit.Manager, workspace WorkspaceClient, mai
 		panic(fmt.Sprintf("identity: compute dummy password hash: %v", err))
 	}
 	return &Handler{
-		store:       store,
-		tokens:      tokens.WithSessionStore(localSessionStore{store: store}),
-		workspace:   workspace,
-		mailer:      mailer,
-		cfg:         cfg,
-		logger:      logger,
-		authLimiter: kit.NewRateLimiter(30, 10),
-		dummyHash:   dummyHash,
-		retryDelay:  250 * time.Millisecond,
+		store:              store,
+		tokens:             tokens.WithSessionStore(localSessionStore{store: store}),
+		workspace:          workspace,
+		mailer:             mailer,
+		cfg:                cfg,
+		logger:             logger,
+		authLimiter:        kit.NewRateLimiter(30, 10),
+		dummyHash:          dummyHash,
+		resendEmailLimiter: kit.NewRateLimiter(5, 2),
+		mailRetries:        make(chan mailRetryJob, 128),
+		retryDelay:         250 * time.Millisecond,
+		mailRetryDelay:     time.Second,
 	}
+}
+
+// RunMailRetries retries messages whose first synchronous delivery attempt
+// failed. The queue is process-local; persistent delivery is tracked separately
+// as a deployment limitation until a durable mail outbox is configured.
+func (h *Handler) RunMailRetries(ctx context.Context) {
+	const workers = 4
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case job := <-h.mailRetries:
+					h.retryMail(ctx, job)
+				}
+			}
+		}()
+	}
+	<-ctx.Done()
+	wg.Wait()
+}
+
+func (h *Handler) retryMail(ctx context.Context, job mailRetryJob) {
+	for attempt := job.attempts + 1; attempt <= 5; attempt++ {
+		delay := h.mailRetryDelay * time.Duration(1<<(attempt-2))
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := h.mailer.Send(sendCtx, job.message)
+		cancel()
+		if err == nil {
+			h.logger.Info("transactional email retry succeeded",
+				"action", job.action,
+				"recipient_domain", mailRecipientDomain(job.message.To),
+				"attempt", attempt,
+			)
+			return
+		}
+		h.logger.Error("transactional email retry failed",
+			"action", job.action,
+			"recipient_domain", mailRecipientDomain(job.message.To),
+			"attempt", attempt,
+			"error", err,
+		)
+	}
+}
+
+func (h *Handler) deliverMail(ctx context.Context, action string, message MailMessage) error {
+	if err := h.mailer.Send(ctx, message); err != nil {
+		h.logMailFailure(action, message.To, err)
+		select {
+		case h.mailRetries <- mailRetryJob{action: action, message: message, attempts: 1}:
+			return fmt.Errorf("%w: %v", ErrMailRetryQueued, err)
+		default:
+			return fmt.Errorf("send email and enqueue retry: %w", err)
+		}
+	}
+	return nil
 }
 
 type localSessionStore struct {
@@ -169,8 +267,8 @@ func (h *Handler) sendInvitationEmail(w http.ResponseWriter, r *http.Request) {
 		HTML:    "<p>You have been invited to join <strong>" + organization + "</strong> as " + role + ".</p><p><a href=\"" + link + "\">Accept invitation</a></p>",
 		Text:    "You have been invited to join " + request.OrganizationName + " as " + request.Role + ".\n\nAccept the invitation: " + request.AcceptURL,
 	}
-	if err := h.mailer.Send(r.Context(), message); err != nil {
-		h.logger.Error("send invitation email", "email", request.Email, "error", err)
+	if err := h.deliverMail(r.Context(), "send invitation email", message); err != nil && !errors.Is(err, ErrMailRetryQueued) {
+		h.logger.Error("enqueue invitation email retry", "recipient_domain", mailRecipientDomain(request.Email), "error", err)
 		kit.Error(w, http.StatusBadGateway, "email_delivery_failed", "The invitation email could not be delivered.")
 		return
 	}
@@ -178,11 +276,23 @@ func (h *Handler) sendInvitationEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ready(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if err := h.store.Ping(ctx); err != nil {
 		kit.Error(w, http.StatusServiceUnavailable, "not_ready", "Identity database is not reachable.")
 		return
+	}
+	if h.mailer.Provider() == "smtp" {
+		probe, ok := h.mailer.(interface{ Probe(context.Context) error })
+		if !ok {
+			kit.Error(w, http.StatusServiceUnavailable, "smtp_probe_unavailable", "Identity SMTP health check is not configured.")
+			return
+		}
+		if err := probe.Probe(ctx); err != nil {
+			h.logger.Error("SMTP readiness probe failed", "error", err)
+			kit.Error(w, http.StatusServiceUnavailable, "smtp_unavailable", "The configured SMTP relay is not ready. Check SMTP address, TLS mode, username, and password.")
+			return
+		}
 	}
 	kit.JSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
@@ -438,8 +548,16 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 
 	h.audit(r, &user.ID, "register", map[string]any{"organization_name": req.OrganizationName})
 	if err := h.sendVerificationEmail(r, user); err != nil {
-		h.logger.Error("send verification email", "error", err, "provider", h.mailer.Provider())
-		kit.Error(w, http.StatusServiceUnavailable, "verification_email_unavailable", "Your account was created, but the verification email could not be sent. Request a new link before signing in.")
+		if errors.Is(err, ErrMailRetryQueued) {
+			kit.JSON(w, http.StatusCreated, map[string]string{
+				"message":         "Account created. Verification email delivery is retrying; request another link if it does not arrive.",
+				"email":           user.Email,
+				"delivery_status": "retry_queued",
+			})
+			return
+		}
+		h.logger.Error("prepare verification email", "recipient_domain", mailRecipientDomain(user.Email), "error", err)
+		kit.Error(w, http.StatusServiceUnavailable, "verification_email_unavailable", "Your account was created, but the verification email could not be delivered. Check your email address and SMTP configuration, then request a new link.")
 		return
 	}
 
@@ -468,10 +586,7 @@ func (h *Handler) sendVerificationEmail(r *http.Request, user *User) error {
 		Text: "Hi " + user.Name + ",\n\nVerify your email address by opening this link:\n\n" + link +
 			"\n\nIf you did not create an account, you can ignore this message.\n",
 	}
-	if err := h.mailer.Send(ctx, msg); err != nil {
-		return fmt.Errorf("send verification email: %w", err)
-	}
-	return nil
+	return h.deliverMail(ctx, "send verification email", msg)
 }
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
@@ -791,15 +906,20 @@ func (h *Handler) resendVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := normalizeEmail(req.Email)
+	if !h.resendEmailLimiter.Allow(email) {
+		w.Header().Set("Retry-After", "60")
+		kit.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many verification requests for this address. Please wait before trying again.")
+		return
+	}
 	user, err := h.store.GetUserByEmail(r.Context(), email)
 	if err == nil && user.EmailVerifiedAt == nil {
 		if err := h.sendVerificationEmail(r, user); err != nil {
-			h.logger.Error("resend verification email", "error", err, "provider", h.mailer.Provider())
+			h.logMailFailure("resend verification email", user.Email, err)
 		}
 	}
 	// Always the same response: do not reveal whether the address exists.
 	kit.JSON(w, http.StatusOK, map[string]string{
-		"message": "If that address needs verification, a new link has been sent.",
+		"message": "If that address needs verification, a new link will be sent. If it does not arrive shortly, try again.",
 	})
 }
 
@@ -830,8 +950,8 @@ func (h *Handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
 				}
 				sendCtx, sendCancel := context.WithTimeout(ctx, 10*time.Second)
 				defer sendCancel()
-				if sendErr := h.mailer.Send(sendCtx, msg); sendErr != nil {
-					h.logger.Error("send reset email", "error", sendErr, "provider", h.mailer.Provider())
+				if sendErr := h.deliverMail(sendCtx, "send reset email", msg); sendErr != nil && !errors.Is(sendErr, ErrMailRetryQueued) {
+					h.logger.Error("enqueue reset email retry", "recipient_domain", mailRecipientDomain(user.Email), "error", sendErr)
 				}
 			}
 		}
@@ -841,7 +961,7 @@ func (h *Handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
 
 	h.audit(r, nil, "forgot_password", map[string]any{"email": email})
 	kit.JSON(w, http.StatusOK, map[string]string{
-		"message": "If that address has an account, a reset link has been sent.",
+		"message": "If that address has an account, a reset link will be sent. If it does not arrive shortly, try again.",
 	})
 }
 

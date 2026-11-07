@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/smtp"
+	"net/textproto"
 	"strings"
 	"time"
 )
@@ -54,7 +57,10 @@ func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 		}
 		return &resendMailer{apiKey: cfg.ResendAPIKey, fromEmail: cfg.ResendFromEmail, fromName: cfg.ResendFromName, client: &http.Client{Timeout: 10 * time.Second}}
 	case "smtp":
-		return &smtpMailer{addr: cfg.SMTPAddr, host: cfg.SMTPHost, username: cfg.SMTPUsername, password: cfg.SMTPPassword, from: cfg.SMTPFrom}
+		return &smtpMailer{
+			addr: cfg.SMTPAddr, host: cfg.SMTPHost, username: cfg.SMTPUsername,
+			password: cfg.SMTPPassword, from: cfg.SMTPFrom, tlsMode: cfg.SMTPTLSMode,
+		}
 	default:
 		logger.Warn("mail provider is log: messages are printed, not delivered")
 		return NewLogMailer(logger)
@@ -166,68 +172,243 @@ func (m *resendMailer) Send(ctx context.Context, message MailMessage) error {
 }
 
 type smtpMailer struct {
-	addr     string
-	host     string
-	username string
-	password string
-	from     string
+	addr      string
+	host      string
+	username  string
+	password  string
+	from      string
+	tlsMode   string
+	tlsConfig *tls.Config
 }
 
 func (m *smtpMailer) Provider() string { return "smtp" }
+
+type smtpDeliveryError struct {
+	phase    string
+	code     int
+	response string
+}
+
+func (e *smtpDeliveryError) Error() string {
+	return fmt.Sprintf("SMTP %s failed with code %d: %s", e.phase, e.code, e.response)
+}
+
+type smtpMechanismAuth struct {
+	mechanism string
+	username  string
+	password  string
+	step      int
+}
+
+func (a *smtpMechanismAuth) Start(*smtp.ServerInfo) (string, []byte, error) {
+	if a.mechanism == "PLAIN" {
+		return "PLAIN", []byte("\x00" + a.username + "\x00" + a.password), nil
+	}
+	return "LOGIN", nil, nil
+}
+
+func (a *smtpMechanismAuth) Next(_ []byte, more bool) ([]byte, error) {
+	if !more {
+		return nil, nil
+	}
+	if a.mechanism != "LOGIN" {
+		return nil, fmt.Errorf("unexpected SMTP authentication challenge")
+	}
+	a.step++
+	switch a.step {
+	case 1:
+		return []byte(a.username), nil
+	case 2:
+		return []byte(a.password), nil
+	default:
+		return nil, fmt.Errorf("too many SMTP authentication challenges")
+	}
+}
+
+func smtpCommandFailure(phase string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var response *textproto.Error
+	if errors.As(err, &response) {
+		return &smtpDeliveryError{phase: phase, code: response.Code, response: response.Msg}
+	}
+	return fmt.Errorf("smtp %s: %w", phase, err)
+}
+
+func (m *smtpMailer) connect(ctx context.Context) (*smtp.Client, func(), error) {
+	host := m.host
+	if host == "" {
+		host, _, _ = net.SplitHostPort(m.addr)
+	}
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	mode := m.tlsMode
+	if mode == "" {
+		mode = "none"
+	}
+
+	conn, err := dialer.DialContext(ctx, "tcp", m.addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("smtp dial: %w", err)
+	}
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	cleanup := func() {
+		stopCancel()
+		_ = conn.Close()
+	}
+	if mode == "tls" {
+		tlsConn := tls.Client(conn, m.tlsConfiguration(host))
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("smtp TLS handshake: %w", err)
+		}
+		conn = tlsConn
+	}
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("smtp greeting: %w", err)
+	}
+
+	if mode == "starttls" {
+		if ok, _ := client.Extension("STARTTLS"); !ok {
+			_ = client.Close()
+			cleanup()
+			return nil, nil, fmt.Errorf("smtp STARTTLS is required but the server does not advertise it")
+		}
+		if err := client.StartTLS(m.tlsConfiguration(host)); err != nil {
+			_ = client.Close()
+			cleanup()
+			return nil, nil, smtpCommandFailure("STARTTLS", err)
+		}
+	} else if mode != "none" && mode != "tls" {
+		_ = client.Close()
+		cleanup()
+		return nil, nil, fmt.Errorf("unsupported SMTP_TLS_MODE %q", mode)
+	}
+	return client, func() {
+		_ = client.Close()
+		cleanup()
+	}, nil
+}
+
+func (m *smtpMailer) tlsConfiguration(host string) *tls.Config {
+	config := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+	if m.tlsConfig != nil {
+		config = m.tlsConfig.Clone()
+		if config.ServerName == "" {
+			config.ServerName = host
+		}
+		if config.MinVersion == 0 {
+			config.MinVersion = tls.VersionTLS12
+		}
+	}
+	return config
+}
+
+func (m *smtpMailer) authenticate(client *smtp.Client) error {
+	if m.username == "" {
+		return nil
+	}
+	mode := m.tlsMode
+	if mode == "" {
+		mode = "none"
+	}
+	host := m.host
+	if host == "" {
+		host, _, _ = net.SplitHostPort(m.addr)
+	}
+	if mode == "none" && !isLoopbackSMTPHost(host) {
+		return fmt.Errorf("SMTP authentication requires TLS when connecting to a non-loopback host")
+	}
+	ok, mechanisms := client.Extension("AUTH")
+	if !ok {
+		return fmt.Errorf("SMTP server does not advertise AUTH")
+	}
+	supported := make(map[string]bool)
+	for _, mechanism := range strings.Fields(mechanisms) {
+		supported[strings.ToUpper(mechanism)] = true
+	}
+	for _, mechanism := range []string{"PLAIN", "LOGIN"} {
+		if supported[mechanism] {
+			auth := &smtpMechanismAuth{
+				mechanism: mechanism,
+				username:  m.username,
+				password:  m.password,
+			}
+			if err := client.Auth(auth); err != nil {
+				return redactSMTPSecret(smtpCommandFailure("AUTH "+mechanism, err), m.username, m.password)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("SMTP server advertises no supported AUTH mechanism (PLAIN or LOGIN)")
+}
+
+func redactSMTPSecret(err error, username, password string) error {
+	if err == nil || password == "" {
+		return err
+	}
+	message := err.Error()
+	for _, secret := range []string{
+		password,
+		base64.StdEncoding.EncodeToString([]byte(password)),
+		base64.RawStdEncoding.EncodeToString([]byte(password)),
+		base64.StdEncoding.EncodeToString([]byte("\x00" + username + "\x00" + password)),
+	} {
+		message = strings.ReplaceAll(message, secret, "[redacted]")
+	}
+	return errors.New(message)
+}
+
+func isLoopbackSMTPHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// Probe performs the same connection setup and authentication as delivery but
+// does not issue MAIL, RCPT, or DATA commands.
+func (m *smtpMailer) Probe(ctx context.Context) error {
+	client, closeClient, err := m.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
+	if err := m.authenticate(client); err != nil {
+		return err
+	}
+	return client.Quit()
+}
 
 func (m *smtpMailer) Send(ctx context.Context, message MailMessage) error {
 	if m.from == "" {
 		return fmt.Errorf("smtp from address is not configured")
 	}
 
-	dial := &net.Dialer{}
-	conn, err := dial.DialContext(ctx, "tcp", m.addr)
+	client, closeClient, err := m.connect(ctx)
 	if err != nil {
-		return fmt.Errorf("smtp dial: %w", err)
+		return err
 	}
-	defer conn.Close()
-
-	client, err := smtp.NewClient(conn, m.host)
-	if err != nil {
-		return fmt.Errorf("smtp new client: %w", err)
-	}
-	defer client.Close()
-
-	// Upgrade to TLS if the server supports STARTTLS (required for port 587 submission).
-	if ok, _ := client.Extension("STARTTLS"); ok {
-		config := &tls.Config{
-			ServerName: m.host,
-		}
-		if config.ServerName == "" {
-			config.ServerName = strings.SplitN(m.addr, ":", 2)[0]
-		}
-		if err := client.StartTLS(config); err != nil {
-			return fmt.Errorf("smtp starttls: %w", err)
-		}
-	}
-
-	var auth smtp.Auth
-	if m.username != "" {
-		host := m.host
-		if host == "" {
-			host = strings.SplitN(m.addr, ":", 2)[0]
-		}
-		auth = smtp.PlainAuth("", m.username, m.password, host)
-		if err := client.Auth(auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
-		}
+	defer closeClient()
+	if err := m.authenticate(client); err != nil {
+		return err
 	}
 
 	if err := client.Mail(m.from); err != nil {
-		return fmt.Errorf("smtp mail from: %w", err)
+		return smtpCommandFailure("MAIL FROM", err)
 	}
 	if err := client.Rcpt(message.To); err != nil {
-		return fmt.Errorf("smtp rcpt to: %w", err)
+		return smtpCommandFailure("RCPT TO", err)
 	}
 
 	w, err := client.Data()
 	if err != nil {
-		return fmt.Errorf("smtp data: %w", err)
+		return smtpCommandFailure("DATA", err)
 	}
 
 	headers := []string{
@@ -243,8 +424,8 @@ func (m *smtpMailer) Send(ctx context.Context, message MailMessage) error {
 		return fmt.Errorf("smtp write body: %w", err)
 	}
 	if err := w.Close(); err != nil {
-		return fmt.Errorf("smtp close data: %w", err)
+		return smtpCommandFailure("DATA", err)
 	}
 
-	return client.Quit()
+	return smtpCommandFailure("QUIT", client.Quit())
 }

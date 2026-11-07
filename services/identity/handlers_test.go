@@ -36,6 +36,28 @@ func (m failingMailer) Send(context.Context, MailMessage) error {
 	return m.err
 }
 
+type retryMailer struct {
+	mu        sync.Mutex
+	failures  int
+	attempts  int
+	delivered chan struct{}
+}
+
+func (m *retryMailer) Provider() string { return "test" }
+func (m *retryMailer) Send(context.Context, MailMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.attempts++
+	if m.attempts <= m.failures {
+		return errors.New("relay unavailable")
+	}
+	select {
+	case m.delivered <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
 type registrationCall struct {
 	email            string
 	organizationName string
@@ -384,6 +406,7 @@ func newTestHandler(t *testing.T) (*Handler, *fakeStore, *fakeWorkspace, *LogMai
 	tokens := kit.NewManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL)
 	handler := NewHandler(store, tokens, workspace, mailer, cfg, kit.NewTestLogger())
 	handler.retryDelay = time.Millisecond
+	handler.mailRetryDelay = time.Millisecond
 	return handler, store, workspace, mailer
 }
 
@@ -487,7 +510,7 @@ func TestRegisterCreatesAccountAndSendsVerification(t *testing.T) {
 	}
 }
 
-func TestRegisterReportsVerificationDeliveryFailure(t *testing.T) {
+func TestRegisterQueuesVerificationRetryWhenDeliveryFails(t *testing.T) {
 	handler, store, _, _ := newTestHandler(t)
 	handler.mailer = failingMailer{err: errors.New("mail transport unavailable")}
 
@@ -497,14 +520,69 @@ func TestRegisterReportsVerificationDeliveryFailure(t *testing.T) {
 		"name": "Delivery Failure",
 		"organization_name": "Test Org"
 	}`)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503; body = %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 	}
-	if code, _ := errorOf(t, rec); code != "verification_email_unavailable" {
-		t.Fatalf("error code = %q", code)
+	if !strings.Contains(rec.Body.String(), `"delivery_status":"retry_queued"`) {
+		t.Fatalf("response does not report queued retry: %s", rec.Body.String())
 	}
 	if _, err := store.GetUserByEmail(context.Background(), "delivery@example.com"); err != nil {
 		t.Fatalf("account should remain available for resend: %v", err)
+	}
+}
+
+func TestRegisterRetriesVerificationDelivery(t *testing.T) {
+	handler, _, _, _ := newTestHandler(t)
+	mailer := &retryMailer{failures: 2, delivered: make(chan struct{}, 1)}
+	handler.mailer = mailer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		handler.RunMailRetries(ctx)
+		close(done)
+	}()
+
+	rec := doJSON(t, handler.Routes(), http.MethodPost, "/auth/register", `{
+		"email": "retry@example.com",
+		"password": "correct horse battery staple",
+		"name": "Retry User",
+		"organization_name": "Test Org"
+	}`)
+	if rec.Code != http.StatusCreated {
+		cancel()
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	select {
+	case <-mailer.delivered:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("verification delivery did not succeed after retries")
+	}
+	cancel()
+	<-done
+	mailer.mu.Lock()
+	defer mailer.mu.Unlock()
+	if mailer.attempts != 3 {
+		t.Fatalf("mailer attempts = %d, want 3 (initial plus two retries)", mailer.attempts)
+	}
+}
+
+func TestMailRetriesStopAfterFiveAttempts(t *testing.T) {
+	handler, _, _, _ := newTestHandler(t)
+	mailer := &retryMailer{failures: 10, delivered: make(chan struct{}, 1)}
+	handler.mailer = mailer
+	err := handler.deliverMail(context.Background(), "verification", MailMessage{
+		To: "retry-limit@example.com", Subject: "Verify", Text: "link",
+	})
+	if !errors.Is(err, ErrMailRetryQueued) {
+		t.Fatalf("deliverMail() error = %v, want queued retry", err)
+	}
+	handler.retryMail(context.Background(), <-handler.mailRetries)
+
+	mailer.mu.Lock()
+	defer mailer.mu.Unlock()
+	if mailer.attempts != 5 {
+		t.Fatalf("mailer attempts = %d, want five total attempts", mailer.attempts)
 	}
 }
 
@@ -859,6 +937,7 @@ func TestVerifyEmail(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("resend status = %d", rec.Code)
 	}
+
 	sent := mailer.Sent()
 	if len(sent) == 0 {
 		t.Fatal("expected verification mail")
@@ -884,6 +963,24 @@ func TestVerifyEmail(t *testing.T) {
 	}
 	if updated.EmailVerifiedAt == nil {
 		t.Fatal("email was not marked verified")
+	}
+}
+
+func TestResendVerificationRateLimitsByEmail(t *testing.T) {
+	handler, _, _, _ := newTestHandler(t)
+	for attempt := 1; attempt <= 3; attempt++ {
+		rec := doJSON(t, handler.Routes(), http.MethodPost, "/auth/resend-verification", `{"email":"limited@example.com"}`)
+		if attempt < 3 && rec.Code != http.StatusOK {
+			t.Fatalf("attempt %d status = %d, want 200", attempt, rec.Code)
+		}
+		if attempt == 3 {
+			if rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("attempt %d status = %d, want 429", attempt, rec.Code)
+			}
+			if rec.Header().Get("Retry-After") == "" {
+				t.Fatal("rate limited response has no Retry-After header")
+			}
+		}
 	}
 }
 
@@ -1013,6 +1110,29 @@ func TestHealthAndReady(t *testing.T) {
 	rec = doJSON(t, routes, http.MethodGet, "/readyz", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("readyz status = %d", rec.Code)
+	}
+}
+
+type smtpProbeMailer struct {
+	err error
+}
+
+func (m smtpProbeMailer) Provider() string { return "smtp" }
+func (m smtpProbeMailer) Send(context.Context, MailMessage) error {
+	return nil
+}
+func (m smtpProbeMailer) Probe(context.Context) error { return m.err }
+
+func TestReadyFailsWhenSMTPProbeFails(t *testing.T) {
+	handler, _, _, _ := newTestHandler(t)
+	handler.mailer = smtpProbeMailer{err: errors.New("SMTP AUTH returned 535")}
+
+	rec := doJSON(t, handler.Routes(), http.MethodGet, "/readyz", "")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", rec.Code, rec.Body.String())
+	}
+	if code, _ := errorOf(t, rec); code != "smtp_unavailable" {
+		t.Fatalf("error code = %q, want smtp_unavailable", code)
 	}
 }
 

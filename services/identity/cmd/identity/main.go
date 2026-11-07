@@ -63,6 +63,7 @@ func main() {
 	workspace := identity.NewHTTPWorkspaceClient(cfg.WorkspaceURL, cfg.ServiceToken)
 	mailer := identity.NewMailer(cfg, logger)
 	handler := identity.NewHandler(store, tokens, workspace, mailer, cfg, logger)
+	go handler.RunMailRetries(ctx)
 
 	logger.Info("identity service starting",
 		"address", cfg.HTTPAddr,

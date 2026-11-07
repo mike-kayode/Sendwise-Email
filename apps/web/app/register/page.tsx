@@ -38,16 +38,33 @@ export default function RegisterPage() {
 
   async function onSubmit(values: RegisterInput) {
     try {
-      await apiFetch<{ message: string; email: string }>("/auth/register", {
+      const response = await apiFetch<{
+        message: string;
+        email: string;
+        delivery_status?: string;
+      }>("/auth/register", {
         method: "POST",
         body: JSON.stringify(values),
       });
       toast({
         title: "Account created",
-        description: `A verification email has been sent to ${form.getValues("email")}. Please verify your email before signing in.`,
+        description:
+          response.delivery_status === "retry_queued"
+            ? "Email delivery is retrying. You can request another link if it does not arrive."
+            : `A verification email has been sent to ${form.getValues("email")}. Please verify your email before signing in.`,
       });
-      router.push("/login");
+      const delivery =
+        response.delivery_status === "retry_queued" ? "&delivery=retrying" : "";
+      router.push(
+        `/auth/verify?email=${encodeURIComponent(form.getValues("email"))}${delivery}`,
+      );
     } catch (err: any) {
+      if (err?.code === "verification_email_unavailable") {
+        router.push(
+          `/auth/verify?email=${encodeURIComponent(form.getValues("email"))}&delivery=failed`,
+        );
+        return;
+      }
       toast({
         title: "Registration failed",
         description: err?.message ?? "Could not create your workspace. Please try again.",
