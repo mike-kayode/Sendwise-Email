@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -21,6 +22,15 @@ func main() {
 }
 
 func run() error {
+	flags := flag.NewFlagSet("backfill", flag.ContinueOnError)
+	dryRun := flags.Bool("dry-run", false, "inspect email clashes and planned legacy user-reference updates without writing")
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+
 	identityURL := strings.TrimSpace(os.Getenv("IDENTITY_DATABASE_URL"))
 	workspaceURL := strings.TrimSpace(os.Getenv("WORKSPACE_DATABASE_URL"))
 	legacyURL := strings.TrimSpace(os.Getenv("LEGACY_DATABASE_URL"))
@@ -46,6 +56,10 @@ func run() error {
 		return fmt.Errorf("connect legacy database: %w", err)
 	}
 	defer legacy.Close()
+
+	if *dryRun {
+		return backfill.DryRun(ctx, identity, workspace, legacy, os.Stdout)
+	}
 
 	summary, err := backfill.Run(ctx, identity, workspace, legacy, logger)
 	if err != nil {

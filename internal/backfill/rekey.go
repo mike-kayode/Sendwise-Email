@@ -17,8 +17,10 @@ var identifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
 // referencedColumn is one foreign-key column that points at users(id).
 type referencedColumn struct {
-	table  string
-	column string
+	schema     string
+	table      string
+	column     string
+	foreignKey bool
 }
 
 // RekeyLegacyUser reconciles a lower(email) clash before a caller projects an
@@ -135,7 +137,8 @@ func rekeyLegacyUserRow(ctx context.Context, tx pgx.Tx, identityUserID, legacyUs
 		return err
 	}
 	for _, ref := range refs {
-		stmt := fmt.Sprintf("UPDATE %s SET %s = $1 WHERE %s = $2",
+		stmt := fmt.Sprintf("UPDATE %s.%s SET %s = $1 WHERE %s = $2",
+			pgx.Identifier{ref.schema}.Sanitize(),
 			pgx.Identifier{ref.table}.Sanitize(),
 			pgx.Identifier{ref.column}.Sanitize(),
 			pgx.Identifier{ref.column}.Sanitize(),
@@ -151,12 +154,13 @@ func rekeyLegacyUserRow(ctx context.Context, tx pgx.Tx, identityUserID, legacyUs
 	return nil
 }
 
-// userReferencingColumns lists every foreign-key column in the current schema
-// that references users(id), found through information_schema so newly added
-// tables are covered without touching this code.
+// userReferencingColumns lists declared foreign keys to users(id) and UUID
+// columns with conventional user-reference names that have no such foreign key.
+// The latter are moved as well so older tables without constraints do not keep
+// pointing at the removed legacy user ID.
 func userReferencingColumns(ctx context.Context, tx pgx.Tx) ([]referencedColumn, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT kcu.table_name, kcu.column_name
+		SELECT kcu.table_schema, kcu.table_name, kcu.column_name, true
 		FROM information_schema.table_constraints tc
 		JOIN information_schema.key_column_usage kcu
 		  ON  kcu.constraint_schema = tc.constraint_schema
@@ -170,7 +174,35 @@ func userReferencingColumns(ctx context.Context, tx pgx.Tx) ([]referencedColumn,
 		  AND tc.table_schema   = current_schema()
 		  AND ccu.table_schema  = current_schema()
 		  AND ccu.table_name    = 'users'
-		ORDER BY kcu.table_name, kcu.column_name
+		UNION
+		SELECT columns.table_schema, columns.table_name, columns.column_name, false
+		FROM information_schema.columns columns
+		WHERE columns.table_schema = current_schema()
+		  AND columns.udt_name = 'uuid'
+		  AND (
+		    columns.column_name = 'user_id'
+		    OR right(columns.column_name, 8) = '_user_id'
+		    OR columns.column_name IN ('owner_id', 'created_by', 'actor_id')
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM information_schema.table_constraints tc
+		    JOIN information_schema.key_column_usage kcu
+		      ON  kcu.constraint_schema = tc.constraint_schema
+		      AND kcu.constraint_name   = tc.constraint_name
+		      AND kcu.table_schema      = tc.table_schema
+		      AND kcu.table_name        = tc.table_name
+		    JOIN information_schema.constraint_column_usage ccu
+		      ON  ccu.constraint_schema = tc.constraint_schema
+		      AND ccu.constraint_name   = tc.constraint_name
+		    WHERE tc.constraint_type = 'FOREIGN KEY'
+		      AND tc.table_schema = columns.table_schema
+		      AND kcu.table_name = columns.table_name
+		      AND kcu.column_name = columns.column_name
+		      AND ccu.table_schema = current_schema()
+		      AND ccu.table_name = 'users'
+		  )
+		ORDER BY 1, 2, 3
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list foreign keys to users: %w", err)
@@ -180,11 +212,11 @@ func userReferencingColumns(ctx context.Context, tx pgx.Tx) ([]referencedColumn,
 	var refs []referencedColumn
 	for rows.Next() {
 		var ref referencedColumn
-		if err := rows.Scan(&ref.table, &ref.column); err != nil {
+		if err := rows.Scan(&ref.schema, &ref.table, &ref.column, &ref.foreignKey); err != nil {
 			return nil, fmt.Errorf("scan foreign key to users: %w", err)
 		}
-		if !identifierPattern.MatchString(ref.table) || !identifierPattern.MatchString(ref.column) {
-			return nil, fmt.Errorf("unexpected identifier from catalog: %q.%q", ref.table, ref.column)
+		if !identifierPattern.MatchString(ref.schema) || !identifierPattern.MatchString(ref.table) || !identifierPattern.MatchString(ref.column) {
+			return nil, fmt.Errorf("unexpected identifier from catalog: %q.%q.%q", ref.schema, ref.table, ref.column)
 		}
 		refs = append(refs, ref)
 	}

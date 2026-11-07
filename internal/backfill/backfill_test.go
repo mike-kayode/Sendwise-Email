@@ -1,6 +1,7 @@
 package backfill
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -424,6 +425,7 @@ func TestRunRollsBackFailedRekeyAndRecordsMapping(t *testing.T) {
 	`, legacyUserID, email); err != nil {
 		t.Fatalf("seed legacy user: %v", err)
 	}
+
 	if _, err := legacy.Exec(ctx, `
 		INSERT INTO organizations (id, name, slug)
 		VALUES ($1, 'Blocked Org', $2)
@@ -523,5 +525,115 @@ func TestRunRollsBackFailedRekeyAndRecordsMapping(t *testing.T) {
 
 	if !recorder.contains("re-key failed") {
 		t.Fatalf("expected a failed-re-key log line, got: %v", recorder.lines)
+	}
+}
+
+func TestRunRekeysUnconstrainedUUIDUserReference(t *testing.T) {
+	identity := testutil.NewPostgresWithMigrations(t, "services/identity/migrations")
+	workspace := testutil.NewPostgresWithMigrations(t, "services/workspace/migrations")
+	legacy := testutil.NewPostgres(t)
+	ctx := context.Background()
+
+	const email = "unconstrained@example.test"
+	legacyUserID := uuid.NewString()
+	identityUserID := uuid.NewString()
+	if _, err := legacy.Exec(ctx, `CREATE TABLE audit_events (actor_id uuid NOT NULL)`); err != nil {
+		t.Fatalf("create unconstrained reference table: %v", err)
+	}
+	if _, err := legacy.Exec(ctx, `
+		INSERT INTO users (id, email, password_hash, name, status)
+		VALUES ($1, $2, 'legacy-hash', 'Legacy User', 'active')
+	`, legacyUserID, email); err != nil {
+		t.Fatalf("seed legacy user: %v", err)
+	}
+	if _, err := legacy.Exec(ctx, `INSERT INTO audit_events (actor_id) VALUES ($1)`, legacyUserID); err != nil {
+		t.Fatalf("seed unconstrained actor id: %v", err)
+	}
+	if _, err := identity.Exec(ctx, `
+		INSERT INTO users (id, email, password_hash, name, status)
+		VALUES ($1, $2, 'identity-hash', 'Identity User', 'active')
+	`, identityUserID, email); err != nil {
+		t.Fatalf("seed identity user: %v", err)
+	}
+
+	if _, err := Run(ctx, identity, workspace, legacy, nil); err != nil {
+		t.Fatalf("run backfill: %v", err)
+	}
+	var actorID string
+	if err := legacy.QueryRow(ctx, `SELECT actor_id FROM audit_events`).Scan(&actorID); err != nil {
+		t.Fatalf("read moved actor id: %v", err)
+	}
+	if actorID != identityUserID {
+		t.Fatalf("audit_events.actor_id = %s, want %s", actorID, identityUserID)
+	}
+}
+
+func TestDryRunReportsRekeyPlanWithoutWriting(t *testing.T) {
+	identity := testutil.NewPostgresWithMigrations(t, "services/identity/migrations")
+	workspace := testutil.NewPostgresWithMigrations(t, "services/workspace/migrations")
+	legacy := testutil.NewPostgres(t)
+	ctx := context.Background()
+
+	const email = "dry-run@example.test"
+	legacyUserID := uuid.NewString()
+	identityUserID := uuid.NewString()
+	occupiedIdentityID := uuid.NewString()
+	skippedLegacyUserID := uuid.NewString()
+	if _, err := legacy.Exec(ctx, `CREATE TABLE audit_events (actor_id uuid NOT NULL)`); err != nil {
+		t.Fatalf("create unconstrained reference table: %v", err)
+	}
+	if _, err := legacy.Exec(ctx, `
+		INSERT INTO users (id, email, password_hash, name, status)
+		VALUES ($1, $2, 'legacy-hash', 'Legacy User', 'active')
+	`, legacyUserID, email); err != nil {
+		t.Fatalf("seed legacy user: %v", err)
+	}
+	if _, err := legacy.Exec(ctx, `INSERT INTO audit_events (actor_id) VALUES ($1)`, legacyUserID); err != nil {
+		t.Fatalf("seed unconstrained actor id: %v", err)
+	}
+	if _, err := identity.Exec(ctx, `
+		INSERT INTO users (id, email, password_hash, name, status)
+		VALUES ($1, $2, 'identity-hash', 'Identity User', 'active')
+	`, identityUserID, email); err != nil {
+		t.Fatalf("seed identity user: %v", err)
+	}
+	if _, err := legacy.Exec(ctx, `
+		INSERT INTO users (id, email, password_hash, name, status)
+		VALUES ($1, 'occupied@example.test', 'legacy-hash', 'Occupied User', 'active'),
+		       ($2, 'skip-dry-run@example.test', 'legacy-hash', 'Email Holder', 'active')
+	`, occupiedIdentityID, skippedLegacyUserID); err != nil {
+		t.Fatalf("seed occupied and skipped legacy users: %v", err)
+	}
+	if _, err := identity.Exec(ctx, `
+		INSERT INTO users (id, email, password_hash, name, status)
+		VALUES ($1, 'skip-dry-run@example.test', 'identity-hash', 'Skipped Identity', 'active')
+	`, occupiedIdentityID); err != nil {
+		t.Fatalf("seed identity user with occupied legacy id: %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := DryRun(ctx, identity, workspace, legacy, &output); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	t.Logf("dry-run output:\n%s", output.String())
+	for _, expected := range []string{
+		"outcome=re-key",
+		"outcome=skip reason=identity_id_already_exists",
+		"UPDATE users.id:",
+		".audit_events.actor_id (unconstrained UUID candidate)",
+		"SUMMARY email_clashes=2 rekeys=1 skips=1",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("dry-run output missing %q:\n%s", expected, output.String())
+		}
+	}
+	if got := countWhere(t, legacy, `SELECT count(*) FROM users WHERE id = $1`, legacyUserID); got != 1 {
+		t.Fatalf("dry run changed legacy users: old id count = %d, want 1", got)
+	}
+	if got := countWhere(t, legacy, `SELECT count(*) FROM audit_events WHERE actor_id = $1`, legacyUserID); got != 1 {
+		t.Fatalf("dry run changed unconstrained reference: old id count = %d, want 1", got)
+	}
+	if got := countWhere(t, legacy, `SELECT count(*) FROM users WHERE id = $1`, skippedLegacyUserID); got != 1 {
+		t.Fatalf("dry run changed skipped legacy user: old id count = %d, want 1", got)
 	}
 }

@@ -1076,3 +1076,98 @@ $ curl -fsS --get --data-urlencode "query=to:$recipient" http://127.0.0.1:8025/a
   proof.
 - The deploy-time `DEPLOY_SMOKE_MAIL_TO` hook was not run. Its standalone local
   run was against Mailpit only.
+
+## Task 3 — Backfill rollout safety (Done locally; production run not done)
+
+`cmd/backfill --dry-run` inspects email clashes and the legacy user-reference
+columns in a read-only transaction. Re-keying now moves UUID references that
+follow the `user_id`, `*_user_id`, `owner_id`, `created_by`, and `actor_id`
+conventions even when those columns have no foreign key to `users(id)`. The
+runbook documents backup, dry-run, execution, verification, and destructive
+restore steps. No production database was accessed.
+
+Postgres-backed proof:
+
+```
+$ TEST_DATABASE_URL='postgres://***@localhost:5432/email?sslmode=disable' \
+    go test ./internal/backfill ./cmd/backfill \
+    -run 'TestRunRekeysUnconstrainedUUIDUserReference|TestDryRunReportsRekeyPlanWithoutWriting' \
+    -count=1 -v
+=== RUN   TestRunRekeysUnconstrainedUUIDUserReference
+2026/11/07 19:11:18 INFO legacy email clash: re-keyed legacy user onto identity id identity_user_id=994bd07d-43b9-47ab-8b10-3698cfe77269 legacy_user_id=0fb555a6-31d4-4a21-ab23-2d1b2be541ce email=unconstrained@example.test
+--- PASS: TestRunRekeysUnconstrainedUUIDUserReference (0.74s)
+=== RUN   TestDryRunReportsRekeyPlanWithoutWriting
+    backfill_test.go:618: dry-run output:
+        Backfill dry run (read-only)
+        CLASH identity_user_id=90c3b1bf-49a6-47fd-90c0-84e7e40fd31d legacy_user_id=109d2d5c-14e5-4f22-ac86-3c38814effb3 email=skip-dry-run@example.test outcome=skip reason=identity_id_already_exists
+        CLASH identity_user_id=d65179ef-9e41-4b19-9e9c-e04855b41d8f legacy_user_id=d5609d65-d14e-439c-b4b2-d02caf66e8f3 email=dry-run@example.test outcome=re-key
+          UPDATE users.email to free the address; copy users.id,email,password_hash,name,status,email_verified_at,last_login_at,created_at,updated_at to the identity ID
+          UPDATE users.id: d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f; DELETE shadowed users.id=d5609d65-d14e-439c-b4b2-d02caf66e8f3
+          UPDATE test_877b4bc4327647ce8d520c066322320e.api_keys.created_by (foreign key): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.audit_events.actor_id (unconstrained UUID candidate): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.audit_logs.actor_user_id (foreign key): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.auth_sessions.user_id (foreign key): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.automations.created_by (foreign key): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.backfill_user_id_map.identity_user_id (unconstrained UUID candidate): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.backfill_user_id_map.legacy_user_id (unconstrained UUID candidate): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.campaigns.created_by (foreign key): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.contact_imports.created_by (foreign key): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.forms.created_by (foreign key): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.organization_members.user_id (foreign key): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.templates.created_by (foreign key): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+          UPDATE test_877b4bc4327647ce8d520c066322320e.verification_tokens.user_id (foreign key): d5609d65-d14e-439c-b4b2-d02caf66e8f3 -> d65179ef-9e41-4b19-9e9c-e04855b41d8f
+        Unconstrained UUID user-reference columns: test_877b4bc4327647ce8d520c066322320e.audit_events.actor_id, test_877b4bc4327647ce8d520c066322320e.backfill_user_id_map.identity_user_id, test_877b4bc4327647ce8d520c066322320e.backfill_user_id_map.legacy_user_id
+        SUMMARY email_clashes=2 rekeys=1 skips=1 workspace_organizations=0 workspace_memberships=0
+--- PASS: TestDryRunReportsRekeyPlanWithoutWriting (0.69s)
+PASS
+ok  	github.com/khayode/email-platform/internal/backfill
+?   	github.com/khayode/email-platform/cmd/backfill [no test files]
+```
+
+Full validation on the local Compose database:
+
+```
+$ TEST_DATABASE_URL='postgres://***@localhost:5432/email?sslmode=disable' go test ./... -count=1
+?   	github.com/khayode/email-platform/cmd/api    [no test files]
+?   	github.com/khayode/email-platform/cmd/backfill    [no test files]
+?   	github.com/khayode/email-platform/cmd/migrate    [no test files]
+?   	github.com/khayode/email-platform/cmd/worker    [no test files]
+ok  	github.com/khayode/email-platform/internal/api    10.764s
+ok  	github.com/khayode/email-platform/internal/auth    1.437s
+ok  	github.com/khayode/email-platform/internal/automations    3.714s
+ok  	github.com/khayode/email-platform/internal/backfill    11.917s
+ok  	github.com/khayode/email-platform/internal/campaigns    0.611s
+ok  	github.com/khayode/email-platform/internal/config    0.571s
+ok  	github.com/khayode/email-platform/internal/contacts    0.508s
+ok  	github.com/khayode/email-platform/internal/db    0.512s
+ok  	github.com/khayode/email-platform/internal/delivery    1.035s
+?   	github.com/khayode/email-platform/internal/httpx    [no test files]
+ok  	github.com/khayode/email-platform/internal/kit    0.404s
+?   	github.com/khayode/email-platform/internal/messaging    [no test files]
+?   	github.com/khayode/email-platform/internal/observability    [no test files]
+ok  	github.com/khayode/email-platform/internal/outbox    3.340s
+ok  	github.com/khayode/email-platform/internal/projections    0.383s
+?   	github.com/khayode/email-platform/internal/session    [no test files]
+?   	github.com/khayode/email-platform/internal/testutil    [no test files]
+ok  	github.com/khayode/email-platform/internal/worker    8.388s
+ok  	github.com/khayode/email-platform/services/gateway    0.397s
+?   	github.com/khayode/email-platform/services/gateway/cmd/gateway    [no test files]
+ok  	github.com/khayode/email-platform/services/identity    4.981s
+ok  	github.com/khayode/email-platform/services/identity/cmd/devseed    0.412s
+?   	github.com/khayode/email-platform/services/identity/cmd/identity    [no test files]
+ok  	github.com/khayode/email-platform/services/workspace    0.391s
+?   	github.com/khayode/email-platform/services/workspace/cmd/workspace    [no test files]
+ok  	github.com/khayode/email-platform/shared/contracts/events    0.355s
+$ go vet ./... && go build ./...
+VET_EXIT=0 BUILD_EXIT=0
+$ (cd apps/web && npm run typecheck && npm run lint && npm test && npm run build)
+TYPECHECK_EXIT=0
+LINT_EXIT=0
+ℹ tests 10
+ℹ pass 10
+ℹ fail 0
+ℹ skipped 0
+BUILD_EXIT=0
+$ test -z "$(gofmt -l cmd internal services shared)" && git diff --check
+GOFMT_EMPTY=1 DIFF_CHECK_EXIT=0
+```
