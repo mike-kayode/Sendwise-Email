@@ -374,6 +374,86 @@ func (s *pgxStore) WriteAuthAudit(ctx context.Context, userID *string, action, i
 	return nil
 }
 
+func (s *pgxStore) EnqueueMailRetry(ctx context.Context, action string, encryptedMessage []byte, attempts int, nextAttemptAt time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO mail_delivery_outbox (action, encrypted_message, attempts, next_attempt_at)
+		VALUES ($1, $2, $3, $4)
+	`, action, encryptedMessage, attempts, nextAttemptAt)
+	if err != nil {
+		return fmt.Errorf("insert transactional email retry: %w", err)
+	}
+	return nil
+}
+
+func (s *pgxStore) ClaimMailRetries(ctx context.Context, limit int, leaseDuration time.Duration) ([]mailRetryJob, error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH candidates AS (
+			SELECT id
+			FROM mail_delivery_outbox
+			WHERE attempts < 5
+			  AND next_attempt_at <= now()
+			  AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+			ORDER BY next_attempt_at, created_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		)
+		UPDATE mail_delivery_outbox AS outbox
+		SET lease_token = gen_random_uuid(),
+		    lease_expires_at = now() + ($2 * interval '1 second')
+		FROM candidates
+		WHERE outbox.id = candidates.id
+		RETURNING outbox.id::text, outbox.lease_token::text, outbox.action,
+		          outbox.encrypted_message, outbox.attempts
+	`, limit, int64(leaseDuration.Seconds()))
+	if err != nil {
+		return nil, fmt.Errorf("claim transactional email retries: %w", err)
+	}
+	defer rows.Close()
+
+	jobs := make([]mailRetryJob, 0, limit)
+	for rows.Next() {
+		var job mailRetryJob
+		if err := rows.Scan(&job.id, &job.leaseToken, &job.action, &job.encryptedMessage, &job.attempts); err != nil {
+			return nil, fmt.Errorf("scan transactional email retry: %w", err)
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate transactional email retries: %w", err)
+	}
+	return jobs, nil
+}
+
+func (s *pgxStore) CompleteMailRetry(ctx context.Context, id, leaseToken string) error {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM mail_delivery_outbox
+		WHERE id = $1 AND lease_token = $2
+	`, id, leaseToken)
+	if err != nil {
+		return fmt.Errorf("delete transactional email retry: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("transactional email retry %s lease was lost", id)
+	}
+	return nil
+}
+
+func (s *pgxStore) RescheduleMailRetry(ctx context.Context, id, leaseToken string, attempts int, nextAttemptAt time.Time, lastError string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE mail_delivery_outbox
+		SET attempts = $3, next_attempt_at = $4, last_error = $5,
+		    lease_token = NULL, lease_expires_at = NULL
+		WHERE id = $1 AND lease_token = $2
+	`, id, leaseToken, attempts, nextAttemptAt, lastError)
+	if err != nil {
+		return fmt.Errorf("update transactional email retry: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("transactional email retry %s lease was lost", id)
+	}
+	return nil
+}
+
 func nullUUID(value string) any {
 	if strings.TrimSpace(value) == "" {
 		return nil

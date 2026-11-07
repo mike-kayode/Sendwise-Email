@@ -101,6 +101,16 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+      - name: Provision local Stalwart with the management API
+        env:
+          WEBHOOK_SECRET: ci-only-webhook-secret
+          STALWART_DOMAIN: sendwise.test
+          STALWART_HOSTNAME: mail.sendwise.test
+          STALWART_ADMIN_USERNAME: admin
+          STALWART_ADMIN_PASSWORD: ci-only-stalwart-admin-password
+          STALWART_SUBMIT_USERNAME: noreply
+          STALWART_SUBMIT_PASSWORD: ci-only-stalwart-submit-password
+        run: ./scripts/provision-stalwart.sh
       - name: Go test
         env:
           DATABASE_URL: postgres://email:email@localhost:5432/email?sslmode=disable
@@ -112,6 +122,14 @@ jobs:
           SMTP_ADDR: 127.0.0.1:1025
           SMTP_HOST: mailpit
           SMTP_FROM: ci@sendwise.test
+          RUN_STALWART_INTEGRATION: "1"
+          STALWART_URL: http://127.0.0.1:8081
+          STALWART_DOMAIN: sendwise.test
+          STALWART_HOSTNAME: mail.sendwise.test
+          STALWART_SUBMIT_USERNAME: noreply
+          STALWART_SUBMIT_PASSWORD: ci-only-stalwart-submit-password
+          STALWART_SMTP_ADDR: 127.0.0.1:587
+          STALWART_SMTP_HOST: localhost
         run: go test ./...
 
   test-web:

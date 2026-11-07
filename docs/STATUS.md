@@ -1038,13 +1038,94 @@ partially verified.
 3. `scripts/deploy.sh` (backup, build, migrate, up, smoke).
 4. Rollback: `scripts/deploy.sh rollback --yes` (destructive, restores DB backup).
 
-## Transactional email and local Stalwart (Not done)
+## Transactional email and local Stalwart (Local proof passed; CI pending)
 
 Implemented: SMTP `none`/STARTTLS/implicit-TLS modes, PLAIN and LOGIN auth,
 credential redaction, SMTP readiness probing, up to five delivery attempts
-with backoff, email/IP resend limits, actionable verification-pending UI, a local-only
-Stalwart provisioning script, and an opt-in deploy smoke hook. The retry queue
-is process-local and is lost if Identity restarts.
+with backoff, email/IP resend limits, actionable verification-pending UI, an
+idempotent local JMAP provisioner, and an encrypted PostgreSQL mail retry
+outbox with lease-based claims. The retry queue now survives Identity restarts.
+
+Local Stalwart and Postgres proof (2026-11-07):
+
+```
+$ ./scripts/provision-stalwart.sh
+Stalwart provisioned locally: domain=provisioned.sendwise.test submission=noreply@provisioned.sendwise.test port=587 STARTTLS
+
+$ go test ./services/identity -run '^(TestStalwartRegistrationDeliversAndStoresVerificationEmail|TestPostgresMailRetryOutboxSurvivesHandlerRestart|TestPostgresMailRetryLeasePreventsDuplicateClaims)$' -count=1 -v
+=== RUN   TestPostgresMailRetryOutboxSurvivesHandlerRestart
+--- PASS: TestPostgresMailRetryOutboxSurvivesHandlerRestart (0.33s)
+=== RUN   TestPostgresMailRetryLeasePreventsDuplicateClaims
+--- PASS: TestPostgresMailRetryLeasePreventsDuplicateClaims (0.15s)
+=== RUN   TestStalwartRegistrationDeliversAndStoresVerificationEmail
+--- PASS: TestStalwartRegistrationDeliversAndStoresVerificationEmail (0.46s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity	2.522s
+```
+
+The Stalwart test probes EHLO/STARTTLS/AUTH, registers through Identity, and
+reads the verification message back from Stalwart over JMAP. It ran against the
+local Stalwart container and a fresh isolated local Postgres database. An
+initial full-suite attempt against an older shared test database failed because
+its existing `example.com` rows violate migration 0019's single-owner domain
+constraint; that database was left untouched.
+
+Full Go validation against the fresh database:
+
+```
+$ go vet ./...
+(no output; exit 0)
+
+$ go test ./...
+?   	github.com/khayode/email-platform/cmd/api	[no test files]
+?   	github.com/khayode/email-platform/cmd/backfill	[no test files]
+?   	github.com/khayode/email-platform/cmd/migrate	[no test files]
+?   	github.com/khayode/email-platform/cmd/worker	[no test files]
+ok  	github.com/khayode/email-platform/internal/api	(cached)
+ok  	github.com/khayode/email-platform/internal/auth	(cached)
+ok  	github.com/khayode/email-platform/internal/automations	(cached)
+ok  	github.com/khayode/email-platform/internal/backfill	(cached)
+ok  	github.com/khayode/email-platform/internal/campaigns	(cached)
+ok  	github.com/khayode/email-platform/internal/config	(cached)
+ok  	github.com/khayode/email-platform/internal/contacts	(cached)
+ok  	github.com/khayode/email-platform/internal/db	(cached)
+ok  	github.com/khayode/email-platform/internal/delivery	(cached)
+?   	github.com/khayode/email-platform/internal/httpx	[no test files]
+ok  	github.com/khayode/email-platform/internal/kit	(cached)
+?   	github.com/khayode/email-platform/internal/messaging	[no test files]
+?   	github.com/khayode/email-platform/internal/observability	[no test files]
+ok  	github.com/khayode/email-platform/internal/outbox	(cached)
+ok  	github.com/khayode/email-platform/internal/projections	(cached)
+?   	github.com/khayode/email-platform/internal/session	[no test files]
+?   	github.com/khayode/email-platform/internal/testutil	[no test files]
+ok  	github.com/khayode/email-platform/internal/worker	(cached)
+ok  	github.com/khayode/email-platform/services/gateway	(cached)
+?   	github.com/khayode/email-platform/services/gateway/cmd/gateway	[no test files]
+ok  	github.com/khayode/email-platform/services/identity	4.197s
+ok  	github.com/khayode/email-platform/services/identity/cmd/devseed	(cached)
+?   	github.com/khayode/email-platform/services/identity/cmd/identity	[no test files]
+ok  	github.com/khayode/email-platform/services/workspace	(cached)
+?   	github.com/khayode/email-platform/services/workspace/cmd/workspace	[no test files]
+ok  	github.com/khayode/email-platform/shared/contracts/events	(cached)
+```
+
+The full run had no test skips. `gofmt -l cmd internal services shared` printed
+no files and `go vet ./...` exited 0 with no output. CI has been updated to provision the pinned Stalwart image
+and enable this integration test; the CI run for the eventual commit is still
+pending.
+
+Verification-pending UI regression (mocked API; not a Stalwart delivery proof):
+
+```
+$ npm --prefix apps/web run test:e2e -- e2e/verification-pending.spec.ts
+> @email-platform/web@0.1.0 test:e2e
+> playwright test e2e/verification-pending.spec.ts
+
+Running 1 test using 1 worker
+  ✓  1 [chromium] › e2e/verification-pending.spec.ts:3:1 › queued verification delivery offers a resend action (1.0s)
+
+1 passed (1.9s)
+```
 
 Local checks:
 
@@ -1116,19 +1197,14 @@ $ curl -fsS --get --data-urlencode "query=to:$recipient" http://127.0.0.1:8025/a
 
 **Not done / proof gate outstanding:**
 
-- The real Stalwart container is present but remains in first-run mode. The local
-  STARTTLS probe returned `didn't find starttls in server response`; the
-  provisioning script could not run because `stalwart-cli` is not installed.
-- No integration test provisioned Stalwart, sent a verification email through
-  it, and read the message from Stalwart. The successful smoke and browser
-  outputs above are Mailpit-only and are not evidence of Stalwart or external
-  delivery.
+- Green GitHub Actions on the final commit is not yet available.
 - The relay-down/recovery Playwright test is not complete. The pending-page spec
   mocks registration/resend responses; it does not stop and restart a real SMTP
-  relay. The retry queue has unit coverage, not an end-to-end relay-recovery
-  proof.
+  relay. Durable outbox restart and lease behavior have Postgres integration
+  coverage, but not a browser relay-recovery proof.
 - The deploy-time `DEPLOY_SMOKE_MAIL_TO` hook was not run. Its standalone local
   run was against Mailpit only.
+- Public DNS, external-inbox delivery, and production mail flow remain untested.
 
 ## Task 3 — Backfill rollout safety (Done locally; production run not done)
 

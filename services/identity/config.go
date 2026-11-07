@@ -30,6 +30,7 @@ type Config struct {
 	SMTPPassword            string
 	SMTPFrom                string
 	SMTPTLSMode             string
+	MailOutboxEncryptionKey string
 	ResendAPIKey            string
 	ResendFromEmail         string
 	ResendFromName          string
@@ -61,6 +62,7 @@ func LoadConfig() (Config, error) {
 		SMTPPassword:            kit.Getenv("SMTP_PASSWORD", ""),
 		SMTPFrom:                kit.Getenv("SMTP_FROM", ""),
 		SMTPTLSMode:             strings.ToLower(strings.TrimSpace(kit.Getenv("SMTP_TLS_MODE", defaultSMTPTLSMode(base.Env)))),
+		MailOutboxEncryptionKey: kit.Getenv("DKIM_ENCRYPTION_KEY", ""),
 		ResendAPIKey:            kit.Getenv("RESEND_API_KEY", ""),
 		ResendFromEmail:         kit.Getenv("RESEND_FROM_EMAIL", ""),
 		ResendFromName:          kit.Getenv("RESEND_FROM_NAME", "Sendwise"),
@@ -86,6 +88,9 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("SMTP_TLS_MODE must be none, starttls, or tls")
 	}
 	if base.Env == "production" {
+		if cfg.MailOutboxEncryptionKey == "" {
+			return Config{}, fmt.Errorf("DKIM_ENCRYPTION_KEY is required for encrypted transactional mail retries")
+		}
 		provider := cfg.MailProvider
 		if provider == "auto" {
 			if cfg.ResendAPIKey != "" {

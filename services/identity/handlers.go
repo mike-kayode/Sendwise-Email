@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/kit"
 )
 
@@ -47,9 +49,19 @@ type Handler struct {
 }
 
 type mailRetryJob struct {
-	action   string
-	message  MailMessage
-	attempts int
+	id               string
+	leaseToken       string
+	action           string
+	message          MailMessage
+	encryptedMessage []byte
+	attempts         int
+}
+
+type durableMailRetryStore interface {
+	EnqueueMailRetry(context.Context, string, []byte, int, time.Time) error
+	ClaimMailRetries(context.Context, int, time.Duration) ([]mailRetryJob, error)
+	CompleteMailRetry(context.Context, string, string) error
+	RescheduleMailRetry(context.Context, string, string, int, time.Time, string) error
 }
 
 func mailRecipientDomain(address string) string {
@@ -98,9 +110,13 @@ func NewHandler(store Store, tokens *kit.Manager, workspace WorkspaceClient, mai
 }
 
 // RunMailRetries retries messages whose first synchronous delivery attempt
-// failed. The queue is process-local; persistent delivery is tracked separately
-// as a deployment limitation until a durable mail outbox is configured.
+// failed. The production PostgreSQL store provides durable, encrypted retries.
 func (h *Handler) RunMailRetries(ctx context.Context) {
+	if store, ok := h.store.(durableMailRetryStore); ok {
+		h.runDurableMailRetries(ctx, store)
+		return
+	}
+
 	const workers = 4
 	var wg sync.WaitGroup
 	for range workers {
@@ -119,6 +135,97 @@ func (h *Handler) RunMailRetries(ctx context.Context) {
 	}
 	<-ctx.Done()
 	wg.Wait()
+}
+
+func (h *Handler) runDurableMailRetries(ctx context.Context, store durableMailRetryStore) {
+	const batchSize = 4
+	const leaseDuration = time.Minute
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		jobs, err := store.ClaimMailRetries(ctx, batchSize, leaseDuration)
+		if err != nil {
+			h.logger.Error("claim transactional email retries", "error", err)
+		} else {
+			for _, job := range jobs {
+				h.retryDurableMail(ctx, store, job)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (h *Handler) retryDurableMail(ctx context.Context, store durableMailRetryStore, job mailRetryJob) {
+	payload, err := delivery.DecryptSecret(h.cfg.MailOutboxEncryptionKey, job.encryptedMessage)
+	if err != nil {
+		h.logger.Error("decrypt transactional email retry",
+			"retry_id", job.id, "error", err,
+		)
+		if completeErr := store.CompleteMailRetry(ctx, job.id, job.leaseToken); completeErr != nil {
+			h.logger.Error("discard unreadable transactional email retry",
+				"retry_id", job.id, "error", completeErr,
+			)
+		}
+		return
+	}
+	if err := json.Unmarshal([]byte(payload), &job.message); err != nil {
+		h.logger.Error("decode transactional email retry",
+			"retry_id", job.id, "error", err,
+		)
+		if completeErr := store.CompleteMailRetry(ctx, job.id, job.leaseToken); completeErr != nil {
+			h.logger.Error("discard invalid transactional email retry",
+				"retry_id", job.id, "error", completeErr,
+			)
+		}
+		return
+	}
+
+	attempt := job.attempts + 1
+	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	err = h.mailer.Send(sendCtx, job.message)
+	cancel()
+	if err == nil {
+		if completeErr := store.CompleteMailRetry(ctx, job.id, job.leaseToken); completeErr != nil {
+			h.logger.Error("complete transactional email retry",
+				"retry_id", job.id, "error", completeErr,
+			)
+			return
+		}
+		h.logger.Info("transactional email retry succeeded",
+			"action", job.action,
+			"recipient_domain", mailRecipientDomain(job.message.To),
+			"attempt", attempt,
+		)
+		return
+	}
+
+	h.logger.Error("transactional email retry failed",
+		"action", job.action,
+		"recipient_domain", mailRecipientDomain(job.message.To),
+		"attempt", attempt,
+		"error", err,
+	)
+	if attempt >= 5 {
+		if completeErr := store.CompleteMailRetry(ctx, job.id, job.leaseToken); completeErr != nil {
+			h.logger.Error("remove exhausted transactional email retry",
+				"retry_id", job.id, "error", completeErr,
+			)
+		}
+		return
+	}
+
+	delay := h.mailRetryDelay * time.Duration(1<<(attempt-1))
+	if err := store.RescheduleMailRetry(ctx, job.id, job.leaseToken, attempt, time.Now().Add(delay), err.Error()); err != nil {
+		h.logger.Error("reschedule transactional email retry",
+			"retry_id", job.id, "error", err,
+		)
+	}
 }
 
 func (h *Handler) retryMail(ctx context.Context, job mailRetryJob) {
@@ -154,6 +261,27 @@ func (h *Handler) retryMail(ctx context.Context, job mailRetryJob) {
 func (h *Handler) deliverMail(ctx context.Context, action string, message MailMessage) error {
 	if err := h.mailer.Send(ctx, message); err != nil {
 		h.logMailFailure(action, message.To, err)
+		if store, ok := h.store.(durableMailRetryStore); ok {
+			if h.cfg.MailOutboxEncryptionKey == "" {
+				return fmt.Errorf("queue transactional email retry: DKIM_ENCRYPTION_KEY is not configured")
+			}
+			payload, marshalErr := json.Marshal(message)
+			if marshalErr != nil {
+				return fmt.Errorf("marshal transactional email retry: %w", marshalErr)
+			}
+			encrypted, encryptErr := delivery.EncryptSecret(h.cfg.MailOutboxEncryptionKey, string(payload))
+			if encryptErr != nil {
+				return fmt.Errorf("encrypt transactional email retry: %w", encryptErr)
+			}
+			delay := h.mailRetryDelay
+			if delay <= 0 {
+				delay = time.Second
+			}
+			if queueErr := store.EnqueueMailRetry(ctx, action, encrypted, 1, time.Now().Add(delay)); queueErr != nil {
+				return fmt.Errorf("enqueue durable transactional email retry: %w", queueErr)
+			}
+			return fmt.Errorf("%w: %v", ErrMailRetryQueued, err)
+		}
 		select {
 		case h.mailRetries <- mailRetryJob{action: action, message: message, attempts: 1}:
 			return fmt.Errorf("%w: %v", ErrMailRetryQueued, err)

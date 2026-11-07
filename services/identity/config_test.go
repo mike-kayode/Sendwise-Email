@@ -62,6 +62,7 @@ func TestLoadConfigAlwaysSecuresCookiesInProduction(t *testing.T) {
 	t.Setenv("SMTP_PASSWORD", "smtp-secret")
 	t.Setenv("SMTP_FROM", "hello@example.test")
 	t.Setenv("SMTP_TLS_MODE", "starttls")
+	t.Setenv("DKIM_ENCRYPTION_KEY", "test-mail-outbox-key")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -90,6 +91,7 @@ func TestLoadProductionSMTPRequiresTLS(t *testing.T) {
 	t.Setenv("JWT_SECRET", "test-secret")
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("SERVICE_TOKEN", "test-service-token")
+	t.Setenv("DKIM_ENCRYPTION_KEY", "test-mail-outbox-key")
 	t.Setenv("MAIL_PROVIDER", "smtp")
 	t.Setenv("SMTP_ADDR", "smtp.example.test:587")
 	t.Setenv("SMTP_HOST", "smtp.example.test")
@@ -97,6 +99,7 @@ func TestLoadProductionSMTPRequiresTLS(t *testing.T) {
 	t.Setenv("SMTP_PASSWORD", "smtp-secret")
 	t.Setenv("SMTP_FROM", "hello@example.test")
 	t.Setenv("SMTP_TLS_MODE", "none")
+	t.Setenv("DKIM_ENCRYPTION_KEY", "test-mail-outbox-key")
 
 	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SMTP_TLS_MODE") {
 		t.Fatalf("LoadConfig() error = %v, want production SMTP TLS failure", err)
@@ -151,6 +154,7 @@ func TestLoadProductionRejectsDevelopmentMailRelay(t *testing.T) {
 	t.Setenv("SMTP_FROM", "hello@example.test")
 	t.Setenv("RESEND_API_KEY", "test-resend-key")
 	t.Setenv("RESEND_FROM_EMAIL", "hello@example.test")
+	t.Setenv("DKIM_ENCRYPTION_KEY", "test-mail-outbox-key")
 
 	for _, test := range []struct {
 		name     string

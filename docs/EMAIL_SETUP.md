@@ -31,48 +31,46 @@ selected.
 
 ## Local Stalwart
 
-The Compose stack already includes the real `stalwartlabs/stalwart` image and
-publishes its management and SMTP ports on loopback. Stalwart's first-run setup
-must be completed once through its setup wizard, including creating a permanent
-administrator account. `scripts/provision-stalwart.sh` then uses the official
-`stalwart-cli` to idempotently create the configured domain, a `noreply`
-submission account whose password comes from `STALWART_SUBMIT_PASSWORD`, and a
-STARTTLS SMTP listener on port 587.
-
-For a host that is already running the compose stack, use the bootstrap helper:
+Compose pins the Stalwart image by digest and exposes the admin API, SMTP, and
+submission ports on loopback. Provisioning uses Stalwart's JMAP management API;
+it does not require `stalwart-cli` or a manual setup wizard. The script is
+loopback-only and idempotently performs first-run setup, configures the domain,
+creates `noreply`, and enables authenticated STARTTLS submission on port 587:
 
 ```sh
-chmod +x scripts/bootstrap-stalwart-live.sh
-export STALWART_URL=http://127.0.0.1:8081
-export STALWART_DOMAIN=example.com
-export STALWART_HOSTNAME=mail.example.com
-export STALWART_ADMIN_USERNAME='admin@example.com'
-export STALWART_ADMIN_PASSWORD='<permanent admin password>'
-export STALWART_SUBMIT_PASSWORD='<strong submission password>'
-export STALWART_BOOTSTRAP_PASSWORD='<temporary bootstrap password from docker logs>'
-./scripts/bootstrap-stalwart-live.sh
+export STALWART_DOMAIN=sendwise.test
+export STALWART_HOSTNAME=mail.sendwise.test
+export STALWART_ADMIN_USERNAME=admin
+export STALWART_ADMIN_PASSWORD='<local administrator password>'
+export STALWART_SUBMIT_USERNAME=noreply
+export STALWART_SUBMIT_PASSWORD='<local submission password>'
+./scripts/provision-stalwart.sh
 ```
 
-The script is intentionally loopback-only and refuses non-local URLs. It will
-install the Stalwart CLI to `$HOME/.local/bin` if it is missing, perform the
-initial `Bootstrap` update when the temporary bootstrap admin is still active,
-then provision the default domain, submission account, and TLS listener. The
-legacy `scripts/provision-stalwart.sh` remains a plain domain/account
-provisioner; the new helper covers the bootstrap step safely in one command.
+Use unique administrator and submission passwords outside disposable local
+development. Keep both out of source control and logs. Compose receives the
+recovery-admin credential only for local setup; the provisioner stores no
+credentials in the repository. It validates STARTTLS on port 587 after
+restarting Stalwart to activate the listener.
 
-Install `stalwart-cli` from <https://github.com/stalwartlabs/cli>, then set
-`STALWART_URL` (loopback only), `STALWART_DOMAIN`,
-`STALWART_ADMIN_USERNAME`, `STALWART_ADMIN_PASSWORD`, and
-`STALWART_SUBMIT_PASSWORD` in the environment. The script refuses non-loopback
-URLs and suppresses CLI output that could contain credentials. Do not commit
-these values. The setup wizard is intentionally separate from the
-provisioning script; this script does not reset or recreate the Stalwart data
-store.
+To route Identity through this local service, configure its environment as
+follows (the host name must match a certificate trusted by Identity):
 
-Stalwart's SMTP AUTH stage requires authentication on non-port-25 SMTP
-connections and advertises PLAIN/LOGIN only after TLS by default. The provision
-plan adds a `NetworkListener` on `[::]:587` with TLS enabled and implicit TLS
-disabled, which makes the listener use STARTTLS.
+```dotenv
+MAIL_PROVIDER=smtp
+SMTP_ADDR=stalwart:587
+SMTP_HOST=mail.sendwise.test
+SMTP_TLS_MODE=starttls
+SMTP_USERNAME=noreply@sendwise.test
+SMTP_PASSWORD=<same submission password>
+SMTP_FROM=noreply@sendwise.test
+```
+
+The local Stalwart integration test registers an account through Identity,
+probes SMTP EHLO/STARTTLS/AUTH, sends the verification mail, then reads it from
+the Stalwart inbox over JMAP. Its generated local certificate is pinned only by
+that test; production SMTP continues to verify the configured host using the
+system certificate roots.
 
 ## DNS and outbound mail
 
