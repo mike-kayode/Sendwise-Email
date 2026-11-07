@@ -1172,7 +1172,7 @@ $ test -z "$(gofmt -l cmd internal services shared)" && git diff --check
 GOFMT_EMPTY=1 DIFF_CHECK_EXIT=0
 ```
 
-## Task 4 — Bulk-sending readiness (locally verified; CI pending)
+## Task 4 — Bulk-sending readiness (locally and CI verified)
 
 Implemented local sending-domain daily reservations (default 50, multiplied
 by 1.5 after each successful sending day, capped by `MAX_DAILY_EMAILS`),
