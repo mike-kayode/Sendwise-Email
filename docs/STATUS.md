@@ -1309,7 +1309,7 @@ The local sink test uses an in-memory publisher and a discard-only SMTP server;
 it does not exercise NATS broker capacity or real mail delivery. No claim of
 external deliverability or inbox placement is made.
 
-## Task 5 — Templates, reports, usage, and end-to-end proof (local proof complete)
+## Task 5 — Templates, reports, usage, and end-to-end proof (Done)
 
 Implemented tenant-scoped template GET/PATCH/DELETE, a reusable content-block
 editor with live preview, template-backed campaign creation, and working
@@ -1447,6 +1447,8 @@ No placeholder matches found in apps/web
 ```
 
 The P2 and domain E2E helpers now use condition-based Playwright polling rather
-than fixed 500 ms sleeps. Local Task 5 proof is complete. **Not done yet:** the
-final pushed Task 5 SHA still requires a green GitHub Actions run before this
-task can be marked Done.
+than fixed 500 ms sleeps. GitHub Actions run [#51](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42411371574)
+passed on Task 5 implementation SHA
+`e1d710a821ee7decde6a1e49c0462d0ce090756b`; all six jobs, including the browser
+E2E job, succeeded. The follow-up status-only commit does not change the tested
+application code and is also checked by CI.
