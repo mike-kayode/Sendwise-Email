@@ -39,6 +39,27 @@ administrator account. `scripts/provision-stalwart.sh` then uses the official
 submission account whose password comes from `STALWART_SUBMIT_PASSWORD`, and a
 STARTTLS SMTP listener on port 587.
 
+For a host that is already running the compose stack, use the bootstrap helper:
+
+```sh
+chmod +x scripts/bootstrap-stalwart-live.sh
+export STALWART_URL=http://127.0.0.1:8081
+export STALWART_DOMAIN=example.com
+export STALWART_HOSTNAME=mail.example.com
+export STALWART_ADMIN_USERNAME='admin@example.com'
+export STALWART_ADMIN_PASSWORD='<permanent admin password>'
+export STALWART_SUBMIT_PASSWORD='<strong submission password>'
+export STALWART_BOOTSTRAP_PASSWORD='<temporary bootstrap password from docker logs>'
+./scripts/bootstrap-stalwart-live.sh
+```
+
+The script is intentionally loopback-only and refuses non-local URLs. It will
+install the Stalwart CLI to `$HOME/.local/bin` if it is missing, perform the
+initial `Bootstrap` update when the temporary bootstrap admin is still active,
+then provision the default domain, submission account, and TLS listener. The
+legacy `scripts/provision-stalwart.sh` remains a plain domain/account
+provisioner; the new helper covers the bootstrap step safely in one command.
+
 Install `stalwart-cli` from <https://github.com/stalwartlabs/cli>, then set
 `STALWART_URL` (loopback only), `STALWART_DOMAIN`,
 `STALWART_ADMIN_USERNAME`, `STALWART_ADMIN_PASSWORD`, and
