@@ -44,21 +44,11 @@ func GenerateDKIMKeyPair(encryptionKey string) (publicKey, encryptedPrivateKey s
 		return "", "", fmt.Errorf("marshal dkim private key: %w", err)
 	}
 	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
-	derivedKey := sha256.Sum256([]byte(encryptionKey))
-	block, err := aes.NewCipher(derivedKey[:])
+	encrypted, err := EncryptSecret(encryptionKey, string(privatePEM))
 	if err != nil {
-		return "", "", fmt.Errorf("init dkim encryption: %w", err)
+		return "", "", fmt.Errorf("encrypt dkim private key: %w", err)
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", "", fmt.Errorf("init dkim encryption: %w", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", "", fmt.Errorf("generate dkim nonce: %w", err)
-	}
-	ciphertext := gcm.Seal(nonce, nonce, privatePEM, nil)
-	return publicKey, base64.StdEncoding.EncodeToString(ciphertext), nil
+	return publicKey, base64.StdEncoding.EncodeToString(encrypted), nil
 }
 
 func DecryptDKIMPrivateKey(encryptionKey, encryptedPrivateKey string) (string, error) {
@@ -72,24 +62,11 @@ func DecryptDKIMPrivateKey(encryptionKey, encryptedPrivateKey string) (string, e
 	if err != nil {
 		return "", fmt.Errorf("decode dkim private key: %w", err)
 	}
-	derivedKey := sha256.Sum256([]byte(encryptionKey))
-	block, err := aes.NewCipher(derivedKey[:])
-	if err != nil {
-		return "", fmt.Errorf("init dkim decryption: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("init dkim decryption: %w", err)
-	}
-	if len(data) < gcm.NonceSize() {
-		return "", errors.New("invalid dkim private key envelope")
-	}
-	nonce, ciphertext := data[:gcm.NonceSize()], data[gcm.NonceSize():]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	plaintext, err := DecryptSecret(encryptionKey, data)
 	if err != nil {
 		return "", fmt.Errorf("decrypt dkim private key: %w", err)
 	}
-	blockPEM, _ := pem.Decode(plaintext)
+	blockPEM, _ := pem.Decode([]byte(plaintext))
 	if blockPEM == nil || blockPEM.Type != "PRIVATE KEY" {
 		return "", errors.New("could not decode dkim private key pem block")
 	}
@@ -97,6 +74,50 @@ func DecryptDKIMPrivateKey(encryptionKey, encryptedPrivateKey string) (string, e
 		return "", fmt.Errorf("parse dkim private key: %w", err)
 	}
 	return string(blockPEM.Bytes), nil
+}
+
+func EncryptSecret(encryptionKey, plaintext string) ([]byte, error) {
+	if encryptionKey == "" {
+		return nil, errors.New("encryption key is not configured")
+	}
+	derivedKey := sha256.Sum256([]byte(encryptionKey))
+	block, err := aes.NewCipher(derivedKey[:])
+	if err != nil {
+		return nil, fmt.Errorf("initialize secret encryption: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("initialize secret encryption: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("generate secret nonce: %w", err)
+	}
+	return gcm.Seal(nonce, nonce, []byte(plaintext), nil), nil
+}
+
+func DecryptSecret(encryptionKey string, envelope []byte) (string, error) {
+	if encryptionKey == "" {
+		return "", errors.New("encryption key is not configured")
+	}
+	derivedKey := sha256.Sum256([]byte(encryptionKey))
+	block, err := aes.NewCipher(derivedKey[:])
+	if err != nil {
+		return "", fmt.Errorf("initialize secret decryption: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("initialize secret decryption: %w", err)
+	}
+	if len(envelope) < gcm.NonceSize() {
+		return "", errors.New("invalid encrypted secret envelope")
+	}
+	nonce, ciphertext := envelope[:gcm.NonceSize()], envelope[gcm.NonceSize():]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypt secret: %w", err)
+	}
+	return string(plaintext), nil
 }
 
 func LoadDKIMConfig(ctx context.Context, pool *pgxpool.Pool, organizationID, fromAddress, encryptionKey string) (*DKIMConfig, error) {

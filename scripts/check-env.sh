@@ -64,6 +64,7 @@ required=(
   SMTP_HOST
   SMTP_TLS_MODE
   SMTP_FROM
+  PLATFORM_FROM_EMAIL
 )
 missing=0
 for v in "${required[@]}"; do
@@ -123,6 +124,10 @@ if [ "$ENV_NAME" = "production" ] || [ "$ENV_NAME" = "staging" ]; then
   done
   if [ -z "${SMTP_USERNAME:-}" ] || [ -z "${SMTP_PASSWORD:-}" ]; then
     echo "missing required env var: SMTP_USERNAME/SMTP_PASSWORD (campaign delivery authenticates in $ENV_NAME)" >&2
+    exit 1
+  fi
+  if [ -z "${RESEND_WEBHOOK_SECRET:-}" ]; then
+    echo "missing required env var: RESEND_WEBHOOK_SECRET (Resend webhook signature verification in $ENV_NAME)" >&2
     exit 1
   fi
   if [ "${MAIL_PROVIDER:-auto}" = "resend" ]; then

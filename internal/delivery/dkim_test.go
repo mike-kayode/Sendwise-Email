@@ -83,3 +83,25 @@ func TestGenerateDKIMKeyPairRequiresEncryptionKey(t *testing.T) {
 		t.Fatal("GenerateDKIMKeyPair() succeeded without an encryption key")
 	}
 }
+
+func TestEncryptSecretUsesDKIMEncryptionScheme(t *testing.T) {
+	const key = "workspace-secret-encryption-key"
+	const secret = "re_fake_not_a_real_key"
+	envelope, err := EncryptSecret(key, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(envelope) == secret || len(envelope) <= len(secret) {
+		t.Fatal("encrypted secret envelope is not ciphertext")
+	}
+	got, err := DecryptSecret(key, envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != secret {
+		t.Fatalf("DecryptSecret() = %q, want %q", got, secret)
+	}
+	if _, err := DecryptSecret("different-key", envelope); err == nil {
+		t.Fatal("DecryptSecret() succeeded with a different key")
+	}
+}
