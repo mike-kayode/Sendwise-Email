@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
@@ -20,6 +20,12 @@ type ContactList = {
   contact_count: number;
   created_at: string;
   updated_at: string;
+};
+
+type EmailTemplate = {
+  id: string;
+  name: string;
+  design: unknown;
 };
 
 const steps = [
@@ -44,6 +50,21 @@ export default function NewCampaignPage() {
   const [delivery, setDelivery] = useState<"draft" | "schedule">("draft");
   const [scheduledAt, setScheduledAt] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [templateID, setTemplateID] = useState("");
+
+  useEffect(() => {
+    setTemplateID(new URLSearchParams(window.location.search).get("template_id") ?? "");
+  }, []);
+
+  const templateQuery = useQuery({
+    queryKey: ["template", templateID],
+    queryFn: () => apiFetch<EmailTemplate>(`/templates/${templateID}`),
+    enabled: Boolean(templateID),
+  });
+
+  useEffect(() => {
+    if (templateQuery.data && !name) setName(`${templateQuery.data.name} campaign`);
+  }, [templateQuery.data, name]);
 
   const listsQuery = useQuery({
     queryKey: ["lists"],
@@ -70,7 +91,10 @@ export default function NewCampaignPage() {
     senderEmail ||
     (verifiedDomains[0] ? `hello@${verifiedDomains[0].domain}` : domains[0] ? `hello@${domains[0].domain}` : "");
 
-  const canSubmit = name.trim().length > 0 && !submitting;
+  const canSubmit =
+    name.trim().length > 0 &&
+    !submitting &&
+    (!templateID || Boolean(templateQuery.data));
   const canSchedule =
     delivery === "schedule" && scheduledAt !== "" && new Date(scheduledAt).getTime() > Date.now();
 
@@ -83,6 +107,10 @@ export default function NewCampaignPage() {
       sender_email: senderEmailValue.trim(),
       sender_postal_address: senderPostalAddress.trim(),
     };
+    if (templateID && templateQuery.data) {
+      body.template_id = templateID;
+      body.content = templateQuery.data.design;
+    }
     if (notes.trim()) body.reply_to = notes.trim();
     if (effectiveListId) body.list_id = effectiveListId;
     return apiFetch<Campaign>("/campaigns", { method: "POST", body: JSON.stringify(body) });
@@ -135,6 +163,15 @@ export default function NewCampaignPage() {
         title="Create a campaign"
         description="Set up the basics now. You can refine the content and audience before sending."
       />
+      {templateID ? (
+        <div className="mb-5 rounded-lg border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-900">
+          {templateQuery.isLoading
+            ? "Loading selected template..."
+            : templateQuery.error
+              ? `Unable to load template: ${templateQuery.error.message}`
+              : `Using template: ${templateQuery.data?.name ?? "Selected template"}`}
+        </div>
+      ) : null}
 
       <ol className="mb-6 flex items-center gap-2 text-sm">
         {steps.map((step, index) => (

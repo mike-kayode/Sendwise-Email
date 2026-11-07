@@ -31,7 +31,7 @@ func (s *Server) analyticsOverview(w http.ResponseWriter, r *http.Request) {
 			(SELECT count(*) FROM contacts WHERE organization_id = $1),
 			(SELECT count(*) FROM contacts WHERE organization_id = $1 AND status = 'subscribed'),
 			(SELECT count(*) FROM campaigns WHERE organization_id = $1 AND status IN ('sending', 'completed')),
-			(SELECT count(*) FROM delivery_jobs WHERE organization_id = $1 AND status = 'submitted'),
+			(SELECT count(*) FROM delivery_jobs WHERE organization_id = $1 AND status = 'submitted' AND created_at >= now() - interval '30 days'),
 			(SELECT count(*) FROM message_events WHERE organization_id = $1 AND event_type = 'opened' AND occurred_at >= now() - interval '30 days'),
 			(SELECT count(*) FROM message_events WHERE organization_id = $1 AND event_type = 'clicked' AND occurred_at >= now() - interval '30 days'),
 			(SELECT count(*) FROM message_events WHERE organization_id = $1 AND event_type = 'bounced' AND occurred_at >= now() - interval '30 days'),

@@ -1,110 +1,76 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { CreditCard, Check } from "lucide-react";
+import { Mail, Send, Users } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiFetch, type AnalyticsOverview } from "@/lib/auth";
 import { formatNumber } from "@/lib/utils";
-import { useToast } from "@/components/ui/use-toast";
 
 export default function BillingView() {
-  const { toast } = useToast();
-
-  const analyticsQuery = useQuery({
+  const usageQuery = useQuery({
     queryKey: ["analytics", "overview"],
-    queryFn: async () => {
-      const res = await apiFetch<AnalyticsOverview>("/analytics/overview");
-      return res;
-    },
+    queryFn: () => apiFetch<AnalyticsOverview>("/analytics/overview"),
   });
 
-  const analytics = analyticsQuery.data;
-
-  if (analyticsQuery.isLoading) {
+  if (usageQuery.isLoading) {
+    return <PageHeader title="Usage" description="Loading organization usage..." />;
+  }
+  if (usageQuery.error || !usageQuery.data) {
     return (
-      <div>
-        <PageHeader title="Billing & usage" description="Loading your usage data..." />
-      </div>
+      <PageHeader
+        title="Usage"
+        description={usageQuery.error?.message ?? "Could not load organization usage."}
+      />
     );
   }
+
+  const usage = usageQuery.data;
+  const metrics = [
+    {
+      label: "Contacts",
+      value: usage.contacts,
+      detail: `${formatNumber(usage.subscribed)} subscribed`,
+      icon: <Users className="h-5 w-5" />,
+    },
+    {
+      label: "Emails submitted (30 days)",
+      value: usage.emails_submitted,
+      detail: "SMTP submissions recorded in the last 30 days",
+      icon: <Send className="h-5 w-5" />,
+    },
+    {
+      label: "Campaigns sent",
+      value: usage.campaigns_sent,
+      detail: "Campaigns currently sending or completed",
+      icon: <Mail className="h-5 w-5" />,
+    },
+  ];
 
   return (
     <div>
       <PageHeader
-        title="Billing & usage"
-        description="Manage your plan, monitor sending limits, and download invoices."
-        actions={
-          <Button variant="secondary">
-            <CreditCard className="h-4 w-4" /> Manage payment method
-          </Button>
-        }
+        title="Usage"
+        description="Live counters for your organization. Contact count is current; email submissions cover the last 30 days."
       />
-
-      <div className="grid gap-5 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <CardTitle>Current plan</CardTitle>
-              <CardDescription>Free tier - no payment required</CardDescription>
-            </div>
-            <Badge variant="indigo">Free</Badge>
-          </CardHeader>
-          <CardContent className="space-y-5">
-            {analytics && (
-              <>
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between text-sm">
-                    <span className="text-slate-600">Contacts</span>
-                    <span className="tabular-nums text-slate-500">
-                      {formatNumber(analytics.contacts)} <span className="text-slate-400">/ 50,000</span>
-                    </span>
-                  </div>
-                  <div className="h-2 rounded-full bg-slate-100">
-                    <div className="h-2 rounded-full bg-indigo-500" style={{ width: Math.min(100, (analytics.contacts / 50000) * 100) + "%" }} />
-                  </div>
-                </div>
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between text-sm">
-                    <span className="text-slate-600">Emails sent</span>
-                    <span className="tabular-nums text-slate-500">
-                      {formatNumber(analytics.emails_submitted)} <span className="text-slate-400">/ 250,000</span>
-                    </span>
-                  </div>
-                  <div className="h-2 rounded-full bg-slate-100">
-                    <div className="h-2 rounded-full bg-indigo-500" style={{ width: Math.min(100, (analytics.emails_submitted / 250000) * 100) + "%" }} />
-                  </div>
-                </div>
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between text-sm">
-                    <span className="text-slate-600">Campaigns sent</span>
-                    <span className="tabular-nums text-slate-500">{analytics.campaigns_sent}</span>
-                  </div>
-                </div>
-              </>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Payment method</CardTitle>
-            <CardDescription>No payment required on free tier</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3 text-sm">
-            <div className="rounded-lg bg-slate-50 p-3">
-              <p className="text-xs text-slate-500">Billing email</p>
-              <p className="font-medium text-slate-900">No billing configured</p>
-            </div>
-            <p className="text-xs text-slate-500">
-              Sendwise is currently in free mode. Upgrade to a paid plan for higher limits
-              and premium features.
-            </p>
-          </CardContent>
-        </Card>
+      <div className="grid gap-4 md:grid-cols-3">
+        {metrics.map((metric) => (
+          <Card key={metric.label}>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">{metric.label}</CardTitle>
+              <span className="text-slate-400">{metric.icon}</span>
+            </CardHeader>
+            <CardContent>
+              <p className="text-3xl font-semibold tabular-nums text-slate-900">{formatNumber(metric.value)}</p>
+              <CardDescription className="mt-1">{metric.detail}</CardDescription>
+            </CardContent>
+          </Card>
+        ))}
       </div>
+      <p className="mt-5 rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-600">
+        Usage reporting is available, but this workspace has no billing provider or configured plan limits.
+        No payment method, invoices, or paid-plan management are represented here.
+      </p>
     </div>
   );
 }

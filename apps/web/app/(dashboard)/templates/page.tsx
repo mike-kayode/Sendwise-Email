@@ -3,14 +3,15 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, LayoutTemplate, Plus, Search, Sparkles } from "lucide-react";
+import Link from "next/link";
+import { LayoutTemplate, Plus, Search, Sparkles, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input, Select } from "@/components/ui/input";
-import { apiFetch, type Campaign } from "@/lib/auth";
+import { apiFetch } from "@/lib/auth";
 import { cn, formatDate } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
 
@@ -81,7 +82,7 @@ export default function TemplatesPage() {
   const [newName, setNewName] = useState("");
   const [newCategory, setNewCategory] = useState("general");
   const [creating, setCreating] = useState(false);
-  const [usingId, setUsingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const templatesQuery = useQuery({
     queryKey: ["templates"],
@@ -116,9 +117,10 @@ export default function TemplatesPage() {
         body: JSON.stringify({ name: newName.trim(), category: newCategory }),
       });
       await queryClient.invalidateQueries({ queryKey: ["templates"] });
+      router.push(`/templates/${template.id}`);
       toast({
         title: "Template created",
-        description: `“${template.name}” is ready. Use it to start a campaign.`,
+        description: `“${template.name}” is ready to design.`,
       });
       closeNewTemplate(false);
     } catch (err: any) {
@@ -132,30 +134,17 @@ export default function TemplatesPage() {
     }
   };
 
-  const handleUseTemplate = async (template: Template) => {
-    if (usingId) return;
-    setUsingId(template.id);
+  const handleDeleteTemplate = async (template: Template) => {
+    if (!window.confirm(`Delete "${template.name}"? Campaigns already created from it will not be affected.`)) return;
+    setDeletingId(template.id);
     try {
-      const campaign = await apiFetch<Campaign>("/campaigns", {
-        method: "POST",
-        body: JSON.stringify({
-          name: template.name,
-          template_id: template.id,
-          content: template.design ?? { version: 1, blocks: [] },
-        }),
-      });
-      toast({
-        title: "Campaign created",
-        description: "Add your subject line and content in the editor.",
-      });
-      router.push(`/campaigns/${campaign.id}/editor`);
+      await apiFetch(`/templates/${template.id}`, { method: "DELETE" });
+      await queryClient.invalidateQueries({ queryKey: ["templates"] });
+      toast({ title: "Template deleted", description: `“${template.name}” was removed.` });
     } catch (err: any) {
-      toast({
-        title: "Could not use template",
-        description: err?.message ?? "Unknown error",
-        variant: "destructive",
-      });
-      setUsingId(null);
+      toast({ title: "Could not delete template", description: err?.message ?? "Unknown error", variant: "destructive" });
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -247,19 +236,28 @@ export default function TemplatesPage() {
                     </p>
                   </div>
                 </div>
-                <div className="mt-3">
+                <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
                   <button
-                    onClick={() => void handleUseTemplate(template)}
-                    disabled={usingId !== null}
+                    onClick={() => router.push(`/campaigns/new?template_id=${encodeURIComponent(template.id)}`)}
                     className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-lg bg-slate-900 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-60"
                   >
-                    {usingId === template.id ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Creating campaign...
-                      </>
-                    ) : (
-                      "Use template"
-                    )}
+                    Use template
+                  </button>
+                  <Link
+                    href={`/templates/${template.id}`}
+                    className="inline-flex h-8 items-center justify-center rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    Edit
+                  </Link>
+                  <button
+                    type="button"
+                    aria-label={`Delete ${template.name}`}
+                    title="Delete template"
+                    disabled={deletingId === template.id}
+                    onClick={() => void handleDeleteTemplate(template)}
+                    className="col-span-2 inline-flex h-8 items-center justify-center gap-1 rounded-lg text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> {deletingId === template.id ? "Deleting..." : "Delete"}
                   </button>
                 </div>
               </CardContent>
@@ -296,8 +294,7 @@ export default function TemplatesPage() {
         <DialogContent>
           <DialogTitle className="text-base font-semibold text-slate-900">New template</DialogTitle>
           <DialogDescription>
-            Give your template a name and category. You can design its content when you use it in a
-            campaign.
+            Give your template a name and category, then add and arrange its email content.
           </DialogDescription>
           <div className="space-y-3">
             <div>

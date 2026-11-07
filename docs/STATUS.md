@@ -435,12 +435,12 @@ actual `templates.name` / `html` columns instead of a non-existent `subject`
 column. The new automation creation page and list redirects are wired to
 `/automations/new` so the UI can actually create and activate a flow.
 
-## P8 — Settings, billing, reports, and placeholder cleanup (done)
+## P8 — Settings, billing, reports, and placeholder cleanup (partly done)
 
 Proof gate:
 
 ```
-$ grep -rniE 'coming soon|coming-soon|localhost|127\.0\.0\.1|lorem|TODO|demo' apps/web \
+$ grep -rniE 'coming[[:space:]-]+soon|localhost|127\.0\.0\.1|lorem|TODO|demo' apps/web \
     --include='*.ts' --include='*.tsx' --exclude-dir=node_modules --exclude-dir=.next
 (no output)
 
@@ -453,10 +453,10 @@ $ cd apps/web && npm run typecheck && npm run lint && npm test -- --runInBand &&
 ... pass ...
 ```
 
-The settings page and selected workspace flows are wired; billing and reporting
-remain partial. No claim is made here that every page is complete or that the
-app-wide source is free of placeholders. The Playwright config is
-host-overridable and defaults to the browser-visible local endpoint.
+This earlier check did not prove that the billing controls were functional or
+that report counters matched seeded data. Those P8 items remained unverified
+until the Task 5 evidence below. The Playwright config is host-overridable and
+defaults to the browser-visible local endpoint.
 
 ## P9 — End-to-end suite and release gate (partly verified)
 
@@ -484,8 +484,10 @@ $ scripts/smoke-prod.sh
 ```
 
 The browser E2E suite, `make e2e` shortcut, CI gate, and read-only production
-smoke script exist and the outputs above passed. The full cross-module
-registration-to-delivery journey is not yet covered, so P9 is not marked Done.
+smoke script exist and the outputs above passed. The cross-module Task 5
+registration-to-Mailpit-campaign journey is recorded below. This verifies local
+SMTP acceptance only; it does not prove external delivery, so P9 remains
+partially verified.
 
 ## Build / checks
 
@@ -510,21 +512,21 @@ registration-to-delivery journey is not yet covered, so P9 is not marked Done.
   `TestFormsLifecyclePublicSubmitAndTenantIsolationIntegration` and
   `apps/web/e2e/forms.spec.ts`.
 - Automations: runtime engine and trigger flow are implemented and proven via `TestServiceProcessDueSendsEmailForActiveAutomation` and `TestServiceProcessDueSkipsPausedAutomations`.
-- Campaigns: editor/preview/test send; backend campaigns package tests pass.
+- Campaigns: block-based campaign editing, preview, and SMTP test send; see
+  Task 5 local delivery journey below. External delivery is not proven.
 - Lists/tags/segments: list CRUD/membership/export, tag CRUD and contact
   assignments, grouped segment evaluation, preview, and pagination — proven by
   the P3 Postgres and Playwright outputs above.
-- Templates: list/create UI and backend exist; update/delete, full design
-  editing, and end-to-end template delivery from the UI remain incomplete or
-  unverified.
+- Templates: tenant-scoped list/create/read/update/delete API, block editor,
+  campaign creation from a saved design, and the Task 5 Mailpit journey pass.
 - Sending domains: CRUD/DNS record UI and backend verification are implemented;
   DNS resolution has fake-resolver integration coverage, while live DNS and
   production-provider behavior remain unverified. See P6 evidence above.
 - Settings: workspace settings and membership/invitation flows are wired and
-  exercised in the P2 browser journey. Billing/usage is partial and has no
-  billing-provider end-to-end proof.
-- Reports: reporting page and API are present; report accuracy and complete
-  campaign analytics remain unverified.
+  exercised in the P2 browser journey. Usage displays live counters; no
+  billing provider or plan limits are configured.
+- Reports: API overview and campaign report counters/rates match a seeded
+  Postgres dataset in `TestAnalyticsOverviewIntegration`.
 - Delivery: worker + suppression; tests pass.
 - Projections backfill: `internal/projections` tests pass.
 
@@ -1306,3 +1308,145 @@ https://github.com/mike-kayode/Sendwise-Email/actions/runs/42406798646
 The local sink test uses an in-memory publisher and a discard-only SMTP server;
 it does not exercise NATS broker capacity or real mail delivery. No claim of
 external deliverability or inbox placement is made.
+
+## Task 5 — Templates, reports, usage, and end-to-end proof (local proof complete)
+
+Implemented tenant-scoped template GET/PATCH/DELETE, a reusable content-block
+editor with live preview, template-backed campaign creation, and working
+campaign content editing. The usage page now reports actual contact, 30-day
+submission, and campaign counters; it explicitly states that no billing
+provider or plan limits are configured. Analytics submission counts and rates
+use the same 30-day window, and report errors are surfaced instead of silently
+replaced with campaign metadata.
+
+Postgres-backed API proofs:
+
+```
+$ TEST_DATABASE_URL='postgres://******@localhost:5432/email?sslmode=disable' \
+    go test ./internal/api -run 'TestAnalyticsOverviewIntegration|TestTemplateLifecycleAndTenantIsolationIntegration' -count=1 -v
+=== RUN   TestAnalyticsOverviewIntegration
+--- PASS: TestAnalyticsOverviewIntegration (0.15s)
+=== RUN   TestTemplateLifecycleAndTenantIsolationIntegration
+--- PASS: TestTemplateLifecycleAndTenantIsolationIntegration (0.14s)
+PASS
+ok   github.com/khayode/email-platform/internal/api 1.378s
+```
+
+The analytics test seeds contacts, one completed campaign, recipient snapshots,
+delivery jobs, engagement events, and suppressions, then checks every overview
+counter, rate, campaign recipient total, campaign event total, and top link.
+Template tests exercise create/read/update/delete, malformed JSON, and
+cross-organization read/update/delete and campaign creation (404).
+
+Local Compose browser journey against the real gateway/API, worker, Postgres,
+and Mailpit:
+
+```
+$ cd apps/web && npm run test:e2e -- --grep 'register, import an audience, edit a template, send, and verify campaign reports'
+> @email-platform/web@0.1.0 test:e2e
+> playwright test --grep register, import an audience, edit a template, send, and verify campaign reports
+
+Running 1 test using 1 worker
+  ✓  1 [chromium] › e2e/template-delivery.spec.ts:47:1 › register, import an audience, edit a template, send, and verify campaign reports (13.2s)
+
+1 passed (14.1s)
+```
+
+This registers and verifies an account from Mailpit, creates a list, imports
+three addresses, records explicit synthetic consent for the test contacts,
+creates and edits a template, sends a campaign from it, confirms all three
+messages reached Mailpit, and verifies three submitted recipients in reports.
+This proves local relay acceptance only, not external mail delivery.
+
+Full browser suite, run five consecutive times against the local Compose stack
+(the gateway used the same `600/minute`, `100` burst as CI; Identity used the
+development-only Mailpit relay):
+
+```
+$ cd apps/web && for i in 1 2 3 4 5; do npm run test:e2e; done
+=== PLAYWRIGHT RUN 1/5 ===
+8 passed (39.9s)
+=== PLAYWRIGHT RUN 2/5 ===
+8 passed (45.0s)
+=== PLAYWRIGHT RUN 3/5 ===
+8 passed (42.9s)
+=== PLAYWRIGHT RUN 4/5 ===
+8 passed (45.3s)
+=== PLAYWRIGHT RUN 5/5 ===
+8 passed (42.3s)
+```
+
+The first attempt under the local `.env` defaults was rejected by the gateway
+auth rate limit (`429`). Recreating only the local Identity/Gateway containers
+with the documented development Mailpit override and the CI auth limits resolved
+the test-environment mismatch; no production settings were changed.
+
+Final Go gates:
+
+```
+$ gofmt -l cmd internal services shared
+gofmt -l cmd internal services shared: clean
+$ go vet ./...
+$ TEST_DATABASE_URL='postgres://******@localhost:5432/email?sslmode=disable' go test ./... -count=1
+?    github.com/khayode/email-platform/cmd/api [no test files]
+?    github.com/khayode/email-platform/cmd/backfill [no test files]
+?    github.com/khayode/email-platform/cmd/migrate [no test files]
+?    github.com/khayode/email-platform/cmd/worker [no test files]
+ok   github.com/khayode/email-platform/internal/api 12.765s
+ok   github.com/khayode/email-platform/internal/auth 2.180s
+ok   github.com/khayode/email-platform/internal/automations 2.139s
+ok   github.com/khayode/email-platform/internal/backfill 13.982s
+ok   github.com/khayode/email-platform/internal/campaigns 1.073s
+ok   github.com/khayode/email-platform/internal/config 1.036s
+ok   github.com/khayode/email-platform/internal/contacts 0.904s
+ok   github.com/khayode/email-platform/internal/db 0.799s
+ok   github.com/khayode/email-platform/internal/delivery 0.715s
+?    github.com/khayode/email-platform/internal/httpx [no test files]
+ok   github.com/khayode/email-platform/internal/kit 0.595s
+?    github.com/khayode/email-platform/internal/messaging [no test files]
+?    github.com/khayode/email-platform/internal/observability [no test files]
+ok   github.com/khayode/email-platform/internal/outbox 3.911s
+ok   github.com/khayode/email-platform/internal/projections 0.544s
+?    github.com/khayode/email-platform/internal/session [no test files]
+?    github.com/khayode/email-platform/internal/testutil [no test files]
+ok   github.com/khayode/email-platform/internal/worker 10.053s
+ok   github.com/khayode/email-platform/services/gateway 0.434s
+?    github.com/khayode/email-platform/services/gateway/cmd/gateway [no test files]
+ok   github.com/khayode/email-platform/services/identity 6.043s
+ok   github.com/khayode/email-platform/services/identity/cmd/devseed 0.424s
+?    github.com/khayode/email-platform/services/identity/cmd/identity [no test files]
+ok   github.com/khayode/email-platform/services/workspace 0.444s
+?    github.com/khayode/email-platform/services/workspace/cmd/workspace [no test files]
+ok   github.com/khayode/email-platform/shared/contracts/events 0.328s
+$ go build ./...
+```
+
+Other checks:
+
+```
+$ cd apps/web && npm run typecheck && npm run lint && npm test
+> @email-platform/web@0.1.0 typecheck
+> tsc --noEmit
+
+> @email-platform/web@0.1.0 lint
+> tsc --noEmit
+
+ℹ tests 10
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+
+$ cd apps/web && npm run build
+✓ Compiled successfully
+✓ Generating static pages (26/26)
+
+$ git grep -n -i -E 'coming[[:space:]-]+soon' -- apps/web
+No placeholder matches found in apps/web
+```
+
+The P2 and domain E2E helpers now use condition-based Playwright polling rather
+than fixed 500 ms sleeps. Local Task 5 proof is complete. **Not done yet:** the
+final pushed Task 5 SHA still requires a green GitHub Actions run before this
+task can be marked Done.

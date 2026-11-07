@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
-import { EmailPreview } from "@/components/email-preview";
+import { type EmailDesignBlock } from "@/components/email-design-editor";
 import { Card, CardContent } from "@/components/ui/card";
 import { apiFetch, type Campaign } from "@/lib/auth";
 import EditorForm from "./EditorForm";
@@ -52,7 +52,25 @@ export default function EditorShell({ campaignId }: EditorShellProps) {
   }
 
   const res = campaignQuery.data;
-  const content = typeof res.content === "string" ? JSON.parse(res.content) : res.content ?? {};
+  const content = typeof res.content === "string" ? JSON.parse(res.content) as unknown : res.content;
+  const contentObject = content && typeof content === "object" ? content as Record<string, unknown> : {};
+  const rawBlocks = Array.isArray(contentObject.blocks) ? contentObject.blocks : [];
+  const blocks: EmailDesignBlock[] = rawBlocks.map((rawBlock, index) => {
+    if (!rawBlock || typeof rawBlock !== "object") {
+      return { id: `block-${index}`, type: "paragraph", content: "" };
+    }
+    const block = rawBlock as Record<string, unknown>;
+    return {
+      id: typeof block.id === "string" ? block.id : `block-${index}`,
+      type: typeof block.type === "string" ? block.type : "paragraph",
+      content: typeof block.content === "string" ? block.content : "",
+      ...(typeof block.url === "string" ? { url: block.url } : {}),
+      ...(typeof block.src === "string" ? { src: block.src } : {}),
+      ...(typeof block.alt === "string" ? { alt: block.alt } : {}),
+      ...(typeof block.align === "string" ? { align: block.align } : {}),
+      ...(typeof block.size === "string" ? { size: block.size } : {}),
+    };
+  });
 
   return (
     <div>
@@ -60,26 +78,9 @@ export default function EditorShell({ campaignId }: EditorShellProps) {
 
       <PageHeader
         title={res.name}
-        description={res.subject}
-        actions={
-          <EditorForm
-            campaignId={res.id}
-            initialSubject={res.subject ?? ""}
-            initialPreviewText={content.preview_text ?? ""}
-            initialSenderName={res.sender_name ?? ""}
-            initialSenderEmail={res.sender_email ?? ""}
-            initialSenderPostalAddress={res.sender_postal_address ?? ""}
-            initialReplyTo={res.reply_to ?? ""}
-            initialAudience={res.list_id ?? ""}
-            initialTags=""
-            initialBlocks={content.blocks ?? []}
-          />
-        }
+        description="Edit sender details, subject, and reusable email content."
       />
-
-      <div className="mt-4 rounded-xl bg-slate-100 p-4 sm:p-8">
-        <EmailPreview subject={res.subject} />
-      </div>
+      <EditorForm initialCampaign={res} initialBlocks={blocks} />
     </div>
   );
 }

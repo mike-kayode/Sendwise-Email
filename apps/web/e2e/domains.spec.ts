@@ -8,12 +8,12 @@ async function findVerificationLink(
   request: APIRequestContext,
   email: string,
 ): Promise<string> {
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
+  let foundLink = "";
+  await expect.poll(async () => {
     const response = await request.get(`${MAILPIT_API}/api/v1/search`, {
       params: { query: `to:${email}` },
     });
-    expect(response.ok(), `Mailpit search failed with ${response.status()}`).toBeTruthy();
+    if (!response.ok()) return "";
     const result = (await response.json()) as {
       messages?: Array<{ ID?: string; id?: string; Subject?: string; subject?: string }>;
     };
@@ -21,22 +21,18 @@ async function findVerificationLink(
       (item.Subject ?? item.subject ?? "").toLowerCase().includes("verify your email"),
     );
     const id = message?.ID ?? message?.id;
-    if (id) {
-      const detail = await request.get(
-        `${MAILPIT_API}/api/v1/message/${encodeURIComponent(id)}`,
-      );
-      expect(detail.ok(), `Mailpit message read failed with ${detail.status()}`).toBeTruthy();
-      const content = JSON.stringify(await detail.json());
-      const link = content.match(/https?:\/\/[^\s"'<>\\]+/g)?.find((item) =>
-        item.includes("/auth/verify?"),
-      );
-      if (link) {
-        return link.replaceAll("\\u0026", "&").replaceAll("&amp;", "&");
-      }
-    }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
-  }
-  throw new Error("Mailpit did not receive the domain-page test account verification email");
+    if (!id) return "";
+    const detail = await request.get(`${MAILPIT_API}/api/v1/message/${encodeURIComponent(id)}`);
+    if (!detail.ok()) return "";
+    const content = JSON.stringify(await detail.json());
+    const link = content.match(/https?:\/\/[^\s"'<>\\]+/g)?.find((item) =>
+      item.includes("/auth/verify?"),
+    );
+    if (!link) return "";
+    foundLink = link.replaceAll("\\u0026", "&").replaceAll("&amp;", "&");
+    return foundLink;
+  }, { timeout: 45_000 }).not.toBe("");
+  return foundLink;
 }
 
 function runLocalSQL(sql: string): void {

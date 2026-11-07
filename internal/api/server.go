@@ -137,6 +137,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/segments/{id}", protect(s.deleteSegment, audienceManagers...))
 	mux.Handle("GET /api/v1/templates", protect(s.listTemplates))
 	mux.Handle("POST /api/v1/templates", protect(s.createTemplate, campaignEditors...))
+	mux.Handle("GET /api/v1/templates/{id}", protect(s.getTemplate))
+	mux.Handle("PATCH /api/v1/templates/{id}", protect(s.updateTemplate, campaignEditors...))
+	mux.Handle("DELETE /api/v1/templates/{id}", protect(s.deleteTemplate, campaignManagers...))
 
 	mux.Handle("GET /api/v1/automations", protect(s.listAutomations))
 	mux.Handle("POST /api/v1/automations", protect(s.createAutomation, campaignEditors...))

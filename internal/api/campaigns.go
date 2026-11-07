@@ -176,6 +176,23 @@ func (s *Server) createCampaign(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid_content", "Campaign content must be valid JSON.")
 		return
 	}
+	if input.TemplateID != "" {
+		var templateExists bool
+		if err := s.pool.QueryRow(r.Context(), `
+			SELECT EXISTS (
+				SELECT 1 FROM templates
+				WHERE id = $1 AND organization_id = $2
+			)
+		`, input.TemplateID, s.organizationID(r)).Scan(&templateExists); err != nil {
+			s.logger.Error("check campaign template", "error", err)
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not check the selected template.")
+			return
+		}
+		if !templateExists {
+			httpx.Error(w, http.StatusNotFound, "template_not_found", "The selected template could not be found.")
+			return
+		}
+	}
 
 	c, err := scanCampaign(s.pool.QueryRow(r.Context(), `
 		INSERT INTO campaigns (

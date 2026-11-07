@@ -27,6 +27,12 @@ jobs:
           test -z "$(gofmt -l cmd internal services shared)"
       - name: Go build
         run: go build ./...
+      - name: Reject coming-soon placeholders
+        run: |
+          if git grep -n -i -E 'coming[[:space:]-]+soon' -- apps/web; then
+            echo "Remove coming-soon placeholder text before merging."
+            exit 1
+          fi
       - name: Validate Compose files
         env:
           SERVICE_TOKEN: ci-only-service-token

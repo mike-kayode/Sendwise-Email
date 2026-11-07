@@ -2,11 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	segmentcontacts "github.com/khayode/email-platform/internal/contacts"
 	"github.com/khayode/email-platform/internal/httpx"
 )
@@ -467,4 +469,101 @@ func (s *Server) createTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) getTemplate(w http.ResponseWriter, r *http.Request) {
+	var item emailTemplate
+	err := s.pool.QueryRow(r.Context(), `
+		SELECT id, name, category, design, created_at, updated_at
+		FROM templates
+		WHERE id = $1 AND organization_id = $2
+	`, r.PathValue("id"), s.organizationID(r)).Scan(
+		&item.ID, &item.Name, &item.Category, &item.Design, &item.CreatedAt, &item.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.Error(w, http.StatusNotFound, "template_not_found", "The template could not be found.")
+		return
+	}
+	if err != nil {
+		s.logger.Error("get template", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load the template.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, item)
+}
+
+func (s *Server) updateTemplate(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Name     *string         `json:"name"`
+		Category *string         `json:"category"`
+		Design   json.RawMessage `json:"design"`
+	}
+	if err := httpx.Decode(w, r, &input); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_body", "The request body is invalid.")
+		return
+	}
+	if input.Name != nil {
+		name := strings.TrimSpace(*input.Name)
+		if name == "" {
+			httpx.Error(w, http.StatusBadRequest, "missing_name", "Template name is required.")
+			return
+		}
+		input.Name = &name
+	}
+	if input.Category != nil {
+		category := strings.TrimSpace(*input.Category)
+		if category == "" {
+			httpx.Error(w, http.StatusBadRequest, "missing_category", "Template category is required.")
+			return
+		}
+		input.Category = &category
+	}
+	if len(input.Design) > 0 && !json.Valid(input.Design) {
+		httpx.Error(w, http.StatusBadRequest, "invalid_design", "Template design must be valid JSON.")
+		return
+	}
+
+	var design any
+	if len(input.Design) > 0 {
+		design = []byte(input.Design)
+	}
+	var item emailTemplate
+	err := s.pool.QueryRow(r.Context(), `
+		UPDATE templates
+		SET name = COALESCE($3, name),
+		    category = COALESCE($4, category),
+		    design = COALESCE($5::jsonb, design),
+		    updated_at = now()
+		WHERE id = $1 AND organization_id = $2
+		RETURNING id, name, category, design, created_at, updated_at
+	`, r.PathValue("id"), s.organizationID(r), input.Name, input.Category, design).Scan(
+		&item.ID, &item.Name, &item.Category, &item.Design, &item.CreatedAt, &item.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.Error(w, http.StatusNotFound, "template_not_found", "The template could not be found.")
+		return
+	}
+	if err != nil {
+		s.logger.Error("update template", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not update the template.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, item)
+}
+
+func (s *Server) deleteTemplate(w http.ResponseWriter, r *http.Request) {
+	result, err := s.pool.Exec(r.Context(), `
+		DELETE FROM templates
+		WHERE id = $1 AND organization_id = $2
+	`, r.PathValue("id"), s.organizationID(r))
+	if err != nil {
+		s.logger.Error("delete template", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not delete the template.")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		httpx.Error(w, http.StatusNotFound, "template_not_found", "The template could not be found.")
+		return
+	}
+	httpx.NoContent(w)
 }

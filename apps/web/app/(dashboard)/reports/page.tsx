@@ -13,7 +13,7 @@ import { apiFetch, type AnalyticsOverview, type Campaign, type CampaignReport, t
 import { formatDate, formatNumber } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
 
-type CampaignRow = { campaign: Campaign; report: CampaignReport | null };
+type CampaignRow = { campaign: Campaign; report: CampaignReport };
 
 export default function ReportsPage() {
   const { toast } = useToast();
@@ -30,7 +30,7 @@ export default function ReportsPage() {
       const top = (list.data ?? []).slice(0, 6);
       const reports = await Promise.all(
         top.map((campaign) =>
-          apiFetch<CampaignReport>(`/analytics/campaigns/${campaign.id}`).catch(() => null),
+          apiFetch<CampaignReport>(`/analytics/campaigns/${campaign.id}`),
         ),
       );
       return top.map((campaign, index) => ({ campaign, report: reports[index] })) satisfies CampaignRow[];
@@ -62,9 +62,17 @@ export default function ReportsPage() {
       />
     );
   }
+  if (campaignsQuery.error) {
+    return (
+      <PageHeader
+        eyebrow="Analytics"
+        title="Reports"
+        description={`Could not load campaign reports: ${campaignsQuery.error.message}`}
+      />
+    );
+  }
 
   const submitted = overview.emails_submitted;
-  const rateOf = (count: number) => (submitted > 0 ? Math.round((count / submitted) * 10000) / 100 : 0);
   const deliveredRate = submitted > 0 ? Math.round((100 - overview.bounce_rate) * 100) / 100 : 0;
 
   const handleExport = () => {
@@ -73,9 +81,9 @@ export default function ReportsPage() {
       ...rows.map(({ campaign, report }) => [
         campaign.name,
         campaign.status,
-        String(report?.recipients.total ?? campaign.recipient_count),
-        report ? String(report.rates.open_rate) : "",
-        report ? String(report.rates.click_rate) : "",
+        String(report.recipients.total),
+        String(report.rates.open_rate),
+        String(report.rates.click_rate),
         campaign.completed_at ?? campaign.started_at ?? "",
       ]),
     ];
@@ -107,7 +115,7 @@ export default function ReportsPage() {
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Emails sent" value={overview.emails_submitted} icon={<Send className="h-4 w-4" />} />
+        <StatCard label="Emails sent (30 days)" value={overview.emails_submitted} icon={<Send className="h-4 w-4" />} />
         <StatCard label="Opens (30 days)" value={overview.opens} icon={<Mail className="h-4 w-4" />} />
         <StatCard label="Clicks (30 days)" value={overview.clicks} icon={<MousePointerClick className="h-4 w-4" />} />
         <StatCard label="Contacts" value={overview.contacts} icon={<Users className="h-4 w-4" />} />
@@ -175,7 +183,7 @@ export default function ReportsPage() {
         <Card>
           <CardHeader>
             <CardTitle>Engagement mix</CardTitle>
-            <CardDescription>Across all submitted email (30-day window)</CardDescription>
+            <CardDescription>Across submissions and engagement events in the last 30 days</CardDescription>
           </CardHeader>
           <CardContent>
             <DonutChart
@@ -192,7 +200,7 @@ export default function ReportsPage() {
           <CardHeader>
             <CardTitle>Email activity</CardTitle>
             <CardDescription>
-              {submitted > 0 ? `${formatNumber(submitted)} emails submitted in total` : "No email has been submitted yet"}
+              {submitted > 0 ? `${formatNumber(submitted)} emails submitted in the last 30 days` : "No email has been submitted in the last 30 days"}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -210,15 +218,15 @@ export default function ReportsPage() {
         <Card>
           <CardHeader>
             <CardTitle>Deliverability</CardTitle>
-            <CardDescription>Lifetime submission quality</CardDescription>
+            <CardDescription>Submission quality over the last 30 days</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2 border-b border-slate-100 pb-3 text-sm">
               {[
-                { label: "Delivered", value: submitted > 0 ? `${deliveredRate}%` : "—" },
+                { label: "Not bounced", value: submitted > 0 ? `${deliveredRate}%` : "—" },
                 { label: "Bounced", value: submitted > 0 ? `${overview.bounce_rate}%` : "—" },
-                { label: "Complaints", value: `${formatNumber(overview.complaints)} (${rateOf(overview.complaints)}%)` },
-                { label: "Unsubscribes", value: `${formatNumber(overview.unsubscribes)} (${rateOf(overview.unsubscribes)}%)` },
+                { label: "Complaints", value: formatNumber(overview.complaints) },
+                { label: "Unsubscribes", value: formatNumber(overview.unsubscribes) },
               ].map((item) => (
                 <div key={item.label} className="flex justify-between">
                   <span className="text-slate-500">{item.label}</span>

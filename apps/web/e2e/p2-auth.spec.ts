@@ -8,12 +8,12 @@ async function findMailLink(
   email: string,
   subject: string,
 ): Promise<string> {
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
+  let foundLink = "";
+  await expect.poll(async () => {
     const search = await request.get(`${MAILPIT_API}/api/v1/search`, {
       params: { query: `to:${email}` },
     });
-    expect(search.ok(), `Mailpit search failed with ${search.status()}`).toBeTruthy();
+    if (!search.ok()) return "";
     const result = (await search.json()) as {
       messages?: Array<{ ID?: string; id?: string; Subject?: string; subject?: string }>;
     };
@@ -21,23 +21,22 @@ async function findMailLink(
       (item.Subject ?? item.subject ?? "").toLowerCase().includes(subject.toLowerCase()),
     );
     const id = message?.ID ?? message?.id;
-    if (id) {
-      const detailResponse = await request.get(`${MAILPIT_API}/api/v1/message/${encodeURIComponent(id)}`);
-      expect(detailResponse.ok(), `Mailpit message read failed with ${detailResponse.status()}`).toBeTruthy();
-      const detail = await detailResponse.json();
-      const content = JSON.stringify(detail);
-      const lowerSubject = subject.toLowerCase();
-      const expectedPath = lowerSubject.includes("verify")
-        ? "/auth/verify?"
-        : lowerSubject.includes("invited")
-          ? "/auth/accept-invite?"
-          : "/auth/reset-password?";
-      const link = content.match(/https?:\/\/[^\s"'<>\\]+/g)?.find((item) => item.includes(expectedPath));
-      if (link) return link.replaceAll("\\u0026", "&").replaceAll("&amp;", "&");
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  throw new Error(`Mailpit did not receive "${subject}" for the test account`);
+    if (!id) return "";
+    const detailResponse = await request.get(`${MAILPIT_API}/api/v1/message/${encodeURIComponent(id)}`);
+    if (!detailResponse.ok()) return "";
+    const content = JSON.stringify(await detailResponse.json());
+    const lowerSubject = subject.toLowerCase();
+    const expectedPath = lowerSubject.includes("verify")
+      ? "/auth/verify?"
+      : lowerSubject.includes("invited")
+        ? "/auth/accept-invite?"
+        : "/auth/reset-password?";
+    const link = content.match(/https?:\/\/[^\s"'<>\\]+/g)?.find((item) => item.includes(expectedPath));
+    if (!link) return "";
+    foundLink = link.replaceAll("\\u0026", "&").replaceAll("&amp;", "&");
+    return foundLink;
+  }, { timeout: 45_000 }).not.toBe("");
+  return foundLink;
 }
 
 function tokenFrom(link: string): string {
@@ -115,7 +114,7 @@ test("P2 account email, password reset, and logout journey", async ({ page, requ
   await settingsReady;
   await expect(page.getByText("Workspace name")).toBeVisible();
   await expect.poll(() => refreshRequests).toBe(1);
-  await page.waitForTimeout(500);
+  await page.waitForLoadState("networkidle");
   expect(refreshRequests).toBe(1);
   accessToken = await page.evaluate(() => localStorage.getItem("access_token"));
   expect(accessToken).toBeTruthy();

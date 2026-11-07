@@ -803,17 +803,142 @@ func TestAnalyticsOverviewIntegration(t *testing.T) {
 		t, s, "analytics-owner@example.com", "analytics-password", "Analytics Owner", "Analytics Org",
 	)
 	token := registered.AccessToken
+	organizationID := registered.Organization.ID
+	ctx := context.Background()
+	messagePrefix := uuid.NewString()
+
+	var firstContactID, secondContactID string
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO contacts (organization_id, email, status)
+		VALUES ($1, 'analytics-one@example.test', 'subscribed')
+		RETURNING id
+	`, organizationID).Scan(&firstContactID); err != nil {
+		t.Fatalf("seed first analytics contact: %v", err)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO contacts (organization_id, email, status)
+		VALUES ($1, 'analytics-two@example.test', 'subscribed')
+		RETURNING id
+	`, organizationID).Scan(&secondContactID); err != nil {
+		t.Fatalf("seed second analytics contact: %v", err)
+	}
+
+	campaignResponse := doRequest(t, s, http.MethodPost, "/api/v1/campaigns", `{
+		"name":"Analytics seeded campaign",
+		"subject":"Seeded report"
+	}`, token)
+	assertStatus(t, campaignResponse, http.StatusCreated)
+	var campaign struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(campaignResponse.Body.Bytes(), &campaign); err != nil || campaign.ID == "" {
+		t.Fatalf("decode seeded analytics campaign: id=%q err=%v", campaign.ID, err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		UPDATE campaigns SET status = 'completed', recipient_count = 3
+		WHERE id = $1 AND organization_id = $2
+	`, campaign.ID, organizationID); err != nil {
+		t.Fatalf("mark analytics campaign complete: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO campaign_recipients (organization_id, campaign_id, contact_id, email, status)
+		VALUES
+			($1, $2, $3, 'analytics-one@example.test', 'submitted'),
+			($1, $2, $4, 'analytics-two@example.test', 'submitted'),
+			($1, $2, gen_random_uuid(), 'analytics-bounced@example.test', 'bounced')
+	`, organizationID, campaign.ID, firstContactID, secondContactID); err != nil {
+		t.Fatalf("seed analytics campaign recipients: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status)
+		VALUES
+			($1, $2, $3, $5 || '-one@test', 'submitted'),
+			($1, $2, $4, $5 || '-two@test', 'submitted')
+	`, organizationID, campaign.ID, firstContactID, secondContactID, messagePrefix); err != nil {
+		t.Fatalf("seed analytics delivery jobs: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO message_events (organization_id, campaign_id, contact_id, event_type, url)
+		VALUES
+			($1, $2, $3, 'opened', NULL),
+			($1, $2, $3, 'clicked', 'https://example.test/offer'),
+			($1, $2, $4, 'clicked', 'https://example.test/offer'),
+			($1, $2, gen_random_uuid(), 'bounced', NULL)
+	`, organizationID, campaign.ID, firstContactID, secondContactID); err != nil {
+		t.Fatalf("seed analytics message events: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO suppressions (organization_id, email, reason)
+		VALUES
+			($1, 'analytics-complaint@example.test', 'complaint'),
+			($1, 'analytics-unsubscribe@example.test', 'unsubscribe')
+	`, organizationID); err != nil {
+		t.Fatalf("seed analytics suppressions: %v", err)
+	}
 
 	w := doRequest(t, s, "GET", "/api/v1/analytics/overview", "", token)
 	assertStatus(t, w, http.StatusOK)
 	var overview struct {
-		Contacts   int64   `json:"contacts"`
-		Subscribed int64   `json:"subscribed"`
-		OpenRate   float64 `json:"open_rate"`
-		ClickRate  float64 `json:"click_rate"`
-		BounceRate float64 `json:"bounce_rate"`
+		Contacts      int64   `json:"contacts"`
+		Subscribed    int64   `json:"subscribed"`
+		CampaignsSent int64   `json:"campaigns_sent"`
+		Submitted     int64   `json:"emails_submitted"`
+		Opens         int64   `json:"opens"`
+		Clicks        int64   `json:"clicks"`
+		Bounces       int64   `json:"bounces"`
+		Complaints    int64   `json:"complaints"`
+		Unsubscribes  int64   `json:"unsubscribes"`
+		OpenRate      float64 `json:"open_rate"`
+		ClickRate     float64 `json:"click_rate"`
+		BounceRate    float64 `json:"bounce_rate"`
 	}
-	json.Unmarshal(w.Body.Bytes(), &overview)
+	if err := json.Unmarshal(w.Body.Bytes(), &overview); err != nil {
+		t.Fatalf("decode analytics overview: %v", err)
+	}
+	if overview.Contacts != 2 || overview.Subscribed != 2 || overview.CampaignsSent != 1 ||
+		overview.Submitted != 2 || overview.Opens != 1 || overview.Clicks != 2 ||
+		overview.Bounces != 1 || overview.Complaints != 1 || overview.Unsubscribes != 1 {
+		t.Fatalf("overview counters do not match seeded data: %+v", overview)
+	}
+	if overview.OpenRate != 50 || overview.ClickRate != 100 || overview.BounceRate != 50 {
+		t.Fatalf("overview rates do not match submitted deliveries: open=%v click=%v bounce=%v", overview.OpenRate, overview.ClickRate, overview.BounceRate)
+	}
+
+	reportResponse := doRequest(t, s, http.MethodGet, "/api/v1/analytics/campaigns/"+campaign.ID, "", token)
+	assertStatus(t, reportResponse, http.StatusOK)
+	var report struct {
+		Recipients struct {
+			Total    int64            `json:"total"`
+			ByStatus map[string]int64 `json:"by_status"`
+		} `json:"recipients"`
+		Events struct {
+			ByType map[string]int64 `json:"by_type"`
+		} `json:"events"`
+		Rates struct {
+			OpenRate   float64 `json:"open_rate"`
+			ClickRate  float64 `json:"click_rate"`
+			BounceRate float64 `json:"bounce_rate"`
+		} `json:"rates"`
+		TopLinks []struct {
+			URL    string `json:"url"`
+			Clicks int64  `json:"clicks"`
+		} `json:"top_links"`
+	}
+	if err := json.Unmarshal(reportResponse.Body.Bytes(), &report); err != nil {
+		t.Fatalf("decode campaign report: %v", err)
+	}
+	if report.Recipients.Total != 3 || report.Recipients.ByStatus["submitted"] != 2 || report.Recipients.ByStatus["bounced"] != 1 {
+		t.Fatalf("campaign recipient totals do not match seeded data: %+v", report.Recipients)
+	}
+	if report.Events.ByType["opened"] != 1 || report.Events.ByType["clicked"] != 2 || report.Events.ByType["bounced"] != 1 {
+		t.Fatalf("campaign event counts do not match seeded data: %+v", report.Events)
+	}
+	if report.Rates.OpenRate != 33.33 || report.Rates.ClickRate != 66.67 || report.Rates.BounceRate != 33.33 {
+		t.Fatalf("campaign report rates do not match recipient totals: %+v", report.Rates)
+	}
+	if len(report.TopLinks) != 1 || report.TopLinks[0].URL != "https://example.test/offer" || report.TopLinks[0].Clicks != 2 {
+		t.Fatalf("campaign top links do not match seeded clicks: %+v", report.TopLinks)
+	}
 }
 
 func TestAPIKeyLifecycleIntegration(t *testing.T) {

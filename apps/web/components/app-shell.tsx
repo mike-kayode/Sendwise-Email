@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import {
   BarChart3,
-  CreditCard,
+  Activity,
   Filter,
   Globe,
   LayoutDashboard,
@@ -73,7 +73,7 @@ const navigation: { label: string; items: NavItem[] }[] = [
     label: "Account",
     items: [
       { href: "/settings", label: "Settings", icon: Settings },
-      { href: "/billing", label: "Billing & usage", icon: CreditCard },
+      { href: "/billing", label: "Usage", icon: Activity },
     ],
   },
 ];
