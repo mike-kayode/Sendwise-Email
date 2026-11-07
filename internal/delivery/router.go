@@ -210,9 +210,6 @@ func nextProvider(providers []string, index int) string {
 }
 
 func shouldFailover(kind DeliveryKind, err error) bool {
-	if kind != PlatformDelivery {
-		return false
-	}
 	var permanent *PermanentError
 	if errors.As(err, &permanent) {
 		var providerErr *ProviderError
@@ -221,6 +218,9 @@ func shouldFailover(kind DeliveryKind, err error) bool {
 	var providerErr *ProviderError
 	if errors.As(err, &providerErr) {
 		return providerErr.Temporary
+	}
+	if kind != PlatformDelivery && kind != CampaignDelivery {
+		return false
 	}
 	return true
 }

@@ -169,6 +169,14 @@ func (s *Server) createCampaign(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "missing_name", "Campaign name is required.")
 		return
 	}
+	if input.SenderEmail != "" {
+		normalized, err := delivery.NormalizeSenderAddress(input.SenderEmail)
+		if err != nil {
+			httpx.Error(w, http.StatusBadRequest, "invalid_sender_email", "Enter a valid sender address with a local-part of at most 64 characters.")
+			return
+		}
+		input.SenderEmail = normalized
+	}
 	if len(input.Content) == 0 {
 		input.Content = json.RawMessage(`{"version":1,"blocks":[]}`)
 	}
@@ -286,6 +294,14 @@ func (s *Server) updateCampaign(w http.ResponseWriter, r *http.Request) {
 	if err := httpx.Decode(w, r, &input); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "invalid_body", "The request body is invalid.")
 		return
+	}
+	if input.SenderEmail != nil && strings.TrimSpace(*input.SenderEmail) != "" {
+		normalized, err := delivery.NormalizeSenderAddress(*input.SenderEmail)
+		if err != nil {
+			httpx.Error(w, http.StatusBadRequest, "invalid_sender_email", "Enter a valid sender address with a local-part of at most 64 characters.")
+			return
+		}
+		input.SenderEmail = &normalized
 	}
 	if input.Name != nil && strings.TrimSpace(*input.Name) == "" {
 		httpx.Error(w, http.StatusBadRequest, "missing_name", "Campaign name is required.")
@@ -437,18 +453,27 @@ func (s *Server) validateCampaign(w http.ResponseWriter, r *http.Request) {
 		add("audience", "warning", "No list selected; all subscribed contacts will receive this campaign.")
 	}
 
+	normalizedSender, senderErr := delivery.NormalizeSenderAddress(c.SenderEmail)
 	senderDomain := ""
-	if idx := strings.LastIndex(c.SenderEmail, "@"); idx >= 0 {
-		senderDomain = strings.ToLower(c.SenderEmail[idx+1:])
+	if senderErr == nil {
+		if idx := strings.LastIndex(normalizedSender, "@"); idx >= 0 {
+			senderDomain = strings.ToLower(normalizedSender[idx+1:])
+		}
 	}
-	if senderDomain == "" {
-		add("sending_domain", "error", "The sender email must include a domain.")
+	if senderErr != nil || senderDomain == "" {
+		add("sending_domain", "error", "Enter a valid sender email. Reserved local-parts are not allowed.")
 	} else {
 		var verified bool
 		if err := s.pool.QueryRow(r.Context(), `
 			SELECT EXISTS (
-				SELECT 1 FROM sending_domains
-				WHERE organization_id = $1 AND lower(domain) = $2 AND status = 'verified'
+				SELECT 1
+				FROM sending_domains d
+				LEFT JOIN workspace_delivery_settings w ON w.workspace_id = d.organization_id
+				WHERE d.organization_id = $1 AND lower(d.domain) = $2 AND d.status = 'verified'
+				  AND CASE COALESCE(w.provider, 'stalwart')
+				      WHEN 'resend' THEN d.resend_authenticated
+				      ELSE d.stalwart_authenticated
+				  END
 			)
 		`, s.organizationID(r), senderDomain).Scan(&verified); err != nil {
 			add("sending_domain", "error", "Could not check sending domain verification.")
@@ -747,6 +772,10 @@ func (s *Server) cancelCampaign(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeQueueError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, campaigns.ErrInvalidSender):
+		httpx.Error(w, http.StatusBadRequest, "invalid_sender_email", "Enter a valid sender email and use a non-reserved local-part.")
+	case errors.Is(err, campaigns.ErrDomainUnverified):
+		httpx.Error(w, http.StatusBadRequest, "sending_domain_unverified", "Verify the sender domain with the selected delivery provider before sending.")
 	case errors.Is(err, campaigns.ErrPostalAddress):
 		httpx.Error(w, http.StatusBadRequest, "postal_address_required", "Add the sender's postal address before sending.")
 	case errors.Is(err, campaigns.ErrNotFound):

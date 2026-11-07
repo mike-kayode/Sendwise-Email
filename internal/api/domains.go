@@ -25,26 +25,29 @@ var domainPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+
 const domainColumns = `
 	id, domain, status, dkim_selector, COALESCE(dkim_public_key, '') AS dkim_public_key, verification_token,
 	spf_status, dkim_status, dmarc_status, verification_status, last_checked_at, verified_at, created_at,
-	provider, COALESCE(resend_domain_id, ''), COALESCE(resend_dns_records, '[]'::jsonb)::text
+	provider, COALESCE(resend_domain_id, ''), COALESCE(resend_dns_records, '[]'::jsonb)::text,
+	stalwart_authenticated, resend_authenticated
 `
 
 type sendingDomain struct {
-	ID                 string                     `json:"id"`
-	Domain             string                     `json:"domain"`
-	Status             string                     `json:"status"`
-	DKIMSelector       string                     `json:"dkim_selector"`
-	DKIMPublicKey      string                     `json:"dkim_public_key,omitempty"`
-	VerificationToken  string                     `json:"-"`
-	SPFStatus          string                     `json:"spf_status"`
-	DKIMStatus         string                     `json:"dkim_status"`
-	DMARCStatus        string                     `json:"dmarc_status"`
-	VerificationStatus string                     `json:"verification_status"`
-	LastCheckedAt      *time.Time                 `json:"last_checked_at"`
-	VerifiedAt         *time.Time                 `json:"verified_at"`
-	CreatedAt          time.Time                  `json:"created_at"`
-	Provider           string                     `json:"provider"`
-	ResendDomainID     string                     `json:"resend_domain_id,omitempty"`
-	ResendDNSRecords   []delivery.ResendDNSRecord `json:"resend_dns_records,omitempty"`
+	ID                    string                     `json:"id"`
+	Domain                string                     `json:"domain"`
+	Status                string                     `json:"status"`
+	DKIMSelector          string                     `json:"dkim_selector"`
+	DKIMPublicKey         string                     `json:"dkim_public_key,omitempty"`
+	VerificationToken     string                     `json:"-"`
+	SPFStatus             string                     `json:"spf_status"`
+	DKIMStatus            string                     `json:"dkim_status"`
+	DMARCStatus           string                     `json:"dmarc_status"`
+	VerificationStatus    string                     `json:"verification_status"`
+	LastCheckedAt         *time.Time                 `json:"last_checked_at"`
+	VerifiedAt            *time.Time                 `json:"verified_at"`
+	CreatedAt             time.Time                  `json:"created_at"`
+	Provider              string                     `json:"provider"`
+	ResendDomainID        string                     `json:"resend_domain_id,omitempty"`
+	ResendDNSRecords      []delivery.ResendDNSRecord `json:"resend_dns_records,omitempty"`
+	StalwartAuthenticated bool                       `json:"stalwart_authenticated"`
+	ResendAuthenticated   bool                       `json:"resend_authenticated"`
 }
 
 func scanDomain(row pgx.Row) (*sendingDomain, error) {
@@ -54,6 +57,7 @@ func scanDomain(row pgx.Row) (*sendingDomain, error) {
 		&d.ID, &d.Domain, &d.Status, &d.DKIMSelector, &d.DKIMPublicKey, &d.VerificationToken,
 		&d.SPFStatus, &d.DKIMStatus, &d.DMARCStatus, &d.VerificationStatus,
 		&d.LastCheckedAt, &d.VerifiedAt, &d.CreatedAt, &d.Provider, &d.ResendDomainID, &resendRecords,
+		&d.StalwartAuthenticated, &d.ResendAuthenticated,
 	); err != nil {
 		return nil, err
 	}
@@ -200,6 +204,7 @@ func (s *Server) verifyDomain(w http.ResponseWriter, r *http.Request) {
 		    dkim_status = $5,
 		    dmarc_status = $6,
 		    verification_status = $7,
+		    stalwart_authenticated = ($3 = 'verified'),
 		    last_checked_at = now(),
 		    verified_at = CASE WHEN $3 = 'verified' THEN COALESCE(verified_at, now()) ELSE verified_at END,
 		    updated_at = now()
@@ -296,6 +301,7 @@ func (s *Server) createResendDomain(w http.ResponseWriter, r *http.Request, doma
 		UPDATE sending_domains
 		SET resend_domain_id = $3, resend_dns_records = $4::jsonb, status = $5,
 		    spf_status = $6, dkim_status = $7, dmarc_status = $8, verification_status = $9,
+		    resend_authenticated = ($5 = 'verified'),
 		    last_checked_at = now(),
 		    verified_at = CASE WHEN $5 = 'verified' THEN now() ELSE NULL END,
 		    updated_at = now()
@@ -361,6 +367,7 @@ func (s *Server) verifyResendDomain(w http.ResponseWriter, r *http.Request, doma
 		UPDATE sending_domains
 		SET status = $3, spf_status = $4, dkim_status = $5, dmarc_status = $6,
 		    verification_status = $7, resend_dns_records = $8::jsonb, last_checked_at = now(),
+		    resend_authenticated = ($3 = 'verified'),
 		    verified_at = CASE WHEN $3 = 'verified' THEN COALESCE(verified_at, now()) ELSE verified_at END,
 		    updated_at = now()
 		WHERE id = $1 AND organization_id = $2

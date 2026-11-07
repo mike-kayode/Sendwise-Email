@@ -11,11 +11,18 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/khayode/email-platform/internal/auth"
 	"github.com/khayode/email-platform/internal/delivery"
 )
+
+type integrationProviderFunc func(context.Context, delivery.Message) (*delivery.Result, error)
+
+func (f integrationProviderFunc) Send(ctx context.Context, message delivery.Message) (*delivery.Result, error) {
+	return f(ctx, message)
+}
 
 func TestWorkspaceResendSettingsAndDomainOnboarding(t *testing.T) {
 	if integrationPool == nil {
@@ -26,11 +33,28 @@ func TestWorkspaceResendSettingsAndDomainOnboarding(t *testing.T) {
 	orgB := uuid.NewString()
 	domainName := "news-" + strings.ReplaceAll(orgA[:8], "-", "") + ".example"
 	var creates atomic.Int32
+	var batchRequests atomic.Int32
+	var batchSizes []int
 	fakeResend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer "+fakeAPIKey {
 			t.Errorf("authorization header = %q", got)
 		}
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/emails/batch":
+			var emails []json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&emails); err != nil {
+				t.Error(err)
+			}
+			batchRequests.Add(1)
+			batchSizes = append(batchSizes, len(emails))
+			data := make([]map[string]string, len(emails))
+			for i := range emails {
+				data[i] = map[string]string{"id": fmt.Sprintf("resend_message_%d", i+1)}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{"data": data}); err != nil {
+				t.Error(err)
+			}
 		case r.Method == http.MethodGet && r.URL.Path == "/domains":
 			_, _ = io.WriteString(w, `{"data":[]}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/domains":
@@ -154,6 +178,48 @@ func TestWorkspaceResendSettingsAndDomainOnboarding(t *testing.T) {
 	response.Body.Close()
 	if verifyResponse.Domain.Status != "verified" {
 		t.Fatalf("verified domain status = %q", verifyResponse.Domain.Status)
+	}
+	campaignRouter := delivery.Router{
+		Resolver: delivery.RoutingResolver{Settings: delivery.PostgresRoutingSettings{Pool: integrationPool}},
+		Providers: map[string]delivery.Provider{
+			delivery.ProviderResend: &delivery.WorkspaceResendProvider{
+				Pool: integrationPool, EncryptionKey: integrationCfg.DKIMEncryptionKey,
+				RequestsPerSec: 1000, BaseURL: fakeResend.URL, BatchWait: 50 * time.Millisecond,
+			},
+			delivery.ProviderStalwart: integrationProviderFunc(func(context.Context, delivery.Message) (*delivery.Result, error) {
+				t.Fatal("campaign unexpectedly fell back to Stalwart")
+				return nil, nil
+			}),
+		},
+	}
+	sendResult, err := campaignRouter.Send(context.Background(), delivery.CampaignDelivery, orgA, domainName, delivery.Message{
+		ID: "message_fake_1", WorkspaceID: orgA, CampaignID: "campaign_fake_1",
+		From: "Newsletter@" + domainName, To: "recipient@example.test", Subject: "Test", Text: "Message",
+	})
+	if err != nil || sendResult == nil || sendResult.MessageID == "" {
+		t.Fatalf("send through workspace Resend route = (%#v, %v)", sendResult, err)
+	}
+	results := make(chan error, 2)
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		i := i
+		go func() {
+			<-start
+			_, err := campaignRouter.Send(context.Background(), delivery.CampaignDelivery, orgA, domainName, delivery.Message{
+				ID: fmt.Sprintf("message_fake_%d", i+2), WorkspaceID: orgA, CampaignID: "campaign_fake_1",
+				From: "offers@" + domainName, To: fmt.Sprintf("recipient%d@example.test", i), Subject: "Test", Text: "Message",
+			})
+			results <- err
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("batched Resend send failed: %v", err)
+		}
+	}
+	if batchRequests.Load() != 2 || len(batchSizes) != 2 || batchSizes[0] != 1 || batchSizes[1] != 2 {
+		t.Fatalf("Resend batch calls = %d, sizes = %v; want one single and one two-recipient batch", batchRequests.Load(), batchSizes)
 	}
 
 	response = request(tokenB, http.MethodPut, "/api/v1/settings/delivery", settingsBody)

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	segmentcontacts "github.com/khayode/email-platform/internal/contacts"
+	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/messaging"
 )
 
@@ -20,6 +21,7 @@ var (
 	ErrSegmentNotFound  = errors.New("campaign segment not found")
 	ErrInvalidSegment   = errors.New("campaign segment rules are invalid")
 	ErrDomainUnverified = errors.New("sending domain is not verified")
+	ErrInvalidSender    = errors.New("campaign sender email is invalid")
 	ErrPostalAddress    = errors.New("campaign sender postal address is required")
 )
 
@@ -168,21 +170,51 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 		return 0, ErrInvalidState
 	}
 
+	normalizedSender, senderErr := delivery.NormalizeSenderAddress(senderEmail)
+	if senderErr != nil {
+		return 0, ErrInvalidSender
+	}
+	if normalizedSender != senderEmail {
+		if _, err := tx.Exec(ctx, `
+			UPDATE campaigns SET sender_email = $3, updated_at = now()
+			WHERE id = $1 AND organization_id = $2
+		`, campaignID, organizationID, normalizedSender); err != nil {
+			return 0, fmt.Errorf("normalize campaign sender: %w", err)
+		}
+	}
+	senderEmail = normalizedSender
 	if s.requireVerifiedDomain && senderEmail != "" {
 		domain := domainOf(senderEmail)
 		if domain == "" {
 			return 0, ErrDomainUnverified
 		}
 		var domainStatus string
+		var stalwartAuthenticated, resendAuthenticated bool
+		var provider string
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(provider, 'stalwart')
+			FROM workspace_delivery_settings
+			WHERE workspace_id = $1
+		`, organizationID).Scan(&provider); errors.Is(err, pgx.ErrNoRows) {
+			provider = "stalwart"
+		} else if err != nil {
+			return 0, fmt.Errorf("load workspace delivery provider: %w", err)
+		}
 		err = tx.QueryRow(ctx, `
-			SELECT status FROM sending_domains
+			SELECT status, stalwart_authenticated, resend_authenticated FROM sending_domains
 			WHERE domain = $1 AND organization_id = $2
-		`, domain, organizationID).Scan(&domainStatus)
-		if errors.Is(err, pgx.ErrNoRows) || domainStatus != "verified" {
+		`, domain, organizationID).Scan(&domainStatus, &stalwartAuthenticated, &resendAuthenticated)
+		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, ErrDomainUnverified
 		}
 		if err != nil {
 			return 0, fmt.Errorf("check sending domain: %w", err)
+		}
+		if domainStatus != "verified" {
+			return 0, ErrDomainUnverified
+		}
+		if provider == "resend" && !resendAuthenticated || provider == "stalwart" && !stalwartAuthenticated {
+			return 0, ErrDomainUnverified
 		}
 	}
 

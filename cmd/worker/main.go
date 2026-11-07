@@ -64,13 +64,14 @@ func main() {
 	}()
 
 	tokens := auth.NewManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL)
-	transport := delivery.NewSMTPTransport(
+	var transport delivery.Provider = delivery.NewSMTPTransport(
 		cfg.SMTPAddr,
 		cfg.SMTPHost,
 		cfg.SMTPUsername,
 		cfg.SMTPPassword,
 		cfg.Env == "development" || cfg.Env == "test",
 	)
+	transport = delivery.NewCampaignRouter(pool, cfg.DKIMEncryptionKey, cfg.ResendRequestsPerSecond, transport, logger)
 	campaignService := campaigns.NewService(pool, bus, logger, cfg.MaxDeliveryAttempts, cfg.RequireVerifiedDomain)
 
 	// Mirror identity/workspace events into the legacy schema so foreign keys

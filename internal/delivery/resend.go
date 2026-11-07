@@ -127,6 +127,9 @@ func (t *ResendTransport) Send(ctx context.Context, message Message) (*Result, e
 	if len(results) != 1 {
 		return nil, errors.New("resend returned an unexpected number of batch results")
 	}
+	if !results[0].Accepted {
+		return nil, errors.New("resend did not accept the email")
+	}
 	return &Result{MessageID: results[0].MessageID, Accepted: results[0].Accepted}, nil
 }
 

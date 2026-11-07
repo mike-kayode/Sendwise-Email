@@ -216,6 +216,8 @@ export type SendingDomain = {
   status: string;
   provider?: "stalwart" | "resend";
   resend_domain_id?: string;
+  stalwart_authenticated?: boolean;
+  resend_authenticated?: boolean;
   dkim_selector?: string;
   spf_status?: string;
   dkim_status?: string;
