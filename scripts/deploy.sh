@@ -31,19 +31,37 @@ SMOKE_TEMP_DIR=""
 
 COMMAND="${1:-deploy}"
 case "$COMMAND" in
-  deploy|smoke|rollback|backup) ;;
+  deploy|smoke|rollback|backup|validate) ;;
   development|production)
     ENVIRONMENT_ARG="$COMMAND"
     COMMAND="deploy"
     ;;
   *)
-    echo "Unknown command: $COMMAND (use deploy|smoke|backup|rollback)" >&2
+    echo "Unknown command: $COMMAND (use deploy|smoke|backup|rollback|validate)" >&2
     exit 2
     ;;
 esac
 
 log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 fail() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; exit 1; }
+
+require_tools() {
+  local missing=()
+  local tool
+  for tool in jq curl docker gzip; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing+=("$tool")
+    fi
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    printf '%s\n' "Missing required tools: ${missing[*]}" >&2
+    printf '%s\n' "Install hints:" >&2
+    printf '%s\n' "  macOS: brew install jq curl docker gzip" >&2
+    printf '%s\n' "  Ubuntu/Debian: sudo apt-get install -y jq curl docker.io gzip" >&2
+    exit 1
+  fi
+}
+require_tools
 
 ENV_FILE="${SENDWISE_ENV_FILE:-$ROOT/.env}"
 [ -f "$ENV_FILE" ] || fail ".env not found at $ENV_FILE. Copy .env.example and fill in required secrets."
@@ -132,7 +150,9 @@ validate_smoke_credentials() {
 }
 
 # Catches interpolation errors (e.g. ${WEBHOOK_SECRET:?...} with an empty
-# value) before any container is built or started.
+# value) before any container is built or started. The microservices file is an
+# override and intentionally not validated on its own; only the base and combined
+# Compose configurations are checked.
 check_compose_config() {
   local base=(docker compose --env-file "$ENV_FILE")
   if [ "$USE_ENV_LOCAL" -eq 1 ] && [ -f "$ROOT/.env.local" ]; then
@@ -140,8 +160,6 @@ check_compose_config() {
   fi
   log "Validating docker-compose.yml..."
   "${base[@]}" -f "$ROOT/docker-compose.yml" config -q || fail "docker-compose.yml is invalid"
-  log "Validating docker-compose.microservices.yml..."
-  "${base[@]}" -f "$ROOT/docker-compose.microservices.yml" config -q || fail "docker-compose.microservices.yml is invalid"
   log "Validating the combined Compose configuration..."
   "${COMPOSE[@]}" config -q || fail "docker compose config is invalid"
   log "  all Compose configurations are valid"
@@ -386,6 +404,13 @@ do_rollback() {
 }
 
 case "$COMMAND" in
+  validate)
+    validate_env_keys
+    validate_config
+    run_check_env
+    check_compose_config
+    log "Deploy validation checks passed"
+    ;;
   backup)
     validate_env_keys
     validate_config

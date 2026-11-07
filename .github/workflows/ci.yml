@@ -35,6 +35,25 @@ jobs:
           docker compose -f docker-compose.yml config -q
           docker compose -f docker-compose.yml -f docker-compose.microservices.yml config -q
 
+  deploy-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate deploy script with a sample .env
+        run: |
+          tmp_env="$(mktemp)"
+          cp .env.example "$tmp_env"
+          cat >> "$tmp_env" <<'EOF'
+          SERVICE_TOKEN=ci-only-service-token
+          POSTGRES_PASSWORD=email
+          IDENTITY_DB_PASSWORD=identity_app
+          WORKSPACE_DB_PASSWORD=workspace_app
+          JWT_SECRET=ci-only-jwt-secret
+          WEBHOOK_SECRET=ci-only-webhook-secret
+          DKIM_ENCRYPTION_KEY=ci-only-dkim-key
+          EOF
+          SENDWISE_ENV_FILE="$tmp_env" ./scripts/deploy.sh validate
+
   test-go:
     runs-on: ubuntu-latest
     services:
