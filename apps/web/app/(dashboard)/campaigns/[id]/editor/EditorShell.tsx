@@ -68,6 +68,7 @@ export default function EditorShell({ campaignId }: EditorShellProps) {
             initialPreviewText={content.preview_text ?? ""}
             initialSenderName={res.sender_name ?? ""}
             initialSenderEmail={res.sender_email ?? ""}
+            initialSenderPostalAddress={res.sender_postal_address ?? ""}
             initialReplyTo={res.reply_to ?? ""}
             initialAudience={res.list_id ?? ""}
             initialTags=""

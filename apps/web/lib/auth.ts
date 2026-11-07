@@ -189,6 +189,8 @@ export type Campaign = {
   preview_text?: string;
   sender_name: string;
   sender_email: string;
+  sender_postal_address?: string;
+  alerts?: { type: string; message: string; created_at: string }[];
   reply_to?: string;
   list_id?: string;
   segment_id?: string;

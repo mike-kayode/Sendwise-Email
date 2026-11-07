@@ -410,20 +410,175 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 
 	w = doRequest(t, s, "POST", "/api/v1/campaigns/"+campaignID+"/validate", "", token)
 	assertStatus(t, w, http.StatusOK)
+	var validation struct {
+		Checks []validationCheck `json:"checks"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &validation); err != nil {
+		t.Fatalf("decode campaign validation: %v", err)
+	}
+	var postalAddressRequired bool
+	for _, check := range validation.Checks {
+		if check.Name == "postal_address" && check.Status == "error" {
+			postalAddressRequired = true
+		}
+	}
+	if !postalAddressRequired {
+		t.Fatal("campaign validation did not require a sender postal address")
+	}
 
 	scheduleBody, err := json.Marshal(scheduleInput{ScheduledAt: time.Now().Add(time.Hour)})
 	if err != nil {
 		t.Fatalf("encode campaign schedule: %v", err)
 	}
 	w = doRequest(t, s, "POST", "/api/v1/campaigns/"+campaignID+"/schedule", string(scheduleBody), token)
-	assertStatus(t, w, http.StatusOK, http.StatusAccepted)
+	assertStatus(t, w, http.StatusBadRequest)
 
-	updateBody := `{"name":"Updated Integration Campaign"}`
+	updateBody := `{"name":"Updated Integration Campaign","sender_postal_address":"1 Integration Way"}`
 	w = doRequest(t, s, "PATCH", "/api/v1/campaigns/"+campaignID, updateBody, token)
 	assertStatus(t, w, http.StatusOK)
 
+	w = doRequest(t, s, "POST", "/api/v1/campaigns/"+campaignID+"/schedule", string(scheduleBody), token)
+	assertStatus(t, w, http.StatusOK, http.StatusAccepted)
+
 	w = doRequest(t, s, "POST", "/api/v1/campaigns/"+campaignID+"/cancel", "", token)
 	assertStatus(t, w, http.StatusOK)
+}
+
+func TestReputationThresholdPausesCampaignIntegration(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	s := newIntegrationServer(t)
+	owner := registerIntegrationUser(t, s, "reputation-owner@example.com", "reputation-password", "Reputation Owner", "Reputation Org")
+	ctx := context.Background()
+	var campaignID, contactID string
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO campaigns (organization_id, created_by, name, status, sender_email)
+		VALUES ($1, $2, 'Reputation threshold proof', 'sending', 'hello@example.com')
+		RETURNING id
+	`, owner.Organization.ID, owner.User.ID).Scan(&campaignID); err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO contacts (organization_id, email, status)
+		VALUES ($1, 'reputation-bounce@example.test', 'subscribed')
+		RETURNING id
+	`, owner.Organization.ID).Scan(&contactID); err != nil {
+		t.Fatalf("create contact: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO campaign_recipients (organization_id, campaign_id, contact_id, email, status)
+		VALUES
+			($1, $2, $3, 'reputation-bounce@example.test', 'submitted'),
+			($1, $2, gen_random_uuid(), 'reputation-good@example.test', 'pending')
+	`, owner.Organization.ID, campaignID, contactID); err != nil {
+		t.Fatalf("create campaign recipient snapshot: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status)
+		VALUES ($1, $2, $3, gen_random_uuid()::text || '@test', 'submitted')
+	`, owner.Organization.ID, campaignID, contactID); err != nil {
+		t.Fatalf("create submitted delivery job: %v", err)
+	}
+
+	handler := &DeliveryHandler{
+		pool: integrationPool, logger: testLogger(), maxBounceRate: 0.25, maxComplaintRate: 0.9,
+	}
+	if err := handler.recordReputationSignal(ctx, owner.Organization.ID, "reputation-bounce@example.test", campaignID, "bounced", "550 mailbox unavailable"); err != nil {
+		t.Fatalf("record bounce feedback: %v", err)
+	}
+	var status string
+	if err := integrationPool.QueryRow(ctx, `SELECT status FROM campaigns WHERE id = $1`, campaignID).Scan(&status); err != nil {
+		t.Fatalf("load campaign status: %v", err)
+	}
+	if status != "paused" {
+		t.Fatalf("campaign status = %q, want paused", status)
+	}
+	var alerts int
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT count(*) FROM campaign_alerts WHERE campaign_id = $1 AND alert_type = 'reputation_pause'
+	`, campaignID).Scan(&alerts); err != nil {
+		t.Fatalf("count campaign alerts: %v", err)
+	}
+	if alerts != 1 {
+		t.Fatalf("reputation alerts = %d, want 1", alerts)
+	}
+
+	var complaintCampaignID, complaintContactID string
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO campaigns (organization_id, created_by, name, status, sender_email)
+		VALUES ($1, $2, 'Complaint threshold proof', 'sending', 'hello@example.com')
+		RETURNING id
+	`, owner.Organization.ID, owner.User.ID).Scan(&complaintCampaignID); err != nil {
+		t.Fatalf("create complaint campaign: %v", err)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO contacts (organization_id, email, status)
+		VALUES ($1, 'reputation-complaint@example.test', 'subscribed')
+		RETURNING id
+	`, owner.Organization.ID).Scan(&complaintContactID); err != nil {
+		t.Fatalf("create complaint contact: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO campaign_recipients (organization_id, campaign_id, contact_id, email, status)
+		VALUES
+			($1, $2, $3, 'reputation-complaint@example.test', 'submitted'),
+			($1, $2, gen_random_uuid(), 'complaint-good@example.test', 'pending')
+	`, owner.Organization.ID, complaintCampaignID, complaintContactID); err != nil {
+		t.Fatalf("create complaint recipient snapshot: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status)
+		VALUES ($1, $2, $3, gen_random_uuid()::text || '@test', 'accepted')
+	`, owner.Organization.ID, complaintCampaignID, complaintContactID); err != nil {
+		t.Fatalf("create complaint delivery job: %v", err)
+	}
+	domain := "feedback-" + uuid.NewString() + ".example.test"
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO sending_domains (organization_id, domain)
+		VALUES ($1, $2)
+	`, owner.Organization.ID, domain); err != nil {
+		t.Fatalf("create complaint webhook sending domain: %v", err)
+	}
+	handler.maxBounceRate, handler.maxComplaintRate = 0.9, 0.25
+	body, err := json.Marshal(complaintWebhook{
+		Email: "reputation-complaint@example.test", Domain: domain,
+		CampaignID: complaintCampaignID, FeedbackType: "spam",
+	})
+	if err != nil {
+		t.Fatalf("encode complaint webhook: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.complaintWebhook(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("complaint webhook status = %d, want 204; body: %s", response.Code, response.Body.String())
+	}
+	var suppressionCount int
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT count(*) FROM suppressions
+		WHERE organization_id = $1 AND lower(email) = 'reputation-complaint@example.test'
+	`, owner.Organization.ID).Scan(&suppressionCount); err != nil {
+		t.Fatalf("count complaint suppression: %v", err)
+	}
+	if suppressionCount != 1 {
+		t.Fatalf("complaint suppression count = %d, want 1", suppressionCount)
+	}
+	var contactStatus string
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT status FROM contacts WHERE id = $1
+	`, complaintContactID).Scan(&contactStatus); err != nil {
+		t.Fatalf("load complaint contact status: %v", err)
+	}
+	if contactStatus != "suppressed" {
+		t.Fatalf("complaint contact status = %q, want suppressed", contactStatus)
+	}
+	if err := integrationPool.QueryRow(ctx, `SELECT status FROM campaigns WHERE id = $1`, complaintCampaignID).Scan(&status); err != nil {
+		t.Fatalf("load complaint campaign status: %v", err)
+	}
+	if status != "paused" {
+		t.Fatalf("complaint campaign status = %q, want paused", status)
+	}
 }
 
 func TestDomainsIntegration(t *testing.T) {

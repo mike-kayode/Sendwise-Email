@@ -23,6 +23,7 @@ type EditorFormProps = {
   initialPreviewText: string;
   initialSenderName: string;
   initialSenderEmail: string;
+  initialSenderPostalAddress: string;
   initialReplyTo: string;
   initialAudience: string;
   initialTags: string;
@@ -35,6 +36,7 @@ export default function EditorForm({
   initialPreviewText,
   initialSenderName,
   initialSenderEmail,
+  initialSenderPostalAddress,
   initialReplyTo,
   initialAudience,
   initialTags,
@@ -46,6 +48,7 @@ export default function EditorForm({
   const [previewText, setPreviewText] = useState(initialPreviewText);
   const [senderName, setSenderName] = useState(initialSenderName);
   const [senderEmail, setSenderEmail] = useState(initialSenderEmail);
+  const [senderPostalAddress, setSenderPostalAddress] = useState(initialSenderPostalAddress);
   const [replyTo, setReplyTo] = useState(initialReplyTo);
   const [audience, setAudience] = useState(initialAudience);
   const [tags, setTags] = useState(initialTags);
@@ -65,6 +68,7 @@ export default function EditorForm({
       setPreviewText(parsed.preview_text ?? "");
       setSenderName(res.sender_name ?? "");
       setSenderEmail(res.sender_email ?? "");
+      setSenderPostalAddress(res.sender_postal_address ?? "");
       setReplyTo(res.reply_to ?? "");
       setAudience(res.list_id ?? "");
       setBlocks(parsed.blocks ?? []);
@@ -90,6 +94,7 @@ export default function EditorForm({
           preview_text: previewText,
           sender_name: senderName,
           sender_email: senderEmail,
+          sender_postal_address: senderPostalAddress,
           reply_to: replyTo,
           content,
           track_opens: trackOpens,
@@ -117,24 +122,35 @@ export default function EditorForm({
   }
 
   return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div className="flex items-center gap-3">
-        <Link href={`/campaigns/${campaign.id}`} className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100">
-          <ArrowLeft className="h-4 w-4" />
-        </Link>
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-lg font-semibold text-slate-900">{campaign.name}</h1>
-            <Badge variant="neutral">{campaign.status}</Badge>
+    <div className="space-y-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3">
+          <Link href={`/campaigns/${campaign.id}`} className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100">
+            <ArrowLeft className="h-4 w-4" />
+          </Link>
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-lg font-semibold text-slate-900">{campaign.name}</h1>
+              <Badge variant="neutral">{campaign.status}</Badge>
+            </div>
+            <p className="text-xs text-slate-500">Saved just now · all changes stored</p>
           </div>
-          <p className="text-xs text-slate-500">Saved just now · all changes stored</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleSave} disabled={saving} className="w-full sm:w-auto">
+            {saving ? "Saving..." : <><Send className="h-4 w-4" /> Save</>}
+          </Button>
         </div>
       </div>
-      <div className="flex items-center gap-2">
-        <Button onClick={handleSave} disabled={saving} className="w-full sm:w-auto">
-          {saving ? "Saving..." : <><Send className="h-4 w-4" /> Save</>}
-        </Button>
-      </div>
+      <label className="block text-xs font-medium text-slate-600">
+        Sender postal address
+        <Input
+          className="mt-1"
+          value={senderPostalAddress}
+          onChange={(event) => setSenderPostalAddress(event.target.value)}
+          placeholder="Your organization's postal address"
+        />
+      </label>
     </div>
   );
 }

@@ -57,8 +57,11 @@ export default function CampaignPreviewPage() {
     if (!window.confirm(`Send "${campaign.name}" to all of its recipients now? This cannot be undone.`)) return;
     setSending(true);
     try {
-      await apiFetch(`/campaigns/${campaign.id}/send`, { method: "POST" });
-      toast({ title: "Campaign sending", description: "Delivery has started. Watch the report for progress." });
+      const plan = await apiFetch<{ send_today: number; queued_later: number }>(`/campaigns/${campaign.id}/send`, { method: "POST" });
+      toast({
+        title: "Campaign sending",
+        description: `${plan.send_today.toLocaleString()} will go out today; ${plan.queued_later.toLocaleString()} are queued for later warm-up days.`,
+      });
       refresh();
     } catch (err: any) {
       toast({ title: "Could not send campaign", description: err?.message ?? "Unknown error", variant: "destructive" });

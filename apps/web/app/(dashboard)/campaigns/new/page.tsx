@@ -38,6 +38,7 @@ export default function NewCampaignPage() {
   const [previewText, setPreviewText] = useState("");
   const [senderName, setSenderName] = useState("");
   const [senderEmail, setSenderEmail] = useState("");
+  const [senderPostalAddress, setSenderPostalAddress] = useState("");
   const [notes, setNotes] = useState("");
   const [listId, setSelectedListId] = useState<string | null>(null); // null → default to first list; "" → all contacts
   const [delivery, setDelivery] = useState<"draft" | "schedule">("draft");
@@ -80,6 +81,7 @@ export default function NewCampaignPage() {
       preview_text: previewText.trim(),
       sender_name: senderName.trim() || "Sendwise",
       sender_email: senderEmailValue.trim(),
+      sender_postal_address: senderPostalAddress.trim(),
     };
     if (notes.trim()) body.reply_to = notes.trim();
     if (effectiveListId) body.list_id = effectiveListId;
@@ -247,6 +249,19 @@ export default function NewCampaignPage() {
                   </Link>
                 ) : null}
               </div>
+            </div>
+            <div>
+              <label htmlFor="sender-postal-address" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Sender postal address
+              </label>
+              <Textarea
+                id="sender-postal-address"
+                placeholder="Your organization&apos;s postal address"
+                value={senderPostalAddress}
+                onChange={(e) => setSenderPostalAddress(e.target.value)}
+                rows={3}
+              />
+              <p className="mt-1 text-xs text-slate-500">Included in every campaign footer for compliance.</p>
             </div>
             <div>
               <label htmlFor="reply-to" className="mb-1.5 block text-sm font-medium text-slate-700">

@@ -20,6 +20,7 @@ var (
 	ErrSegmentNotFound  = errors.New("campaign segment not found")
 	ErrInvalidSegment   = errors.New("campaign segment rules are invalid")
 	ErrDomainUnverified = errors.New("sending domain is not verified")
+	ErrPostalAddress    = errors.New("campaign sender postal address is required")
 )
 
 type Publisher interface {
@@ -145,18 +146,21 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 
 	var status string
 	var listID, segmentID *string
-	var senderEmail string
+	var senderEmail, senderPostalAddress string
 	err = tx.QueryRow(ctx, `
-		SELECT status, list_id, segment_id, sender_email
+		SELECT status, list_id, segment_id, sender_email, COALESCE(sender_postal_address, '')
 		FROM campaigns
 		WHERE id = $1 AND organization_id = $2
 		FOR UPDATE
-	`, campaignID, organizationID).Scan(&status, &listID, &segmentID, &senderEmail)
+	`, campaignID, organizationID).Scan(&status, &listID, &segmentID, &senderEmail, &senderPostalAddress)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, ErrNotFound
 	}
 	if err != nil {
 		return 0, fmt.Errorf("load campaign: %w", err)
+	}
+	if strings.TrimSpace(senderPostalAddress) == "" {
+		return 0, ErrPostalAddress
 	}
 	switch status {
 	case "processing", "sending", "paused", "scheduled":
@@ -256,32 +260,6 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 		return 0, fmt.Errorf("create delivery jobs: %w", err)
 	}
 
-	rows, err := tx.Query(ctx, `
-		SELECT id, contact_id
-		FROM delivery_jobs
-		WHERE campaign_id = $1 AND organization_id = $2 AND status = 'queued'
-	`, campaignID, organizationID)
-	if err != nil {
-		return 0, fmt.Errorf("load queued jobs: %w", err)
-	}
-
-	var jobs []JobPayload
-	for rows.Next() {
-		job := JobPayload{
-			OrganizationID: organizationID,
-			CampaignID:     campaignID,
-		}
-		if err := rows.Scan(&job.JobID, &job.ContactID); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("scan queued job: %w", err)
-		}
-		jobs = append(jobs, job)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate queued jobs: %w", err)
-	}
-
 	var recipientCount int
 	if err := tx.QueryRow(ctx,
 		`SELECT count(*) FROM campaign_recipients WHERE campaign_id = $1 AND organization_id = $2`,
@@ -315,22 +293,63 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 		return 0, fmt.Errorf("commit queue transaction: %w", err)
 	}
 
+	var queuedCount int
+	if err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM delivery_jobs
+		WHERE campaign_id = $1 AND organization_id = $2 AND status = 'queued'
+	`, campaignID, organizationID).Scan(&queuedCount); err != nil {
+		return 0, fmt.Errorf("count queued jobs: %w", err)
+	}
 	if s.publisher == nil {
 		s.logger.Warn("no message publisher configured; delivery jobs remain queued", "campaign_id", campaignID)
-		return len(jobs), nil
+		return queuedCount, nil
 	}
 
-	for _, job := range jobs {
-		payload, err := json.Marshal(job)
+	const publishBatchSize = 500
+	var lastID *string
+	for {
+		rows, err := s.pool.Query(ctx, `
+			SELECT id, contact_id
+			FROM delivery_jobs
+			WHERE campaign_id = $1 AND organization_id = $2 AND status = 'queued'
+			  AND ($3::uuid IS NULL OR id > $3::uuid)
+			ORDER BY id
+			LIMIT $4
+		`, campaignID, organizationID, lastID, publishBatchSize)
 		if err != nil {
-			continue
+			return queuedCount, fmt.Errorf("load queued jobs: %w", err)
 		}
-		if err := s.publisher.Publish(ctx, messaging.SubjectDeliveryJobs, payload); err != nil {
-			s.logger.Error("publish delivery job", "job_id", job.JobID, "error", err)
+		batch := make([]JobPayload, 0, publishBatchSize)
+		for rows.Next() {
+			job := JobPayload{OrganizationID: organizationID, CampaignID: campaignID}
+			if err := rows.Scan(&job.JobID, &job.ContactID); err != nil {
+				rows.Close()
+				return queuedCount, fmt.Errorf("scan queued job: %w", err)
+			}
+			batch = append(batch, job)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return queuedCount, fmt.Errorf("iterate queued jobs: %w", err)
+		}
+		rows.Close()
+		if len(batch) == 0 {
+			break
+		}
+		for _, job := range batch {
+			jobID := job.JobID
+			lastID = &jobID
+			payload, err := json.Marshal(job)
+			if err != nil {
+				return queuedCount, fmt.Errorf("encode delivery job %s: %w", job.JobID, err)
+			}
+			if err := s.publisher.Publish(ctx, messaging.SubjectDeliveryJobs, payload); err != nil {
+				s.logger.Error("publish delivery job", "job_id", job.JobID, "error", err)
+			}
 		}
 	}
 
-	return len(jobs), nil
+	return queuedCount, nil
 }
 
 func domainOf(email string) string {

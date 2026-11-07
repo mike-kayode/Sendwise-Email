@@ -88,6 +88,12 @@ export default function CampaignDetailPage() {
         <span>{formatNumber(campaign.recipient_count)} recipients</span>
       </div>
 
+      {campaign.alerts?.map((alert) => (
+        <div key={`${alert.type}-${alert.created_at}`} role="alert" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          {alert.message}
+        </div>
+      ))}
+
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Recipients" value={recipientTotal} icon={<Users className="h-4 w-4" />} />
         <StatCard label="Accepted" value={recipientStatuses.accepted ?? 0} icon={<Mail className="h-4 w-4" />} />
@@ -122,6 +128,7 @@ export default function CampaignDetailPage() {
           <CardContent className="space-y-3 text-sm">
             <div className="flex justify-between gap-4"><span className="text-slate-500">Sender</span><span className="text-right font-medium text-slate-900">{campaign.sender_email}</span></div>
             <div className="flex justify-between gap-4"><span className="text-slate-500">Reply-to</span><span className="text-right font-medium text-slate-900">{campaign.reply_to || "Same as sender"}</span></div>
+            <div className="flex justify-between gap-4"><span className="text-slate-500">Postal address</span><span className="text-right font-medium text-slate-900">{campaign.sender_postal_address || "Required before sending"}</span></div>
             <div className="flex justify-between gap-4"><span className="text-slate-500">Open tracking</span><span className="text-right font-medium text-slate-900">{campaign.track_opens ? "On" : "Off"}</span></div>
             <div className="flex justify-between gap-4"><span className="text-slate-500">Click tracking</span><span className="text-right font-medium text-slate-900">{campaign.track_clicks ? "On" : "Off"}</span></div>
           </CardContent>

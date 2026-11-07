@@ -70,28 +70,39 @@ type complaintWebhook struct {
 }
 
 type DeliveryHandler struct {
-	pool          *pgxpool.Pool
-	tokens        *auth.Manager
-	logger        *slog.Logger
-	replayer      deliveryService
-	publisher     publisher
-	webhookSecret string
-	idempotency   *idempotencyStore
+	pool             *pgxpool.Pool
+	tokens           *auth.Manager
+	logger           *slog.Logger
+	maxBounceRate    float64
+	maxComplaintRate float64
+	replayer         deliveryService
+	publisher        publisher
+	webhookSecret    string
+	idempotency      *idempotencyStore
 }
 
 type publisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
 }
 
-func NewDeliveryHandler(pool *pgxpool.Pool, tokens *auth.Manager, logger *slog.Logger, replayer deliveryService, publisher publisher, webhookSecret string) *DeliveryHandler {
+func NewDeliveryHandler(pool *pgxpool.Pool, tokens *auth.Manager, logger *slog.Logger, replayer deliveryService, publisher publisher, webhookSecret string, thresholds ...float64) *DeliveryHandler {
+	maxBounceRate, maxComplaintRate := 0.05, 0.001
+	if len(thresholds) > 0 {
+		maxBounceRate = thresholds[0]
+	}
+	if len(thresholds) > 1 {
+		maxComplaintRate = thresholds[1]
+	}
 	return &DeliveryHandler{
-		pool:          pool,
-		tokens:        tokens,
-		logger:        logger,
-		replayer:      replayer,
-		publisher:     publisher,
-		webhookSecret: webhookSecret,
-		idempotency:   newIdempotencyStore(),
+		pool:             pool,
+		tokens:           tokens,
+		logger:           logger,
+		maxBounceRate:    maxBounceRate,
+		maxComplaintRate: maxComplaintRate,
+		replayer:         replayer,
+		publisher:        publisher,
+		webhookSecret:    webhookSecret,
+		idempotency:      newIdempotencyStore(),
 	}
 }
 
@@ -283,14 +294,16 @@ func (h *DeliveryHandler) bounceWebhook(w http.ResponseWriter, r *http.Request) 
 		h.logger.Warn("mark contact suppressed", "error", err)
 	}
 
-	if _, err := h.pool.Exec(r.Context(), `
-		UPDATE delivery_jobs
-		SET status = 'bounced', bounce_type = 'hard', smtp_code = $3,
-		    last_error = $4, updated_at = now()
-		WHERE organization_id = $1 AND lower(COALESCE(message_id, '')) = lower($2)
-		  AND status IN ('queued', 'processing', 'deferred')
-	`, orgID, input.Email, input.SMTPCode, input.Reason); err != nil {
-		h.logger.Warn("update bounced jobs", "error", err)
+	if reason == "hard_bounce" || reason == "complaint" {
+		eventType := "bounced"
+		if reason == "complaint" {
+			eventType = "complained"
+		}
+		if err := h.recordReputationSignal(r.Context(), orgID, input.Email, input.CampaignID, eventType, input.Reason); err != nil {
+			h.logger.Error("record reputation signal", "error", err)
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not record delivery feedback.")
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -342,7 +355,111 @@ func (h *DeliveryHandler) complaintWebhook(w http.ResponseWriter, r *http.Reques
 		h.logger.Warn("mark contact suppressed", "error", err)
 	}
 
+	if err := h.recordReputationSignal(r.Context(), orgID, input.Email, input.CampaignID, "complained", input.FeedbackType); err != nil {
+		h.logger.Error("record complaint signal", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not record complaint feedback.")
+		return
+	}
+
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *DeliveryHandler) recordReputationSignal(ctx context.Context, organizationID, email, campaignID, eventType, details string) error {
+	status := "bounced"
+	if eventType == "complained" {
+		status = "complained"
+	}
+	rows, err := h.pool.Query(ctx, `
+		SELECT dj.id, dj.campaign_id, dj.contact_id
+		FROM delivery_jobs dj
+		JOIN campaign_recipients cr
+		  ON cr.campaign_id = dj.campaign_id AND cr.contact_id = dj.contact_id
+		WHERE dj.organization_id = $1 AND lower(cr.email) = lower($2)
+		  AND ($3::uuid IS NULL OR dj.campaign_id = $3)
+		  AND dj.status IN ('queued', 'processing', 'deferred', 'submitted', 'accepted')
+	`, organizationID, email, nullIfEmpty(campaignID))
+	if err != nil {
+		return fmt.Errorf("find affected campaign deliveries: %w", err)
+	}
+	type affectedDelivery struct{ jobID, campaignID, contactID string }
+	var deliveries []affectedDelivery
+	for rows.Next() {
+		var item affectedDelivery
+		if err := rows.Scan(&item.jobID, &item.campaignID, &item.contactID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan affected campaign delivery: %w", err)
+		}
+		deliveries = append(deliveries, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate affected campaign deliveries: %w", err)
+	}
+	rows.Close()
+
+	campaigns := make(map[string]struct{})
+	for _, item := range deliveries {
+		if _, err := h.pool.Exec(ctx, `
+			UPDATE delivery_jobs SET status = $2, last_error = $3, updated_at = now()
+			WHERE id = $1
+		`, item.jobID, status, details); err != nil {
+			return fmt.Errorf("update affected delivery: %w", err)
+		}
+		if _, err := h.pool.Exec(ctx, `
+			UPDATE campaign_recipients SET status = $3
+			WHERE campaign_id = $1 AND contact_id = $2
+		`, item.campaignID, item.contactID, status); err != nil {
+			return fmt.Errorf("update campaign recipient feedback: %w", err)
+		}
+		if _, err := h.pool.Exec(ctx, `
+			INSERT INTO message_events
+				(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)
+			VALUES ($1, $2, $3, $4, $5, jsonb_build_object('feedback', $6::text))
+		`, organizationID, item.campaignID, item.contactID, item.jobID, eventType, details); err != nil {
+			return fmt.Errorf("record campaign feedback event: %w", err)
+		}
+		campaigns[item.campaignID] = struct{}{}
+	}
+
+	for campaignID := range campaigns {
+		var total, bounced, complained int
+		if err := h.pool.QueryRow(ctx, `
+			SELECT count(*),
+			       count(*) FILTER (WHERE status = 'bounced'),
+			       count(*) FILTER (WHERE status = 'complained')
+			FROM campaign_recipients
+			WHERE organization_id = $1 AND campaign_id = $2
+		`, organizationID, campaignID).Scan(&total, &bounced, &complained); err != nil {
+			return fmt.Errorf("count campaign reputation events: %w", err)
+		}
+		if total == 0 || (float64(bounced)/float64(total) <= h.maxBounceRate &&
+			float64(complained)/float64(total) <= h.maxComplaintRate) {
+			continue
+		}
+		message := fmt.Sprintf("Campaign paused automatically: bounce rate %.2f%% (limit %.2f%%), complaint rate %.3f%% (limit %.3f%%).",
+			100*float64(bounced)/float64(total), 100*h.maxBounceRate,
+			100*float64(complained)/float64(total), 100*h.maxComplaintRate)
+		var pausedID string
+		err := h.pool.QueryRow(ctx, `
+			UPDATE campaigns SET status = 'paused', paused_at = now(), updated_at = now()
+			WHERE id = $1 AND organization_id = $2 AND status IN ('processing', 'sending')
+			RETURNING id
+		`, campaignID, organizationID).Scan(&pausedID)
+		if err == pgx.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("pause campaign after reputation threshold: %w", err)
+		}
+		if _, err := h.pool.Exec(ctx, `
+			INSERT INTO campaign_alerts (organization_id, campaign_id, alert_type, message)
+			VALUES ($1, $2, 'reputation_pause', $3)
+		`, organizationID, campaignID, message); err != nil {
+			return fmt.Errorf("create campaign reputation alert: %w", err)
+		}
+		h.logger.Warn("campaign paused after reputation threshold", "campaign_id", campaignID, "message", message)
+	}
+	return nil
 }
 
 type suppressionInput struct {

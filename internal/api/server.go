@@ -45,7 +45,7 @@ func New(
 		tokens:      tokens,
 		campaigns:   campaignService,
 		apiKeys:     apiKeyService,
-		delivery:    NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret),
+		delivery:    NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret, cfg.MaxBounceRate, cfg.MaxComplaintRate),
 		dnsResolver: newDNSResolver(cfg.DNSResolverAddr, cfg.DNSResolverTimeout),
 		logger:      logger,
 	}

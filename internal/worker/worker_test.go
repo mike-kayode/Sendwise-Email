@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/khayode/email-platform/internal/campaigns"
+	"github.com/khayode/email-platform/internal/config"
+	"golang.org/x/time/rate"
 )
 
 func TestBackoff(t *testing.T) {
@@ -193,10 +195,48 @@ func TestAppendBeforeBodyClose(t *testing.T) {
 	if !strings.Contains(result, `<img src="track.gif"></body>`) {
 		t.Fatalf("appendBeforeBodyClose() did not insert before </body>: %q", result)
 	}
-
 	noBody := "<html><p>no body tag</p></html>"
 	result2 := appendBeforeBodyClose(noBody, fragment)
 	if !strings.HasSuffix(result2, fragment) {
 		t.Fatalf("appendBeforeBodyClose() should append fragment when no </body>: %q", result2)
+	}
+}
+
+func TestWarmupDailyCap(t *testing.T) {
+	tests := []struct {
+		name          string
+		successfulDay int
+		want          int
+	}{
+		{name: "first successful day", successfulDay: 0, want: 50},
+		{name: "second successful day", successfulDay: 1, want: 75},
+		{name: "capped", successfulDay: 20, want: 10000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := warmupDailyCap(50, 1.5, 10000, tt.successfulDay); got != tt.want {
+				t.Fatalf("warmupDailyCap() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRecipientDomainRateSelection(t *testing.T) {
+	w := &Worker{
+		cfg: config.Config{
+			RecipientDomainDefault: 12,
+			RecipientDomainRates:   map[string]int{"gmail.com": 4, "outlook.com": 6},
+		},
+		recipientRates: make(map[string]*rate.Limiter),
+	}
+	for domain, want := range map[string]rate.Limit{
+		"gmail.com":     4,
+		"sub.gmail.com": 4,
+		"outlook.com":   6,
+		"example.test":  12,
+	} {
+		if got := w.recipientLimiter(domain).Limit(); got != want {
+			t.Errorf("recipientLimiter(%q).Limit() = %v, want %v", domain, got, want)
+		}
 	}
 }

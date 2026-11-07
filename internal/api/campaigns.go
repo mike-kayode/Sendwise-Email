@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -19,32 +21,40 @@ const campaignColumns = `
 	id, organization_id, name, subject, preview_text, sender_name, sender_email,
 	COALESCE(reply_to, ''), list_id, segment_id, template_id, content, status,
 	recipient_count, track_opens, track_clicks, scheduled_at, started_at,
-	completed_at, paused_at, created_at, updated_at
+	completed_at, paused_at, COALESCE(sender_postal_address, ''), created_at, updated_at
 `
 
 type campaign struct {
-	ID             string          `json:"id"`
-	OrganizationID string          `json:"organization_id,omitempty"`
-	Name           string          `json:"name"`
-	Subject        string          `json:"subject"`
-	PreviewText    string          `json:"preview_text"`
-	SenderName     string          `json:"sender_name"`
-	SenderEmail    string          `json:"sender_email"`
-	ReplyTo        string          `json:"reply_to"`
-	ListID         *string         `json:"list_id"`
-	SegmentID      *string         `json:"segment_id"`
-	TemplateID     *string         `json:"template_id"`
-	Content        json.RawMessage `json:"content"`
-	Status         string          `json:"status"`
-	RecipientCount int             `json:"recipient_count"`
-	TrackOpens     bool            `json:"track_opens"`
-	TrackClicks    bool            `json:"track_clicks"`
-	ScheduledAt    *time.Time      `json:"scheduled_at"`
-	StartedAt      *time.Time      `json:"started_at"`
-	CompletedAt    *time.Time      `json:"completed_at"`
-	PausedAt       *time.Time      `json:"paused_at"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	ID                  string          `json:"id"`
+	OrganizationID      string          `json:"organization_id,omitempty"`
+	Name                string          `json:"name"`
+	Subject             string          `json:"subject"`
+	PreviewText         string          `json:"preview_text"`
+	SenderName          string          `json:"sender_name"`
+	SenderEmail         string          `json:"sender_email"`
+	ReplyTo             string          `json:"reply_to"`
+	SenderPostalAddress string          `json:"sender_postal_address"`
+	ListID              *string         `json:"list_id"`
+	SegmentID           *string         `json:"segment_id"`
+	TemplateID          *string         `json:"template_id"`
+	Content             json.RawMessage `json:"content"`
+	Status              string          `json:"status"`
+	RecipientCount      int             `json:"recipient_count"`
+	TrackOpens          bool            `json:"track_opens"`
+	TrackClicks         bool            `json:"track_clicks"`
+	ScheduledAt         *time.Time      `json:"scheduled_at"`
+	StartedAt           *time.Time      `json:"started_at"`
+	CompletedAt         *time.Time      `json:"completed_at"`
+	PausedAt            *time.Time      `json:"paused_at"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	Alerts              []campaignAlert `json:"alerts,omitempty"`
+}
+
+type campaignAlert struct {
+	Type      string    `json:"type"`
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func scanCampaign(row pgx.Row) (*campaign, error) {
@@ -55,7 +65,7 @@ func scanCampaign(row pgx.Row) (*campaign, error) {
 		&c.SenderName, &c.SenderEmail, &c.ReplyTo, &c.ListID, &c.SegmentID,
 		&c.TemplateID, &content, &c.Status, &c.RecipientCount,
 		&c.TrackOpens, &c.TrackClicks, &c.ScheduledAt, &c.StartedAt,
-		&c.CompletedAt, &c.PausedAt, &c.CreatedAt, &c.UpdatedAt,
+		&c.CompletedAt, &c.PausedAt, &c.SenderPostalAddress, &c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -132,19 +142,20 @@ func (s *Server) listCampaigns(w http.ResponseWriter, r *http.Request) {
 }
 
 type campaignInput struct {
-	Name        string          `json:"name"`
-	Subject     string          `json:"subject"`
-	PreviewText string          `json:"preview_text"`
-	SenderName  string          `json:"sender_name"`
-	SenderEmail string          `json:"sender_email"`
-	ReplyTo     string          `json:"reply_to"`
-	ListID      string          `json:"list_id"`
-	SegmentID   string          `json:"segment_id"`
-	TemplateID  string          `json:"template_id"`
-	Content     json.RawMessage `json:"content"`
-	TrackOpens  *bool           `json:"track_opens"`
-	TrackClicks *bool           `json:"track_clicks"`
-	ScheduledAt *time.Time      `json:"scheduled_at"`
+	Name                string          `json:"name"`
+	Subject             string          `json:"subject"`
+	PreviewText         string          `json:"preview_text"`
+	SenderName          string          `json:"sender_name"`
+	SenderEmail         string          `json:"sender_email"`
+	SenderPostalAddress string          `json:"sender_postal_address"`
+	ReplyTo             string          `json:"reply_to"`
+	ListID              string          `json:"list_id"`
+	SegmentID           string          `json:"segment_id"`
+	TemplateID          string          `json:"template_id"`
+	Content             json.RawMessage `json:"content"`
+	TrackOpens          *bool           `json:"track_opens"`
+	TrackClicks         *bool           `json:"track_clicks"`
+	ScheduledAt         *time.Time      `json:"scheduled_at"`
 }
 
 func (s *Server) createCampaign(w http.ResponseWriter, r *http.Request) {
@@ -169,20 +180,20 @@ func (s *Server) createCampaign(w http.ResponseWriter, r *http.Request) {
 	c, err := scanCampaign(s.pool.QueryRow(r.Context(), `
 		INSERT INTO campaigns (
 			organization_id, created_by, name, subject, preview_text,
-			sender_name, sender_email, reply_to, list_id, segment_id,
+			sender_name, sender_email, sender_postal_address, reply_to, list_id, segment_id,
 			template_id, content, track_opens, track_clicks, scheduled_at
 		)
 		VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, $10::uuid,
-			$11::uuid, $12::jsonb, COALESCE($13, true), COALESCE($14, true), $15
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10::uuid, $11::uuid,
+			$12::uuid, $13::jsonb, COALESCE($14, true), COALESCE($15, true), $16
 		)
 		RETURNING `+campaignColumns,
 		s.organizationID(r), s.claims(r).Subject, input.Name,
 		strings.TrimSpace(input.Subject), strings.TrimSpace(input.PreviewText),
 		strings.TrimSpace(input.SenderName), strings.TrimSpace(input.SenderEmail),
-		nullIfEmpty(input.ReplyTo), nullIfEmpty(input.ListID), nullIfEmpty(input.SegmentID),
-		nullIfEmpty(input.TemplateID), []byte(input.Content), input.TrackOpens,
-		input.TrackClicks, input.ScheduledAt,
+		strings.TrimSpace(input.SenderPostalAddress), nullIfEmpty(input.ReplyTo),
+		nullIfEmpty(input.ListID), nullIfEmpty(input.SegmentID), nullIfEmpty(input.TemplateID),
+		[]byte(input.Content), input.TrackOpens, input.TrackClicks, input.ScheduledAt,
 	))
 	if err != nil {
 		s.logger.Error("create campaign", "error", err)
@@ -204,23 +215,53 @@ func (s *Server) getCampaign(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load the campaign.")
 		return
 	}
+	rows, err := s.pool.Query(r.Context(), `
+		SELECT alert_type, message, created_at
+		FROM campaign_alerts
+		WHERE organization_id = $1 AND campaign_id = $2
+		ORDER BY created_at DESC
+		LIMIT 20
+	`, c.OrganizationID, c.ID)
+	if err != nil {
+		s.logger.Error("load campaign alerts", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign alerts.")
+		return
+	}
+	c.Alerts = make([]campaignAlert, 0)
+	for rows.Next() {
+		var alert campaignAlert
+		if err := rows.Scan(&alert.Type, &alert.Message, &alert.CreatedAt); err != nil {
+			rows.Close()
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign alerts.")
+			return
+		}
+		c.Alerts = append(c.Alerts, alert)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		s.logger.Error("iterate campaign alerts", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign alerts.")
+		return
+	}
+	rows.Close()
 	httpx.JSON(w, http.StatusOK, c)
 }
 
 type campaignUpdateInput struct {
-	Name        *string         `json:"name"`
-	Subject     *string         `json:"subject"`
-	PreviewText *string         `json:"preview_text"`
-	SenderName  *string         `json:"sender_name"`
-	SenderEmail *string         `json:"sender_email"`
-	ReplyTo     *string         `json:"reply_to"`
-	ListID      *string         `json:"list_id"`
-	SegmentID   *string         `json:"segment_id"`
-	TemplateID  *string         `json:"template_id"`
-	Content     json.RawMessage `json:"content"`
-	TrackOpens  *bool           `json:"track_opens"`
-	TrackClicks *bool           `json:"track_clicks"`
-	ScheduledAt *time.Time      `json:"scheduled_at"`
+	Name                *string         `json:"name"`
+	Subject             *string         `json:"subject"`
+	PreviewText         *string         `json:"preview_text"`
+	SenderName          *string         `json:"sender_name"`
+	SenderEmail         *string         `json:"sender_email"`
+	SenderPostalAddress *string         `json:"sender_postal_address"`
+	ReplyTo             *string         `json:"reply_to"`
+	ListID              *string         `json:"list_id"`
+	SegmentID           *string         `json:"segment_id"`
+	TemplateID          *string         `json:"template_id"`
+	Content             json.RawMessage `json:"content"`
+	TrackOpens          *bool           `json:"track_opens"`
+	TrackClicks         *bool           `json:"track_clicks"`
+	ScheduledAt         *time.Time      `json:"scheduled_at"`
 }
 
 func (s *Server) updateCampaign(w http.ResponseWriter, r *http.Request) {
@@ -250,21 +291,22 @@ func (s *Server) updateCampaign(w http.ResponseWriter, r *http.Request) {
 		    preview_text = COALESCE($5, preview_text),
 		    sender_name = COALESCE($6, sender_name),
 		    sender_email = COALESCE($7, sender_email),
-		    reply_to = COALESCE($8, reply_to),
-		    list_id = COALESCE($9::uuid, list_id),
-		    segment_id = COALESCE($10::uuid, segment_id),
-		    template_id = COALESCE($11::uuid, template_id),
-		    content = COALESCE($12::jsonb, content),
-		    track_opens = COALESCE($13, track_opens),
-		    track_clicks = COALESCE($14, track_clicks),
-		    scheduled_at = COALESCE($15, scheduled_at),
+		    sender_postal_address = COALESCE($8, sender_postal_address),
+		    reply_to = COALESCE($9, reply_to),
+		    list_id = COALESCE($10::uuid, list_id),
+		    segment_id = COALESCE($11::uuid, segment_id),
+		    template_id = COALESCE($12::uuid, template_id),
+		    content = COALESCE($13::jsonb, content),
+		    track_opens = COALESCE($14, track_opens),
+		    track_clicks = COALESCE($15, track_clicks),
+		    scheduled_at = COALESCE($16, scheduled_at),
 		    updated_at = now()
 		WHERE id = $1 AND organization_id = $2
 		RETURNING `+campaignColumns,
 		r.PathValue("id"), s.organizationID(r),
 		input.Name, input.Subject, input.PreviewText, input.SenderName, input.SenderEmail,
-		input.ReplyTo, input.ListID, input.SegmentID, input.TemplateID,
-		content, input.TrackOpens, input.TrackClicks, input.ScheduledAt,
+		input.SenderPostalAddress, input.ReplyTo, input.ListID, input.SegmentID,
+		input.TemplateID, content, input.TrackOpens, input.TrackClicks, input.ScheduledAt,
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.Error(w, http.StatusNotFound, "campaign_not_found", "The campaign could not be found.")
@@ -336,6 +378,11 @@ func (s *Server) validateCampaign(w http.ResponseWriter, r *http.Request) {
 		add("sender", "pass", "Sender identity is set.")
 	} else {
 		add("sender", "error", "Sender name and sender email are required.")
+	}
+	if strings.TrimSpace(c.SenderPostalAddress) != "" {
+		add("postal_address", "pass", "Sender postal address is included in the message footer.")
+	} else {
+		add("postal_address", "error", "Add the sender's postal address before sending.")
 	}
 
 	var design delivery.Design
@@ -429,8 +476,22 @@ func (s *Server) scheduleCampaign(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid_schedule", "scheduled_at must be in the future.")
 		return
 	}
+	c, err := s.loadCampaign(r.Context(), r.PathValue("id"), s.organizationID(r))
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.Error(w, http.StatusNotFound, "campaign_not_found", "The campaign could not be found.")
+		return
+	}
+	if err != nil {
+		s.logger.Error("load campaign before scheduling", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load the campaign.")
+		return
+	}
+	if strings.TrimSpace(c.SenderPostalAddress) == "" {
+		httpx.Error(w, http.StatusBadRequest, "postal_address_required", "Add the sender's postal address before scheduling.")
+		return
+	}
 
-	c, err := scanCampaign(s.pool.QueryRow(r.Context(), `
+	c, err = scanCampaign(s.pool.QueryRow(r.Context(), `
 		UPDATE campaigns
 		SET status = 'scheduled', scheduled_at = $3, updated_at = now()
 		WHERE id = $1 AND organization_id = $2 AND status IN ('draft', 'ready')
@@ -473,6 +534,17 @@ func (s *Server) sendCampaign(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusConflict, "campaign_not_sendable", "The campaign is not in a sendable state.")
 		return
 	}
+	if strings.TrimSpace(c.SenderPostalAddress) == "" {
+		httpx.Error(w, http.StatusBadRequest, "postal_address_required", "Add the sender's postal address before sending.")
+		return
+	}
+
+	remainingToday, err := s.warmupRemainingToday(r.Context(), orgID, c.SenderEmail)
+	if err != nil {
+		s.logger.Error("calculate campaign warm-up plan", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not calculate the sending-domain warm-up plan.")
+		return
+	}
 
 	tag, err := s.pool.Exec(r.Context(), `
 		UPDATE campaigns
@@ -500,9 +572,54 @@ func (s *Server) sendCampaign(w http.ResponseWriter, r *http.Request) {
 
 	updated, _ := s.loadCampaign(r.Context(), campaignID, orgID)
 	httpx.JSON(w, http.StatusAccepted, map[string]any{
-		"campaign":    updated,
-		"queued_jobs": queued,
+		"campaign":     updated,
+		"queued_jobs":  queued,
+		"send_today":   min(queued, remainingToday),
+		"queued_later": max(queued-min(queued, remainingToday), 0),
 	})
+}
+
+func (s *Server) warmupRemainingToday(ctx context.Context, organizationID, senderEmail string) (int, error) {
+	domain := strings.ToLower(senderDomain(senderEmail))
+	if domain == "" {
+		return 0, nil
+	}
+	start := s.cfg.WarmupStartPerDay
+	if start < 1 {
+		start = 50
+	}
+	growth := s.cfg.WarmupGrowthFactor
+	if growth < 1 {
+		growth = 1.5
+	}
+	maximum := s.cfg.MaxDailyEmails
+	if maximum < 1 {
+		maximum = 10000
+	}
+
+	var successfulDays, reserved int
+	if err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE sending_day < CURRENT_DATE AND successful_count > 0),
+		       COALESCE(max(reserved_count) FILTER (WHERE sending_day = CURRENT_DATE), 0)
+		FROM sending_domain_daily_stats
+		WHERE organization_id = $1 AND domain = $2
+	`, organizationID, domain).Scan(&successfulDays, &reserved); err != nil {
+		return 0, fmt.Errorf("load sending-domain warm-up usage: %w", err)
+	}
+	capValue := float64(start) * math.Pow(growth, float64(successfulDays))
+	if math.IsInf(capValue, 1) || capValue >= float64(maximum) {
+		return max(maximum-reserved, 0), nil
+	}
+	cap := int(capValue)
+	return max(cap-reserved, 0), nil
+}
+
+func senderDomain(email string) string {
+	_, domain, ok := strings.Cut(strings.ToLower(strings.TrimSpace(email)), "@")
+	if !ok {
+		return ""
+	}
+	return domain
 }
 
 func (s *Server) pauseCampaign(w http.ResponseWriter, r *http.Request) {
@@ -613,6 +730,8 @@ func (s *Server) cancelCampaign(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeQueueError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, campaigns.ErrPostalAddress):
+		httpx.Error(w, http.StatusBadRequest, "postal_address_required", "Add the sender's postal address before sending.")
 	case errors.Is(err, campaigns.ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "campaign_not_found", "The campaign could not be found.")
 	case errors.Is(err, campaigns.ErrSegmentNotFound), errors.Is(err, campaigns.ErrInvalidSegment):

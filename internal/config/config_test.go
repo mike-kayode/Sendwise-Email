@@ -23,6 +23,12 @@ func TestLoadDevelopmentDefaults(t *testing.T) {
 	if cfg.SchedulerInterval != 15*time.Second {
 		t.Fatalf("SchedulerInterval = %s, want 15s", cfg.SchedulerInterval)
 	}
+	if cfg.WarmupStartPerDay != 50 || cfg.WarmupGrowthFactor != 1.5 {
+		t.Fatalf("unexpected warm-up defaults: start=%d growth=%v", cfg.WarmupStartPerDay, cfg.WarmupGrowthFactor)
+	}
+	if cfg.RecipientDomainRates["gmail.com"] != 0 || cfg.RecipientDomainDefault != 10 {
+		t.Fatalf("unexpected recipient rate defaults: %+v default=%d", cfg.RecipientDomainRates, cfg.RecipientDomainDefault)
+	}
 }
 
 func TestLoadRejectsMalformedEnvironmentValues(t *testing.T) {
@@ -72,6 +78,8 @@ func TestLoadRejectsInvalidRuntimeLimits(t *testing.T) {
 		{name: "zero delivery attempts", key: "MAX_DELIVERY_ATTEMPTS", value: "0"},
 		{name: "zero scheduler interval", key: "SCHEDULER_INTERVAL", value: "0s"},
 		{name: "zero access token ttl", key: "ACCESS_TOKEN_TTL", value: "0s"},
+		{name: "warm-up growth below one", key: "WARMUP_GROWTH_FACTOR", value: "0.5"},
+		{name: "recipient rate missing default", key: "RECIPIENT_DOMAIN_RATE_LIMITS", value: "gmail.com=4"},
 	}
 
 	for _, test := range tests {

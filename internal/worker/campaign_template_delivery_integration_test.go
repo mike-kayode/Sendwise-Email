@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -131,7 +132,7 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 
 	content := `{"version":1,"blocks":[{"type":"heading","content":"Hi {{first_name}}","align":"left"},{"type":"paragraph","content":"This is a live proof message with unsubscribe: {{unsubscribe_url}}","align":"left"}]}`
 	subjectToken := fmt.Sprintf("p5-%d", time.Now().UnixNano())
-	campaignBody := fmt.Sprintf(`{"name":"P5 delivery proof","subject":"%s {{first_name}}","preview_text":"P5 proof","sender_name":"Sendwise","sender_email":"hello@example.com","list_id":"%s","template_id":"%s","content":%s}`,
+	campaignBody := fmt.Sprintf(`{"name":"P5 delivery proof","subject":"%s {{first_name}}","preview_text":"P5 proof","sender_name":"Sendwise","sender_email":"hello@example.com","sender_postal_address":"1 Example Street, Example City","list_id":"%s","template_id":"%s","content":%s}`,
 		subjectToken, list.ID, template.ID, content)
 	campaignResp := doAPIRequest(t, server.Handler(), "POST", "/api/v1/campaigns", accessToken, campaignBody)
 	if campaignResp.Code != http.StatusCreated {
@@ -175,6 +176,17 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read raw Mailpit message: %v", err)
 	}
+	rawText := string(rawMessage)
+	for _, proof := range []string{
+		"List-Unsubscribe:",
+		"List-Unsubscribe-Post: List-Unsubscribe=One-Click",
+		"1 Example Street, Example City",
+		"Unsubscribe",
+	} {
+		if !strings.Contains(rawText, proof) {
+			t.Errorf("delivered message does not contain required compliance content %q", proof)
+		}
+	}
 	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(rawMessage), &dkim.VerifyOptions{
 		LookupTXT: func(name string) ([]string, error) {
 			if name != "campaign-test._domainkey.example.com" {
@@ -196,6 +208,135 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 		received.ID, "campaign-test", "example.com")
 }
 
+func TestSuppressedAddressIsNeverSentIntegration(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect database: %v", err)
+	}
+	defer pool.Close()
+	if err := db.Migrate(ctx, databaseURL, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatalf("migrate database: %v", err)
+	}
+
+	var organizationID, campaignID, contactID, jobID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO organizations (name, slug)
+		VALUES ('Suppression integration', 'suppression-' || gen_random_uuid()::text)
+		RETURNING id
+	`).Scan(&organizationID); err != nil {
+		t.Fatalf("create organization: %v", err)
+	}
+	defer func() {
+		if _, err := pool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1`, organizationID); err != nil {
+			t.Errorf("clean up suppression fixture: %v", err)
+		}
+	}()
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO contacts (organization_id, email, status)
+		VALUES ($1, 'suppressed-recipient@example.test', 'subscribed')
+		RETURNING id
+	`, organizationID).Scan(&contactID); err != nil {
+		t.Fatalf("create contact: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO campaigns (
+			organization_id, name, subject, sender_name, sender_email,
+			sender_postal_address, content, status
+		)
+		VALUES ($1, 'Suppression proof', 'Suppressed', 'Sendwise', 'hello@example.com',
+			'1 Example Street', '{"version":1,"blocks":[]}'::jsonb, 'sending')
+		RETURNING id
+	`, organizationID).Scan(&campaignID); err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO campaign_recipients (organization_id, campaign_id, contact_id, email)
+		VALUES ($1, $2, $3, 'suppressed-recipient@example.test')
+	`, organizationID, campaignID, contactID); err != nil {
+		t.Fatalf("create recipient snapshot: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status)
+		VALUES ($1, $2, $3, gen_random_uuid()::text || '@suppression.test', 'queued')
+		RETURNING id
+	`, organizationID, campaignID, contactID).Scan(&jobID); err != nil {
+		t.Fatalf("create delivery job: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO suppressions (organization_id, email, reason, source)
+		VALUES ($1, 'suppressed-recipient@example.test', 'complaint', 'integration_test')
+	`, organizationID); err != nil {
+		t.Fatalf("suppress recipient: %v", err)
+	}
+	worker := New(config.Config{}, pool, nil, nil, nil, nil, observability.NewLogger("test", "suppression"))
+	if retryAfter, err := worker.process(ctx, campaigns.JobPayload{
+		JobID: jobID, OrganizationID: organizationID, CampaignID: campaignID, ContactID: contactID,
+	}); err != nil || retryAfter > 0 {
+		t.Fatalf("process suppressed job retryAfter=%s err=%v; want terminal cancellation", retryAfter, err)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM delivery_jobs WHERE id = $1`, jobID).Scan(&status); err != nil {
+		t.Fatalf("load suppressed job status: %v", err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("suppressed job status = %q, want cancelled", status)
+	}
+
+	var bounceContactID, bounceCampaignID, bounceJobID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO contacts (organization_id, email, status)
+		VALUES ($1, 'hard-bounce@example.test', 'subscribed')
+		RETURNING id
+	`, organizationID).Scan(&bounceContactID); err != nil {
+		t.Fatalf("create hard-bounce contact: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO campaigns (
+			organization_id, name, subject, sender_name, sender_email,
+			sender_postal_address, content, status
+		)
+		VALUES ($1, 'Hard bounce proof', 'Hard bounce', 'Sendwise', 'hello@example.com',
+			'1 Example Street', '{"version":1,"blocks":[]}'::jsonb, 'sending')
+		RETURNING id
+	`, organizationID).Scan(&bounceCampaignID); err != nil {
+		t.Fatalf("create hard-bounce campaign: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO campaign_recipients (organization_id, campaign_id, contact_id, email)
+		VALUES ($1, $2, $3, 'hard-bounce@example.test')
+	`, organizationID, bounceCampaignID, bounceContactID); err != nil {
+		t.Fatalf("create hard-bounce recipient: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status)
+		VALUES ($1, $2, $3, gen_random_uuid()::text || '@hard-bounce.test', 'processing')
+		RETURNING id
+	`, organizationID, bounceCampaignID, bounceContactID).Scan(&bounceJobID); err != nil {
+		t.Fatalf("create hard-bounce delivery job: %v", err)
+	}
+	if retryAfter, err := worker.handleSendFailure(ctx, &jobRow{
+		ID: bounceJobID, OrganizationID: organizationID, CampaignID: bounceCampaignID,
+		ContactID: bounceContactID, Email: "hard-bounce@example.test", MaxAttempts: 3,
+	}, errors.New("550 5.1.1 user unknown")); err != nil || retryAfter > 0 {
+		t.Fatalf("handle hard bounce retryAfter=%s err=%v; want terminal bounce", retryAfter, err)
+	}
+	var suppressionCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM suppressions
+		WHERE organization_id = $1 AND lower(email) = 'hard-bounce@example.test'
+	`, organizationID).Scan(&suppressionCount); err != nil {
+		t.Fatalf("count hard-bounce suppression: %v", err)
+	}
+	if suppressionCount != 1 {
+		t.Fatalf("hard-bounce suppression count = %d, want 1", suppressionCount)
+	}
+}
+
 type mailpitMessage struct {
 	ID      string `json:"ID"`
 	Subject string `json:"Subject"`
@@ -206,6 +347,74 @@ type mailpitMessage struct {
 	To []struct {
 		Address string `json:"Address"`
 	} `json:"To"`
+}
+
+func TestWarmupReservationIntegration(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect database: %v", err)
+	}
+	defer pool.Close()
+	if err := db.Migrate(ctx, databaseURL, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatalf("migrate database: %v", err)
+	}
+
+	var organizationID, campaignID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO organizations (name, slug)
+		VALUES ('Warm-up integration', 'warmup-' || gen_random_uuid()::text)
+		RETURNING id
+	`).Scan(&organizationID); err != nil {
+		t.Fatalf("create organization: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO campaigns (organization_id, name, status, sender_email)
+		VALUES ($1, 'Warm-up integration', 'sending', 'hello@warmup.example')
+		RETURNING id
+	`, organizationID).Scan(&campaignID); err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	var jobs [2]jobRow
+	for i := range jobs {
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status)
+			VALUES ($1, $2, gen_random_uuid(), gen_random_uuid()::text || '@warmup.test', 'queued')
+			RETURNING id, contact_id
+		`, organizationID, campaignID).Scan(&jobs[i].ID, &jobs[i].ContactID); err != nil {
+			t.Fatalf("create delivery job %d: %v", i, err)
+		}
+		jobs[i].OrganizationID = organizationID
+		jobs[i].CampaignID = campaignID
+		jobs[i].SenderEmail = "hello@warmup.example"
+	}
+
+	worker := New(config.Config{
+		SendingRate: 10, WarmupStartPerDay: 1, WarmupGrowthFactor: 1.5, MaxDailyEmails: 10,
+	}, pool, nil, nil, nil, nil, observability.NewLogger("test", "worker"))
+	deferred, err := worker.reserveWarmupSlot(ctx, &jobs[0])
+	if err != nil || deferred {
+		t.Fatalf("first warm-up reservation = deferred:%v err:%v; want reserved", deferred, err)
+	}
+	deferred, err = worker.reserveWarmupSlot(ctx, &jobs[1])
+	if err != nil || !deferred {
+		t.Fatalf("second warm-up reservation = deferred:%v err:%v; want deferred", deferred, err)
+	}
+
+	var reserved int
+	if err := pool.QueryRow(ctx, `
+		SELECT reserved_count FROM sending_domain_daily_stats
+		WHERE organization_id = $1 AND domain = 'warmup.example' AND sending_day = CURRENT_DATE
+	`, organizationID).Scan(&reserved); err != nil {
+		t.Fatalf("load reserved warm-up slots: %v", err)
+	}
+	if reserved != 1 {
+		t.Fatalf("reserved warm-up slots = %d, want 1", reserved)
+	}
 }
 
 func doAPIRequest(t *testing.T, handler http.Handler, method, path, token, body string) *httptest.ResponseRecorder {

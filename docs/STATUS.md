@@ -1171,3 +1171,133 @@ BUILD_EXIT=0
 $ test -z "$(gofmt -l cmd internal services shared)" && git diff --check
 GOFMT_EMPTY=1 DIFF_CHECK_EXIT=0
 ```
+
+## Task 4 — Bulk-sending readiness (locally verified; CI pending)
+
+Implemented local sending-domain daily reservations (default 50, multiplied
+by 1.5 after each successful sending day, capped by `MAX_DAILY_EMAILS`),
+durable next-day deferral, configured recipient-domain rates, reputation
+threshold pauses and campaign alerts, suppression checks, campaign postal
+address storage/footer, one-click unsubscribe headers, and batch publishing
+for campaign jobs. Campaign send returns `send_today` and `queued_later`, which
+the preview page displays after starting the send. Operations guidance is in
+[DELIVERABILITY.md](./DELIVERABILITY.md).
+
+Postgres-backed rule tests:
+
+```
+$ TEST_DATABASE_URL='postgres://email:email@localhost:5432/email?sslmode=disable' \
+    go test -v ./internal/worker -run 'TestCampaignTemplateDeliveryIntegration|TestWarmupReservationIntegration|TestSuppressedAddressIsNeverSentIntegration' -count=1
+=== RUN   TestCampaignTemplateDeliveryIntegration
+    campaign_template_delivery_integration_test.go:207: verified DKIM signature on Mailpit message 15y4uvemRYBVPyvOB9rpnn against campaign-test._domainkey.example.com
+--- PASS: TestCampaignTemplateDeliveryIntegration (0.29s)
+=== RUN   TestSuppressedAddressIsNeverSentIntegration
+{"time":"2026-11-07T20:26:00.029078+01:00","level":"INFO","msg":"contact suppressed","reason":"hard_bounce","source":"smtp"}
+{"time":"2026-11-07T20:26:00.040307+01:00","level":"WARN","msg":"campaign paused after reputation threshold"}
+--- PASS: TestSuppressedAddressIsNeverSentIntegration (0.10s)
+=== RUN   TestWarmupReservationIntegration
+--- PASS: TestWarmupReservationIntegration (0.04s)
+PASS
+ok  	github.com/khayode/email-platform/internal/worker 0.815s
+
+$ TEST_DATABASE_URL='postgres://email:email@localhost:5432/email?sslmode=disable' \
+    go test -v ./internal/api -run 'TestReputationThresholdPausesCampaignIntegration|TestCampaignsLifecycleIntegration' -count=1
+=== RUN   TestCampaignsLifecycleIntegration
+--- PASS: TestCampaignsLifecycleIntegration (0.14s)
+=== RUN   TestReputationThresholdPausesCampaignIntegration
+--- PASS: TestReputationThresholdPausesCampaignIntegration (0.11s)
+PASS
+ok  	github.com/khayode/email-platform/internal/api 0.692s
+```
+
+The worker integration test verifies HTML/text postal address and unsubscribe
+content plus both one-click headers in the message received by local Mailpit.
+It verifies hard-bounce suppression, that an already-suppressed address's job
+is cancelled before transport, and that only one of two jobs reserves the
+configured one-message daily cap. The API integration test exercises the
+bounce webhook and complaint webhook, verifies suppression, both threshold
+pauses, and persisted campaign alerts.
+
+Playwright proof against the rebuilt local Compose stack:
+
+```
+$ cd apps/web && E2E_BASE_URL=http://localhost:3000 \
+    E2E_API_ORIGIN=http://localhost:8084 \
+    npm run test:e2e -- e2e/bulk-sending.spec.ts
+Running 1 test using 1 worker
+  ✓  1 [chromium] › e2e/bulk-sending.spec.ts:9:1 › campaign send plan enforces warm-up cap and requires postal address (1.3s)
+  1 passed (1.9s)
+```
+
+The browser journey creates a consented 51-contact list, starts a campaign
+with a postal address, and observes the 50-today/1-later warm-up plan. The
+local API and worker were started with development-only sending-domain checks
+disabled for this test; no production host or data was accessed.
+
+100,000-recipient discard-only SMTP sink proof:
+
+```
+$ TEST_DATABASE_URL='postgres://email:email@localhost:5432/email?sslmode=disable' \
+    RUN_BULK_THROUGHPUT=1 go test -v ./internal/worker \
+    -run '^TestBulkCampaignSMTPThroughput100k$' -count=1
+=== RUN   TestBulkCampaignSMTPThroughput100k
+bulk-sink: recipients=100000 elapsed=6m56.525s sends_per_second=240.08 peak_heap_bytes=33549752 heap_after_bytes=13305248 queue_depth_peak=100000 failures=0 warmup_reserved=100000
+--- PASS: TestBulkCampaignSMTPThroughput100k (422.14s)
+PASS
+ok  	github.com/khayode/email-platform/internal/worker 422.823s
+```
+
+This proves only application throughput against a local SMTP server that
+accepts and discards messages. Peak memory is Go heap allocation; queue depth
+is the test publisher's in-memory buffer. This is not a deliverability,
+provider acceptance, or inbox-placement result.
+
+Full local checks:
+
+```
+$ gofmt -l cmd internal services shared
+(no output)
+$ go vet ./...
+(exit 0; no output)
+$ TEST_DATABASE_URL='postgres://email:email@localhost:5432/email?sslmode=disable' go test ./... -count=1
+ok   github.com/khayode/email-platform/internal/api
+ok   github.com/khayode/email-platform/internal/auth
+ok   github.com/khayode/email-platform/internal/automations
+ok   github.com/khayode/email-platform/internal/backfill
+ok   github.com/khayode/email-platform/internal/campaigns
+ok   github.com/khayode/email-platform/internal/config
+ok   github.com/khayode/email-platform/internal/contacts
+ok   github.com/khayode/email-platform/internal/db
+ok   github.com/khayode/email-platform/internal/delivery
+ok   github.com/khayode/email-platform/internal/kit
+ok   github.com/khayode/email-platform/internal/outbox
+ok   github.com/khayode/email-platform/internal/projections
+ok   github.com/khayode/email-platform/internal/worker
+ok   github.com/khayode/email-platform/services/gateway
+ok   github.com/khayode/email-platform/services/identity
+ok   github.com/khayode/email-platform/services/identity/cmd/devseed
+ok   github.com/khayode/email-platform/services/workspace
+ok   github.com/khayode/email-platform/shared/contracts/events
+(all other listed command-only packages: no test files; the explicitly gated
+100,000-recipient benchmark is run separately above)
+$ go build ./...
+(exit 0)
+$ (cd apps/web && npm run typecheck && npm run lint && npm test && npm run build)
+TYPECHECK_EXIT=0
+LINT_EXIT=0
+ℹ tests 10
+ℹ pass 10
+ℹ fail 0
+BUILD_EXIT=0
+$ (cd apps/web && E2E_BASE_URL=http://localhost:3000 \
+    E2E_API_ORIGIN=http://localhost:8084 \
+    npm run test:e2e -- e2e/bulk-sending.spec.ts)
+Running 1 test using 1 worker
+  ✓  1 [chromium] › e2e/bulk-sending.spec.ts:9:1 › campaign send plan enforces warm-up cap and requires postal address (1.8s)
+  1 passed (2.6s)
+```
+
+**Not done:** CI has not yet run for a Task 4 commit. The local sink test uses
+an in-memory publisher and a discard-only SMTP server; it does not exercise
+NATS broker capacity or real mail delivery. No claim of external deliverability
+or inbox placement is made.

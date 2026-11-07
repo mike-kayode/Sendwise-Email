@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
+	"math"
 	"net/url"
 	"strings"
 	"sync"
@@ -36,33 +37,36 @@ type Worker struct {
 
 	domainMu       sync.Mutex
 	domainInFlight map[string]int
+	recipientRates map[string]*rate.Limiter
 }
 
 type jobRow struct {
-	ID             string
-	OrganizationID string
-	CampaignID     string
-	ContactID      string
-	MessageID      string
-	Status         string
-	Attempts       int
-	MaxAttempts    int
-	Email          string
-	FirstName      string
-	LastName       string
-	ContactStatus  string
-	CustomFields   []byte
-	Subject        string
-	PreviewText    string
-	SenderName     string
-	SenderEmail    string
-	ReplyTo        string
-	Content        []byte
-	CampaignStatus string
-	TrackOpens     bool
-	TrackClicks    bool
-	Organization   string
-	CreatedAt      time.Time
+	ID                  string
+	OrganizationID      string
+	CampaignID          string
+	ContactID           string
+	MessageID           string
+	Status              string
+	Attempts            int
+	MaxAttempts         int
+	Email               string
+	FirstName           string
+	LastName            string
+	ContactStatus       string
+	CustomFields        []byte
+	Subject             string
+	PreviewText         string
+	SenderName          string
+	SenderEmail         string
+	ReplyTo             string
+	Content             []byte
+	CampaignStatus      string
+	TrackOpens          bool
+	TrackClicks         bool
+	Organization        string
+	SenderPostalAddress string
+	WarmupReservedOn    *time.Time
+	CreatedAt           time.Time
 }
 
 func New(
@@ -74,6 +78,21 @@ func New(
 	campaignService *campaigns.Service,
 	logger *slog.Logger,
 ) *Worker {
+	if cfg.WarmupStartPerDay < 1 {
+		cfg.WarmupStartPerDay = 50
+	}
+	if cfg.WarmupGrowthFactor < 1 {
+		cfg.WarmupGrowthFactor = 1.5
+	}
+	if cfg.MaxDailyEmails < 1 {
+		cfg.MaxDailyEmails = 10000
+	}
+	if cfg.RecipientDomainDefault < 1 {
+		cfg.RecipientDomainDefault = cfg.SendingRate
+		if cfg.RecipientDomainDefault < 1 {
+			cfg.RecipientDomainDefault = 10
+		}
+	}
 	burst := cfg.SendingRate / 4
 	if burst < 1 {
 		burst = 1
@@ -89,6 +108,7 @@ func New(
 		logger:         logger,
 		limiter:        rate.NewLimiter(rate.Limit(cfg.SendingRate), burst),
 		domainInFlight: make(map[string]int),
+		recipientRates: make(map[string]*rate.Limiter),
 	}
 }
 
@@ -211,7 +231,19 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		return 0, w.failJob(ctx, row, err)
 	}
 
+	deferred, err := w.reserveWarmupSlot(ctx, row)
+	if err != nil {
+		return 30 * time.Second, err
+	}
+	if deferred {
+		return 0, nil
+	}
+
 	if err := w.limiter.Wait(ctx); err != nil {
+		return 30 * time.Second, err
+	}
+	recipientDomain := domainOf(row.Email)
+	if err := w.recipientLimiter(recipientDomain).Wait(ctx); err != nil {
 		return 30 * time.Second, err
 	}
 
@@ -236,12 +268,19 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	footer := fmt.Sprintf(
 		`<div style="margin-top:32px;padding-top:24px;border-top:1px solid #e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;color:#94a3b8;">
 <p style="margin:0 0 8px;">You are receiving this email because you subscribed to updates from %s.</p>
+%s
 <p style="margin:0;"><a href="%s" style="color:#64748b;text-decoration:underline;">Unsubscribe</a></p>
 </div>`,
 		html.EscapeString(row.Organization),
+		postalAddressFooter(row.SenderPostalAddress),
 		html.EscapeString(unsubscribeURL),
 	)
 	htmlBody = appendBeforeBodyClose(htmlBody, footer)
+	textBody += "\n\nYou are receiving this email because you subscribed to updates from " + row.Organization + ".\n"
+	if address := strings.TrimSpace(row.SenderPostalAddress); address != "" {
+		textBody += address + "\n"
+	}
+	textBody += "Unsubscribe: " + unsubscribeURL + "\n"
 
 	if row.TrackOpens {
 		trackingToken, err := w.tokens.IssueTracking(row.ID, row.OrganizationID, row.CampaignID, row.ContactID)
@@ -282,7 +321,6 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 
 	// Per-domain concurrency: limit simultaneous outbound connections per
 	// recipient domain to protect sender reputation.
-	recipientDomain := domainOf(row.Email)
 	if !w.acquireDomainSlot(recipientDomain) {
 		return 30 * time.Second, fmt.Errorf("domain %s concurrency limit reached", recipientDomain)
 	}
@@ -313,7 +351,7 @@ func (w *Worker) loadJob(ctx context.Context, jobID string) (*jobRow, error) {
 		       cp.subject, cp.preview_text, cp.sender_name, cp.sender_email,
 		       COALESCE(cp.reply_to, ''), cp.content, cp.status,
 		       cp.track_opens, cp.track_clicks, o.name,
-		       dj.created_at
+		       COALESCE(cp.sender_postal_address, ''), dj.warmup_reserved_on, dj.created_at
 		FROM delivery_jobs dj
 		JOIN campaigns cp ON cp.id = dj.campaign_id
 		JOIN organizations o ON o.id = dj.organization_id
@@ -329,6 +367,8 @@ func (w *Worker) loadJob(ctx context.Context, jobID string) (*jobRow, error) {
 		&row.Subject, &row.PreviewText, &row.SenderName, &row.SenderEmail,
 		&row.ReplyTo, &row.Content, &row.CampaignStatus,
 		&row.TrackOpens, &row.TrackClicks, &row.Organization,
+		&row.SenderPostalAddress,
+		&row.WarmupReservedOn,
 		&row.CreatedAt,
 	)
 	if err != nil {
@@ -364,6 +404,17 @@ func (w *Worker) recordSubmission(ctx context.Context, row *jobRow, result *deli
 	}
 	if tag.RowsAffected() == 0 {
 		return tx.Commit(ctx)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO sending_domain_daily_stats
+			(organization_id, domain, sending_day, reserved_count, successful_count)
+		VALUES ($1, lower($2), CURRENT_DATE, 0, 1)
+		ON CONFLICT (organization_id, domain, sending_day)
+		DO UPDATE SET successful_count = sending_domain_daily_stats.successful_count + 1,
+		              updated_at = now()
+	`, row.OrganizationID, domainOf(row.SenderEmail)); err != nil {
+		return fmt.Errorf("record successful sending-domain delivery: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -528,6 +579,9 @@ func (w *Worker) bounceJob(ctx context.Context, row *jobRow, cause error, bounce
 		return fmt.Errorf("commit bounce: %w", err)
 	}
 
+	if err := w.checkCampaignReputation(ctx, row.CampaignID, row.OrganizationID); err != nil {
+		w.logger.Error("evaluate campaign reputation after bounce", "campaign_id", row.CampaignID, "error", err)
+	}
 	w.logger.Error("delivery bounced", "job_id", row.ID, "email", row.Email, "bounce_type", bounceType, "error", cause)
 	w.maybeCompleteCampaign(ctx, row.CampaignID, row.OrganizationID)
 	return nil
@@ -648,6 +702,174 @@ func (w *Worker) checkTenantQuota(ctx context.Context, organizationID string) er
 	if dailyCount >= settings.MaxDailyEmails {
 		return fmt.Errorf("daily email quota of %d exceeded", settings.MaxDailyEmails)
 	}
+	return nil
+}
+
+func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, error) {
+	domain := strings.ToLower(domainOf(row.SenderEmail))
+	if domain == "" {
+		return false, fmt.Errorf("campaign sender email has no domain")
+	}
+
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin warm-up reservation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var alreadyReserved bool
+	var currentDate time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(warmup_reserved_on = CURRENT_DATE, false), CURRENT_DATE
+		FROM delivery_jobs
+		WHERE id = $1
+		FOR UPDATE
+	`, row.ID).Scan(&alreadyReserved, &currentDate); err != nil {
+		return false, fmt.Errorf("read warm-up reservation: %w", err)
+	}
+	if alreadyReserved {
+		return false, tx.Commit(ctx)
+	}
+
+	var successfulDays int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		FROM sending_domain_daily_stats
+		WHERE organization_id = $1 AND domain = $2
+		  AND sending_day < CURRENT_DATE AND successful_count > 0
+	`, row.OrganizationID, domain).Scan(&successfulDays); err != nil {
+		return false, fmt.Errorf("count successful warm-up days: %w", err)
+	}
+	cap := warmupDailyCap(w.cfg.WarmupStartPerDay, w.cfg.WarmupGrowthFactor, w.cfg.MaxDailyEmails, successfulDays)
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO sending_domain_daily_stats (organization_id, domain, sending_day)
+		VALUES ($1, $2, CURRENT_DATE)
+		ON CONFLICT (organization_id, domain, sending_day) DO NOTHING
+	`, row.OrganizationID, domain); err != nil {
+		return false, fmt.Errorf("create warm-up usage row: %w", err)
+	}
+
+	var reserved int
+	if err := tx.QueryRow(ctx, `
+		SELECT reserved_count
+		FROM sending_domain_daily_stats
+		WHERE organization_id = $1 AND domain = $2 AND sending_day = CURRENT_DATE
+		FOR UPDATE
+	`, row.OrganizationID, domain).Scan(&reserved); err != nil {
+		return false, fmt.Errorf("load warm-up usage: %w", err)
+	}
+	if reserved >= cap {
+		if _, err := tx.Exec(ctx, `
+			UPDATE delivery_jobs
+			SET status = 'deferred',
+			    next_attempt_at = date_trunc('day', now()) + interval '1 day',
+			    last_error = 'sending domain warm-up daily cap reached',
+			    updated_at = now()
+			WHERE id = $1 AND status IN ('queued', 'processing', 'deferred')
+		`, row.ID); err != nil {
+			return false, fmt.Errorf("defer job beyond warm-up cap: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit warm-up deferral: %w", err)
+		}
+		return true, nil
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE sending_domain_daily_stats
+		SET reserved_count = reserved_count + 1, updated_at = now()
+		WHERE organization_id = $1 AND domain = $2 AND sending_day = CURRENT_DATE
+	`, row.OrganizationID, domain); err != nil {
+		return false, fmt.Errorf("reserve warm-up slot: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE delivery_jobs
+		SET warmup_reserved_on = CURRENT_DATE, updated_at = now()
+		WHERE id = $1
+	`, row.ID); err != nil {
+		return false, fmt.Errorf("mark warm-up reservation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit warm-up reservation: %w", err)
+	}
+	return false, nil
+}
+
+func warmupDailyCap(start int, growth float64, maximum, successfulDays int) int {
+	cap := float64(start) * math.Pow(growth, float64(successfulDays))
+	if math.IsInf(cap, 1) || cap >= float64(maximum) {
+		return maximum
+	}
+	return int(cap)
+}
+
+func (w *Worker) recipientLimiter(domain string) *rate.Limiter {
+	domain = strings.ToLower(domain)
+	w.domainMu.Lock()
+	defer w.domainMu.Unlock()
+	if limiter := w.recipientRates[domain]; limiter != nil {
+		return limiter
+	}
+
+	perSecond := w.cfg.RecipientDomainDefault
+	parts := strings.Split(domain, ".")
+	for i := 0; i < len(parts); i++ {
+		if configured := w.cfg.RecipientDomainRates[strings.Join(parts[i:], ".")]; configured > 0 {
+			perSecond = configured
+			break
+		}
+	}
+	limiter := rate.NewLimiter(rate.Limit(perSecond), 1)
+	w.recipientRates[domain] = limiter
+	return limiter
+}
+
+func postalAddressFooter(address string) string {
+	if strings.TrimSpace(address) == "" {
+		return ""
+	}
+	return `<p style="margin:0 0 8px;">` + html.EscapeString(strings.TrimSpace(address)) + `</p>`
+}
+
+func (w *Worker) checkCampaignReputation(ctx context.Context, campaignID, organizationID string) error {
+	var total, bounced, complained int
+	if err := w.pool.QueryRow(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (WHERE status = 'bounced'),
+		       count(*) FILTER (WHERE status = 'complained')
+		FROM campaign_recipients
+		WHERE organization_id = $1 AND campaign_id = $2
+	`, organizationID, campaignID).Scan(&total, &bounced, &complained); err != nil {
+		return fmt.Errorf("count campaign reputation events: %w", err)
+	}
+	if total == 0 || (float64(bounced)/float64(total) <= w.cfg.MaxBounceRate &&
+		float64(complained)/float64(total) <= w.cfg.MaxComplaintRate) {
+		return nil
+	}
+
+	message := fmt.Sprintf("Campaign paused automatically: bounce rate %.2f%% (limit %.2f%%), complaint rate %.3f%% (limit %.3f%%).",
+		100*float64(bounced)/float64(total), 100*w.cfg.MaxBounceRate,
+		100*float64(complained)/float64(total), 100*w.cfg.MaxComplaintRate)
+	var pausedID string
+	err := w.pool.QueryRow(ctx, `
+		UPDATE campaigns SET status = 'paused', paused_at = now(), updated_at = now()
+		WHERE id = $1 AND organization_id = $2 AND status IN ('processing', 'sending')
+		RETURNING id
+	`, campaignID, organizationID).Scan(&pausedID)
+	if err == pgx.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("pause campaign after reputation threshold: %w", err)
+	}
+	if _, err := w.pool.Exec(ctx, `
+		INSERT INTO campaign_alerts (organization_id, campaign_id, alert_type, message)
+		VALUES ($1, $2, 'reputation_pause', $3)
+	`, organizationID, campaignID, message); err != nil {
+		return fmt.Errorf("create campaign reputation alert: %w", err)
+	}
+	w.logger.Warn("campaign paused after reputation threshold", "campaign_id", campaignID, "message", message)
 	return nil
 }
 

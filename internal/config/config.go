@@ -44,9 +44,13 @@ type Config struct {
 	SchedulerInterval      time.Duration
 	MaxMessageAge          time.Duration
 	MaxDailyEmails         int
+	WarmupStartPerDay      int
+	WarmupGrowthFactor     float64
 	MaxBounceRate          float64
 	MaxComplaintRate       float64
 	DomainConcurrencyLimit int
+	RecipientDomainRates   map[string]int
+	RecipientDomainDefault int
 	CORSOrigins            []string
 	RequireVerifiedDomain  bool
 	MailProvider           string
@@ -114,6 +118,20 @@ func load(lookup func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	warmupStartPerDay, err := getenvInt(lookup, "WARMUP_START_PER_DAY", 50)
+	if err != nil {
+		return Config{}, err
+	}
+	warmupGrowthFactor, err := getenvFloat(lookup, "WARMUP_GROWTH_FACTOR", 1.5)
+	if err != nil {
+		return Config{}, err
+	}
+	recipientDomainRates, recipientDomainDefault, err := parseRecipientDomainRates(
+		getenv(lookup, "RECIPIENT_DOMAIN_RATE_LIMITS", "default=10"),
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	requireVerifiedDomain, err := getenvBool(lookup, "REQUIRE_VERIFIED_DOMAIN", secureEnv)
 	if err != nil {
 		return Config{}, err
@@ -157,9 +175,13 @@ func load(lookup func(string) string) (Config, error) {
 		SchedulerInterval:      schedulerInterval,
 		MaxMessageAge:          maxMessageAge,
 		MaxDailyEmails:         maxDailyEmails,
+		WarmupStartPerDay:      warmupStartPerDay,
+		WarmupGrowthFactor:     warmupGrowthFactor,
 		MaxBounceRate:          maxBounceRate,
 		MaxComplaintRate:       maxComplaintRate,
 		DomainConcurrencyLimit: domainConcurrencyLimit,
+		RecipientDomainRates:   recipientDomainRates,
+		RecipientDomainDefault: recipientDomainDefault,
 		CORSOrigins:            splitCSV(getenv(lookup, "CORS_ORIGINS", "http://localhost:3000")),
 		RequireVerifiedDomain:  requireVerifiedDomain,
 		MailProvider:           strings.ToLower(strings.TrimSpace(getenv(lookup, "MAIL_PROVIDER", "auto"))),
@@ -226,6 +248,12 @@ func load(lookup func(string) string) (Config, error) {
 	if cfg.MaxDailyEmails < 1 {
 		return cfg, fmt.Errorf("MAX_DAILY_EMAILS must be at least 1")
 	}
+	if cfg.WarmupStartPerDay < 1 {
+		return cfg, fmt.Errorf("WARMUP_START_PER_DAY must be at least 1")
+	}
+	if cfg.WarmupGrowthFactor < 1 {
+		return cfg, fmt.Errorf("WARMUP_GROWTH_FACTOR must be at least 1")
+	}
 	if cfg.MaxBounceRate < 0 || cfg.MaxBounceRate > 1 {
 		return cfg, fmt.Errorf("MAX_BOUNCE_RATE must be between 0 and 1")
 	}
@@ -234,6 +262,9 @@ func load(lookup func(string) string) (Config, error) {
 	}
 	if cfg.DomainConcurrencyLimit < 1 {
 		return cfg, fmt.Errorf("DOMAIN_CONCURRENCY_LIMIT must be at least 1")
+	}
+	if cfg.RecipientDomainDefault < 1 {
+		return cfg, fmt.Errorf("RECIPIENT_DOMAIN_RATE_LIMITS must set a positive default rate")
 	}
 	if host, port, err := net.SplitHostPort(cfg.SMTPAddr); err != nil || host == "" || port == "" {
 		return cfg, fmt.Errorf("SMTP_ADDR must be a host:port address")
@@ -312,4 +343,32 @@ func splitCSV(v string) []string {
 		}
 	}
 	return out
+}
+
+func parseRecipientDomainRates(value string) (map[string]int, int, error) {
+	rates := make(map[string]int)
+	for _, entry := range splitCSV(value) {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+			return nil, 0, fmt.Errorf("RECIPIENT_DOMAIN_RATE_LIMITS entries must use domain=messages_per_second")
+		}
+		domain := strings.ToLower(strings.TrimSpace(parts[0]))
+		rate, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil || rate < 1 {
+			return nil, 0, fmt.Errorf("RECIPIENT_DOMAIN_RATE_LIMITS rate for %s must be a positive integer", domain)
+		}
+		if domain == "default" {
+			rates[domain] = rate
+			continue
+		}
+		if strings.ContainsAny(domain, "/:@ ") {
+			return nil, 0, fmt.Errorf("RECIPIENT_DOMAIN_RATE_LIMITS contains invalid domain %q", domain)
+		}
+		rates[domain] = rate
+	}
+	defaultRate := rates["default"]
+	if defaultRate == 0 {
+		return nil, 0, fmt.Errorf("RECIPIENT_DOMAIN_RATE_LIMITS must include default=<messages_per_second>")
+	}
+	return rates, defaultRate, nil
 }
