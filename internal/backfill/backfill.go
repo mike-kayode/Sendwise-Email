@@ -3,20 +3,29 @@ package backfill
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Summary struct {
-	Users         int64
-	Organizations int64
-	Memberships   int64
+	Users              int64
+	Organizations      int64
+	Memberships        int64
+	SkippedUsers       int64
+	SkippedMemberships int64
 }
 
 // Run projects Identity and Workspace's authoritative records into the legacy
 // database in one transaction. Re-running it updates the same IDs in place.
-func Run(ctx context.Context, identity, workspace, legacy *pgxpool.Pool) (Summary, error) {
+//
+// logger may be nil; clashes that cannot be re-keyed are then logged with the
+// default logger. See RekeyLegacyUser for the lower(email) clash rule.
+func Run(ctx context.Context, identity, workspace, legacy *pgxpool.Pool, logger *slog.Logger) (Summary, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	tx, err := legacy.Begin(ctx)
 	if err != nil {
 		return Summary{}, fmt.Errorf("begin legacy projection transaction: %w", err)
@@ -24,6 +33,9 @@ func Run(ctx context.Context, identity, workspace, legacy *pgxpool.Pool) (Summar
 	defer tx.Rollback(ctx)
 
 	var summary Summary
+	// Identity users left without a legacy row because their email belonged to
+	// a different legacy id: their memberships must not be projected either.
+	unprojected := make(map[string]bool)
 	users, err := identity.Query(ctx, `
 		SELECT id, email, password_hash, name, status, email_verified_at,
 		       last_login_at, created_at, updated_at
@@ -41,7 +53,31 @@ func Run(ctx context.Context, identity, workspace, legacy *pgxpool.Pool) (Summar
 			users.Close()
 			return summary, fmt.Errorf("scan identity user: %w", err)
 		}
-		_, err := tx.Exec(ctx, `
+		projected, err := RekeyLegacyUser(ctx, tx, id, email, logger)
+		if err != nil {
+			users.Close()
+			return summary, fmt.Errorf("resolve email clash for identity user %s: %w", id, err)
+		}
+		if !projected {
+			summary.SkippedUsers++
+			// A skipped clash may still leave a legacy row under the identity
+			// id (the occupied case); memberships can only be projected when
+			// that row exists, or the foreign key would fail.
+			var legacyRowExists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`, id,
+			).Scan(&legacyRowExists); err != nil {
+				users.Close()
+				return summary, fmt.Errorf("check legacy row for skipped user %s: %w", id, err)
+			}
+			unprojected[id] = !legacyRowExists
+			if !legacyRowExists {
+				logger.Warn("identity user has no legacy row after a skipped email clash; its memberships will not be projected",
+					"identity_user_id", id, "email", email)
+			}
+			continue
+		}
+		_, err = tx.Exec(ctx, `
 			INSERT INTO users (id, email, password_hash, name, status, email_verified_at,
 			                   last_login_at, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -113,6 +149,12 @@ func Run(ctx context.Context, identity, workspace, legacy *pgxpool.Pool) (Summar
 		if err := memberships.Scan(&organizationID, &userID, &role, &createdAt); err != nil {
 			memberships.Close()
 			return summary, fmt.Errorf("scan workspace membership: %w", err)
+		}
+		if unprojected[userID] {
+			summary.SkippedMemberships++
+			logger.Warn("skipped membership whose user was left unprojected by an email clash",
+				"organization_id", organizationID, "user_id", userID)
+			continue
 		}
 		_, err := tx.Exec(ctx, `
 			INSERT INTO organization_members (organization_id, user_id, role, created_at)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/khayode/email-platform/internal/backfill"
 	"github.com/khayode/email-platform/internal/kit"
+	"github.com/khayode/email-platform/internal/observability"
 )
 
 func main() {
@@ -29,6 +30,7 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	logger := observability.NewLogger("development", "backfill")
 	identity, err := kit.Connect(ctx, identityURL)
 	if err != nil {
 		return fmt.Errorf("connect identity database: %w", err)
@@ -45,11 +47,12 @@ func run() error {
 	}
 	defer legacy.Close()
 
-	summary, err := backfill.Run(ctx, identity, workspace, legacy)
+	summary, err := backfill.Run(ctx, identity, workspace, legacy, logger)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Backfill complete: users=%d organizations=%d memberships=%d\n",
-		summary.Users, summary.Organizations, summary.Memberships)
+	fmt.Printf("Backfill complete: users=%d organizations=%d memberships=%d skipped_users=%d skipped_memberships=%d\n",
+		summary.Users, summary.Organizations, summary.Memberships,
+		summary.SkippedUsers, summary.SkippedMemberships)
 	return nil
 }

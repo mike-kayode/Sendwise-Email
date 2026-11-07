@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/khayode/email-platform/internal/auth"
+	"github.com/khayode/email-platform/internal/backfill"
 	"github.com/khayode/email-platform/internal/httpx"
 )
 
@@ -31,17 +32,45 @@ func (s *Server) ensureActorRows(ctx context.Context, claims *auth.Claims) error
 	}
 	defer tx.Rollback(ctx)
 
+	skipMembership := false
 	if claims.Subject != "" {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO users (id, email, password_hash, name, status)
-			VALUES ($1::uuid, COALESCE(NULLIF($2, ''), $1::uuid::text || '@synced.local'), 'identity-managed', 'Synced user', 'active')
-			ON CONFLICT (id) DO UPDATE
-			SET email = CASE
-				WHEN users.email LIKE '%@synced.local' THEN EXCLUDED.email
-				ELSE users.email
-			END
-		`, claims.Subject, claims.Email); err != nil {
-			return fmt.Errorf("ensure legacy user row: %w", err)
+		// Same clash rule as internal/backfill: reconcile a lower(email)
+		// collision before the upsert so a login never fails on it.
+		email := claims.Email
+		if email == "" {
+			email = claims.Subject + "@synced.local"
+		}
+		projected, err := backfill.RekeyLegacyUser(ctx, tx, claims.Subject, email, s.logger)
+		if err != nil {
+			return fmt.Errorf("resolve legacy user email clash: %w", err)
+		}
+		if projected {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO users (id, email, password_hash, name, status)
+				VALUES ($1::uuid, COALESCE(NULLIF($2, ''), $1::uuid::text || '@synced.local'), 'identity-managed', 'Synced user', 'active')
+				ON CONFLICT (id) DO UPDATE
+				SET email = CASE
+					WHEN users.email LIKE '%@synced.local' THEN EXCLUDED.email
+					ELSE users.email
+				END
+			`, claims.Subject, claims.Email); err != nil {
+				return fmt.Errorf("ensure legacy user row: %w", err)
+			}
+		} else {
+			// The pair is recorded in backfill_user_id_map. A legacy row under
+			// the identity id may still exist (the occupied case); attach the
+			// membership only when it does, so the foreign key resolves.
+			var legacyRowExists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM users WHERE id = $1::uuid)`, claims.Subject,
+			).Scan(&legacyRowExists); err != nil {
+				return fmt.Errorf("check legacy row after skipped email clash: %w", err)
+			}
+			if !legacyRowExists {
+				skipMembership = true
+				s.logger.Warn("actor projection: user row skipped by email clash; membership not projected",
+					"user_id", claims.Subject, "organization_id", claims.OrganizationID)
+			}
 		}
 	}
 	if claims.OrganizationID != "" {
@@ -54,7 +83,7 @@ func (s *Server) ensureActorRows(ctx context.Context, claims *auth.Claims) error
 			return fmt.Errorf("ensure legacy organization row: %w", err)
 		}
 	}
-	if claims.Subject != "" && claims.OrganizationID != "" {
+	if claims.Subject != "" && claims.OrganizationID != "" && !skipMembership {
 		role := claims.Role
 		switch role {
 		case auth.RoleOwner, auth.RoleAdmin, auth.RoleManager, auth.RoleAuthor, auth.RoleAnalyst, auth.RoleViewer:
