@@ -161,6 +161,7 @@ jobs:
           SMTP_USERNAME: ""
           SMTP_PASSWORD: ""
           SMTP_FROM: ci@sendwise.test
+          REQUIRE_VERIFIED_DOMAIN: "false"
           GATEWAY_AUTH_RATE_PER_MINUTE: "600"
           GATEWAY_AUTH_BURST: "100"
         run: docker compose -f docker-compose.yml -f docker-compose.microservices.yml up -d postgres redis nats mailpit migrate identity-db-migrate workspace-db-migrate identity workspace gateway api worker web
