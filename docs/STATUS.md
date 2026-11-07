@@ -1503,3 +1503,82 @@ passed on Task 5 implementation SHA
 `e1d710a821ee7decde6a1e49c0462d0ce090756b`; all six jobs, including the browser
 E2E job, succeeded. The follow-up status-only commit does not change the tested
 application code and is also checked by CI.
+
+## Workspace delivery routing — Not done
+
+The provider-routing work has earlier commits for the provider core, workspace
+settings/domain onboarding, campaign routing, and platform-mail failover. The
+current local changes add signed Resend webhook ingestion and shared
+per-account request scheduling. This section records only checks run locally;
+it is not a completion claim for the full routing task.
+
+Local proof for webhook verification, event mapping/isolation, shared limiter
+priority, and the platform fake-Resend path:
+
+```
+$ gofmt -l cmd internal services shared
+(no output)
+$ go vet ./...
+(no output)
+$ TEST_DATABASE_URL=****** TEST_REDIS_URL=****** MIGRATIONS_DIR=../../migrations go test ./... -count=1
+?   	github.com/khayode/email-platform/cmd/api	[no test files]
+?   	github.com/khayode/email-platform/cmd/backfill	[no test files]
+?   	github.com/khayode/email-platform/cmd/migrate	[no test files]
+?   	github.com/khayode/email-platform/cmd/worker	[no test files]
+ok  	github.com/khayode/email-platform/internal/api	8.416s
+ok  	github.com/khayode/email-platform/internal/auth	1.114s
+ok  	github.com/khayode/email-platform/internal/automations	2.552s
+ok  	github.com/khayode/email-platform/internal/backfill	9.323s
+ok  	github.com/khayode/email-platform/internal/campaigns	0.552s
+ok  	github.com/khayode/email-platform/internal/config	0.461s
+ok  	github.com/khayode/email-platform/internal/contacts	0.375s
+ok  	github.com/khayode/email-platform/internal/db	0.315s
+ok  	github.com/khayode/email-platform/internal/delivery	1.498s
+?   	github.com/khayode/email-platform/internal/httpx	[no test files]
+ok  	github.com/khayode/email-platform/internal/kit	0.273s
+?   	github.com/khayode/email-platform/internal/messaging	[no test files]
+?   	github.com/khayode/email-platform/internal/observability	[no test files]
+ok  	github.com/khayode/email-platform/internal/outbox	1.731s
+ok  	github.com/khayode/email-platform/internal/projections	0.239s
+?   	github.com/khayode/email-platform/internal/session	[no test files]
+?   	github.com/khayode/email-platform/internal/testutil	[no test files]
+ok  	github.com/khayode/email-platform/internal/worker	5.160s
+ok  	github.com/khayode/email-platform/services/gateway	0.264s
+?   	github.com/khayode/email-platform/services/gateway/cmd/gateway	[no test files]
+ok  	github.com/khayode/email-platform/services/identity	2.605s
+ok  	github.com/khayode/email-platform/services/identity/cmd/devseed	0.287s
+?   	github.com/khayode/email-platform/services/identity/cmd/identity	[no test files]
+ok  	github.com/khayode/email-platform/services/workspace	0.281s
+?   	github.com/khayode/email-platform/services/workspace/cmd/workspace	[no test files]
+ok  	github.com/khayode/email-platform/shared/contracts/events	0.219s
+$ docker compose -f docker-compose.yml -f docker-compose.microservices.yml config -q
+(no output)
+```
+
+The successful full suite ran against the clean local scratch Postgres database
+`sendwise_delivery_routing_test_clean`. A first full-suite attempt against the
+reused database failed because an earlier integration run had left a sending
+domain that collided with the test's globally unique domain index; no source
+change was made for that stale test data. The fake webhook tests cover valid, invalid,
+and stale signatures; replay deduplication; `email.sent`, `delivered`,
+`delivery_delayed`, `bounced` (hard and soft), `complained`, `opened`, `clicked`,
+and `failed`; suppression behavior; and a cross-workspace job-isolation case.
+The Redis-backed limiter test uses two independent clients and confirms
+platform mail gets the next shared per-key request slot ahead of queued
+campaign work. The platform fallback test uses an `httptest` fake only. Local
+Postgres integration also checks the 24-hour rolling pause thresholds at
+exactly 2% and above 2% bounces, and below/above 0.05% complaints.
+
+Still **Not done / not verified**:
+
+- No full Playwright routing journey has run.
+- No 100,000-recipient fake-Resend throughput run or performance report exists.
+- The requested fixed Resend warm-up ramp (200 through 100,000/day, advancing
+  only after a day below 2% bounces) is not implemented.
+- Campaign pause thresholds have only local synthetic-event coverage; no
+  production-like sending or deliverability claim is made.
+- A UI/API workflow to authenticate the same domain with both Stalwart and
+  Resend is incomplete; optional campaign fallback must remain unused until
+  both provider-auth flags are independently verified.
+- No green GitHub Actions run exists for the current routing changes because
+  they have not been pushed. The routing task is therefore **Not done**.
