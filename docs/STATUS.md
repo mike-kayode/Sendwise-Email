@@ -1297,7 +1297,12 @@ Running 1 test using 1 worker
   1 passed (2.6s)
 ```
 
-**Not done:** CI has not yet run for a Task 4 commit. The local sink test uses
-an in-memory publisher and a discard-only SMTP server; it does not exercise
-NATS broker capacity or real mail delivery. No claim of external deliverability
-or inbox placement is made.
+**CI proof:** The first Actions run failed because the local E2E stack kept the
+production sending-domain verification gate enabled. CI now disables that gate
+only for its local stack; the corrected run passed all jobs, including all 7
+browser tests, on `518c94f374dffd10bcbbefdd75548177dfafb23c`:
+https://github.com/mike-kayode/Sendwise-Email/actions/runs/42406798646
+
+The local sink test uses an in-memory publisher and a discard-only SMTP server;
+it does not exercise NATS broker capacity or real mail delivery. No claim of
+external deliverability or inbox placement is made.
