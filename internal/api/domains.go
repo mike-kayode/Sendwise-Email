@@ -22,7 +22,7 @@ var domainPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+
 // nullable in the schema, so it is coalesced in SQL: a NULL must never reach the
 // scanner as a typed nil and must never fail the whole domain read.
 const domainColumns = `
-	id, domain, status, dkim_selector, COALESCE(dkim_public_key, '') AS dkim_public_key, spf_status, dkim_status,
+	id, domain, status, dkim_selector, COALESCE(dkim_public_key, '') AS dkim_public_key, verification_token, spf_status, dkim_status,
 	dmarc_status, verification_status, last_checked_at, verified_at, created_at
 `
 
@@ -32,6 +32,7 @@ type sendingDomain struct {
 	Status             string     `json:"status"`
 	DKIMSelector       string     `json:"dkim_selector"`
 	DKIMPublicKey      string     `json:"dkim_public_key,omitempty"`
+	VerificationToken  string     `json:"-"`
 	SPFStatus          string     `json:"spf_status"`
 	DKIMStatus         string     `json:"dkim_status"`
 	DMARCStatus        string     `json:"dmarc_status"`
@@ -44,7 +45,7 @@ type sendingDomain struct {
 func scanDomain(row pgx.Row) (*sendingDomain, error) {
 	var d sendingDomain
 	if err := row.Scan(
-		&d.ID, &d.Domain, &d.Status, &d.DKIMSelector, &d.DKIMPublicKey,
+		&d.ID, &d.Domain, &d.Status, &d.DKIMSelector, &d.DKIMPublicKey, &d.VerificationToken,
 		&d.SPFStatus, &d.DKIMStatus, &d.DMARCStatus, &d.VerificationStatus,
 		&d.LastCheckedAt, &d.VerifiedAt, &d.CreatedAt,
 	); err != nil {
@@ -153,7 +154,9 @@ func (s *Server) verifyDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spf, dkim, dmarc, verification := s.checkDomainDNS(r.Context(), d.Domain, d.DKIMSelector, d.DKIMPublicKey)
+	spf, dkim, dmarc, verification := s.checkDomainDNS(
+		r.Context(), d.Domain, d.DKIMSelector, d.DKIMPublicKey, d.VerificationToken,
+	)
 	status := "pending"
 	switch {
 	case spf == "verified" && dkim == "verified" && dmarc == "verified" && verification == "verified":
@@ -293,7 +296,7 @@ func dnsRecordsFor(d sendingDomain, verification string, trackingBase, spfInclud
 		{
 			Type:    "TXT",
 			Name:    "_sendwise-verification." + d.Domain,
-			Value:   "v=sendwise-verification " + strings.ToLower(d.Domain),
+			Value:   "v=sendwise-verification " + d.VerificationToken,
 			Purpose: "Verification token used to prove domain ownership during DNS checks.",
 			Status:  verification,
 		},
@@ -353,7 +356,7 @@ func normalizeDomain(raw string) (string, error) {
 	return domain, nil
 }
 
-func (s *Server) checkDomainDNS(ctx context.Context, domain, selector, expectedPublicKey string) (spf, dkim, dmarc, verification string) {
+func (s *Server) checkDomainDNS(ctx context.Context, domain, selector, expectedPublicKey, expectedVerificationToken string) (spf, dkim, dmarc, verification string) {
 	resolver := s.dnsResolver
 	if resolver == nil {
 		resolver = newDNSResolver("", 2*time.Second)
@@ -416,7 +419,7 @@ func (s *Server) checkDomainDNS(ctx context.Context, domain, selector, expectedP
 		}
 	}
 
-	expectedVerification := strings.ToLower(strings.TrimSpace(domain))
+	expectedVerificationToken = strings.ToLower(strings.TrimSpace(expectedVerificationToken))
 	verification = "missing"
 	txtValues, err = lookupTXTWithResolver(ctx, resolver, "_sendwise-verification."+domain)
 	if isDNSLookupFailure(err) {
@@ -429,7 +432,7 @@ func (s *Server) checkDomainDNS(ctx context.Context, domain, selector, expectedP
 			}
 			candidate := strings.TrimSpace(strings.TrimPrefix(lower, "v=sendwise-verification"))
 			candidate = strings.Trim(candidate, " \t\r\n\"'")
-			if candidate == expectedVerification || candidate == "\""+expectedVerification+"\"" {
+			if candidate == expectedVerificationToken && expectedVerificationToken != "" {
 				verification = "verified"
 				break
 			}

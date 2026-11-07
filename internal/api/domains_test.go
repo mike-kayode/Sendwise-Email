@@ -32,11 +32,17 @@ func TestCheckDomainDNSVerified(t *testing.T) {
 			"example.com":                        {"v=spf1 include:_spf.example.com ~all"},
 			"mail._domainkey.example.com":        {`"v=DKIM1; k=rsa; p=MIIBIjANbgkqhkiG9w0BAQE" "FAAOCAQ8AMIIBCgKCAQE"`},
 			"_dmarc.example.com":                 {"v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"},
-			"_sendwise-verification.example.com": {"v=sendwise-verification example.com"},
+			"_sendwise-verification.example.com": {"v=sendwise-verification 029be151-9ec4-4fa8-83b8-f8c02b289a96"},
 		}},
 	}
 
-	spf, dkim, dmarc, verification := server.checkDomainDNS(context.Background(), "example.com", "mail", "MIIBIjANbgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQE")
+	spf, dkim, dmarc, verification := server.checkDomainDNS(
+		context.Background(),
+		"example.com",
+		"mail",
+		"MIIBIjANbgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQE",
+		"029be151-9ec4-4fa8-83b8-f8c02b289a96",
+	)
 	if spf != "verified" || dkim != "verified" || dmarc != "verified" || verification != "verified" {
 		t.Fatalf("checkDomainDNS() = (%q, %q, %q, %q), want all verified", spf, dkim, dmarc, verification)
 	}
@@ -46,10 +52,10 @@ func TestCheckDomainDNSReportsMismatchesAndMissing(t *testing.T) {
 	server := &Server{dnsResolver: &fakeDNSResolver{records: map[string][]string{
 		"example.com":                        {"v=spf1 a ~all"},
 		"mail._domainkey.example.com":        {"v=DKIM1; k=rsa; p=wrong-key"},
-		"_sendwise-verification.example.com": {"v=sendwise-verification wrong.example.com"},
+		"_sendwise-verification.example.com": {"v=sendwise-verification example.com"},
 	}}}
 
-	spf, dkim, dmarc, verification := server.checkDomainDNS(context.Background(), "example.com", "mail", "expected-key")
+	spf, dkim, dmarc, verification := server.checkDomainDNS(context.Background(), "example.com", "mail", "expected-key", "expected-token")
 	if spf != "mismatched" {
 		t.Fatalf("SPF status = %q, want mismatched", spf)
 	}
@@ -68,7 +74,7 @@ func TestCheckDomainDNSRejectsUnconfiguredSPFInclude(t *testing.T) {
 	server := &Server{dnsResolver: &fakeDNSResolver{records: map[string][]string{
 		"example.com": {"v=spf1 include:other.example.com ~all"},
 	}}}
-	spf, _, _, _ := server.checkDomainDNS(context.Background(), "example.com", "mail", "expected-key")
+	spf, _, _, _ := server.checkDomainDNS(context.Background(), "example.com", "mail", "expected-key", "expected-token")
 	if spf != "mismatched" {
 		t.Fatalf("SPF status = %q, want mismatched for an unconfigured include", spf)
 	}
@@ -83,7 +89,7 @@ func (failingDNSResolver) LookupTXT(context.Context, string) ([]string, error) {
 func TestCheckDomainDNSReportsLookupFailed(t *testing.T) {
 	server := &Server{dnsResolver: failingDNSResolver{}}
 
-	spf, dkim, dmarc, verification := server.checkDomainDNS(context.Background(), "example.com", "mail", "expected-key")
+	spf, dkim, dmarc, verification := server.checkDomainDNS(context.Background(), "example.com", "mail", "expected-key", "expected-token")
 	if spf != "lookup_failed" || dkim != "lookup_failed" || dmarc != "lookup_failed" || verification != "lookup_failed" {
 		t.Fatalf("checkDomainDNS() = (%q, %q, %q, %q), want all lookup_failed", spf, dkim, dmarc, verification)
 	}
@@ -97,7 +103,7 @@ func (notFoundDNSResolver) LookupTXT(context.Context, string) ([]string, error) 
 
 func TestCheckDomainDNSNotFoundIsMissing(t *testing.T) {
 	server := &Server{dnsResolver: notFoundDNSResolver{}}
-	spf, dkim, dmarc, verification := server.checkDomainDNS(context.Background(), "example.com", "mail", "expected-key")
+	spf, dkim, dmarc, verification := server.checkDomainDNS(context.Background(), "example.com", "mail", "expected-key", "expected-token")
 	if spf != "missing" || dkim != "missing" || dmarc != "missing" || verification != "missing" {
 		t.Fatalf("checkDomainDNS() = (%q, %q, %q, %q), want all missing", spf, dkim, dmarc, verification)
 	}
@@ -105,14 +111,15 @@ func TestCheckDomainDNSNotFoundIsMissing(t *testing.T) {
 
 func TestDNSRecordsForIncludesSendwiseVerificationRecord(t *testing.T) {
 	d := sendingDomain{
-		ID:            "d1",
-		Domain:        "news.example.com",
-		Status:        "pending",
-		DKIMSelector:  "mail",
-		DKIMPublicKey: "MIIBIjANbgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQE",
-		SPFStatus:     "missing",
-		DKIMStatus:    "missing",
-		DMARCStatus:   "missing",
+		ID:                "d1",
+		Domain:            "news.example.com",
+		Status:            "pending",
+		DKIMSelector:      "mail",
+		DKIMPublicKey:     "MIIBIjANbgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQE",
+		VerificationToken: "029be151-9ec4-4fa8-83b8-f8c02b289a96",
+		SPFStatus:         "missing",
+		DKIMStatus:        "missing",
+		DMARCStatus:       "missing",
 	}
 	records := dnsRecordsFor(d, "pending", "", "")
 
@@ -125,6 +132,9 @@ func TestDNSRecordsForIncludesSendwiseVerificationRecord(t *testing.T) {
 	if records[3].Status != "pending" {
 		t.Fatalf("verification record status = %q, want pending", records[3].Status)
 	}
+	if records[3].Value != "v=sendwise-verification "+d.VerificationToken {
+		t.Fatalf("verification record value = %q, want generated token", records[3].Value)
+	}
 	if !strings.Contains(records[1].Value, "v=DKIM1; k=rsa; p=MIIBIjANbgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQE") {
 		t.Fatalf("expected generated DKIM key in DNS record, got %q", records[1].Value)
 	}
@@ -136,7 +146,10 @@ func TestDNSRecordsForIncludesSendwiseVerificationRecord(t *testing.T) {
 }
 
 func TestDNSRecordsForTrackingCNAMEAndConfiguredSPF(t *testing.T) {
-	d := sendingDomain{Domain: "news.example.com", DKIMSelector: "mail", SPFStatus: "pending"}
+	d := sendingDomain{
+		Domain: "news.example.com", DKIMSelector: "mail",
+		VerificationToken: "029be151-9ec4-4fa8-83b8-f8c02b289a96", SPFStatus: "pending",
+	}
 	records := dnsRecordsFor(d, "pending", "https://clicks.sendwise.test", "_spf.sendwise.test")
 	if len(records) != 5 {
 		t.Fatalf("expected four required records and configured tracking CNAME, got %d", len(records))

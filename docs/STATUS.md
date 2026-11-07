@@ -352,28 +352,73 @@ transport, and Mailpit receives the campaign email. The fixes included:
   harness now authenticates with a real token and uses unique test data so the
   full send path is exercised without collisions.
 
-## P6 — Sending domains and DNS verification (done)
+## P6 — Sending domains and DNS verification (locally verified; live DNS unverified)
 
-Proof gate (targeted package check):
+Sending-domain verification checks SPF, DKIM, DMARC, and a per-domain ownership
+TXT record. The ownership token is random and unique for each domain, persisted
+by append-only migration `0018_sending_domain_verification_token.sql`, omitted
+from ordinary domain JSON, and exposed only in the DNS-record instructions
+returned by the API. The verifier compares the DNS value with that domain's
+stored token; the old predictable `v=sendwise-verification <domain>` value no
+longer verifies ownership. DKIM private keys remain encrypted at rest.
+
+Local Postgres-backed verification proof:
 
 ```
-$ go test ./internal/api -run 'TestCheckDomainDNS' -v
+$ TEST_DATABASE_URL='postgres://email:email@localhost:5432/email?sslmode=disable' \
+    go test -count=1 -v ./internal/api -run 'Test(DomainsIntegration|CheckDomainDNS|DNSRecordsFor|NormalizeDkim|GenerateDKIM)'
+=== RUN   TestDomainsIntegration
+--- PASS: TestDomainsIntegration (0.21s)
 === RUN   TestCheckDomainDNSVerified
 --- PASS: TestCheckDomainDNSVerified (0.00s)
 === RUN   TestCheckDomainDNSReportsMismatchesAndMissing
 --- PASS: TestCheckDomainDNSReportsMismatchesAndMissing (0.00s)
+=== RUN   TestCheckDomainDNSRejectsUnconfiguredSPFInclude
+--- PASS: TestCheckDomainDNSRejectsUnconfiguredSPFInclude (0.00s)
+=== RUN   TestCheckDomainDNSReportsLookupFailed
+--- PASS: TestCheckDomainDNSReportsLookupFailed (0.00s)
+=== RUN   TestCheckDomainDNSNotFoundIsMissing
+--- PASS: TestCheckDomainDNSNotFoundIsMissing (0.00s)
+=== RUN   TestDNSRecordsForIncludesSendwiseVerificationRecord
+--- PASS: TestDNSRecordsForIncludesSendwiseVerificationRecord (0.00s)
+=== RUN   TestDNSRecordsForTrackingCNAMEAndConfiguredSPF
+--- PASS: TestDNSRecordsForTrackingCNAMEAndConfiguredSPF (0.00s)
+=== RUN   TestNormalizeDkimTXTValuePreservesCaseAndJoinsChunks
+--- PASS: TestNormalizeDkimTXTValuePreservesCaseAndJoinsChunks (0.00s)
+=== RUN   TestGenerateDKIMKeyPairUses2048BitRSAAndEncryptedPrivateKey
+--- PASS: TestGenerateDKIMKeyPairUses2048BitRSAAndEncryptedPrivateKey (0.12s)
 PASS
-ok   github.com/khayode/email-platform/internal/api
+ok   github.com/khayode/email-platform/internal/api 1.234s
 ```
 
-Fix declaration: the sending-domain verification path is now enforced using a
-real resolver-backed TXT check, including the Sendwise verification record
-`_sendwise-verification.<domain>`, and the domain is only marked verified when the
-verification token, SPF, DKIM, and DMARC checks all pass. The verification logic
-uses a resolver interface with a configurable DNS server and short timeout, and
-all mismatched or missing records are classified correctly. This closes the
-remaining P6 verification gap that previously relied only on SPF/DKIM/DMARC while
-ignoring the ownership token.
+The migration was applied by integration-test setup and verified in the local
+Compose Postgres database:
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.microservices.yml exec -T postgres \
+    psql -U email -d email -Atc "SELECT version FROM schema_migrations WHERE version = '0018_sending_domain_verification_token.sql'; SELECT count(*), count(DISTINCT verification_token), count(*) FILTER (WHERE verification_token = '') FROM sending_domains;"
+0018_sending_domain_verification_token.sql
+199|199|0
+```
+
+Local Compose browser proof:
+
+```
+$ cd apps/web && npm run test:e2e -- e2e/domains.spec.ts --reporter=line
+> @email-platform/web@0.1.0 test:e2e
+> playwright test e2e/domains.spec.ts --reporter=line
+
+Running 1 test using 1 worker
+[1/1] [chromium] › e2e/domains.spec.ts:87:1 › sending domains load from the real API without browser errors
+1 passed (3.9s)
+```
+
+The integration test creates two domains and checks their tokens are distinct,
+that the token is not included in the create response, and that the DNS record
+response contains the right token. It then verifies partial DNS, all matching
+records, mismatches, and cross-organization 404s through the API. DNS answers in
+these tests come from an injected fake resolver; this does not prove public DNS
+propagation or a live domain configuration.
 
 ### Task D follow-up — domain records and page stability (2026-11-06)
 
@@ -407,10 +452,10 @@ $ cd apps/web && npm run test:e2e -- e2e/domains.spec.ts
 Production-mode reproduction with pending, verified, misconfigured, NULL/empty
 DKIM keys, NULL check timestamps, and mixed DNS statuses produced no browser
 `pageerror` or `console.error`; the reported exception was not reproducible in
-the current worktree. The Playwright test stubs the verify response to exercise
-the UI state; the database-backed Go integration test exercises the resolver
-with partial and fully matching fake DNS records. The browser gate now fails on
-either browser error.
+the current worktree. Playwright loads seeded domain states from the real API
+and checks the page for browser errors; the Go integration test calls the verify
+route using partial and fully matching injected DNS records. Neither exercises
+public DNS for a domain controlled by the account owner.
 
 ## P7 — Automation runtime and due-step execution (done)
 
@@ -974,7 +1019,8 @@ partially verified.
 
 ### Remaining non-blocking limitations
 
-- P6 live DNS verification has only fake-resolver coverage.
+- P6 live DNS verification against a domain controlled by the account owner has
+  not been run; local checks use a fake resolver.
 - P7–P9 lack a full registration-to-campaign-delivery browser journey.
 - Templates do not have complete update/delete and full-editor workflows.
 - Report accuracy is unverified; billing has no provider end-to-end proof.

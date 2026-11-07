@@ -694,14 +694,40 @@ func TestDomainsIntegration(t *testing.T) {
 		t.Fatalf("expected server-generated DKIM public key, got empty value")
 	}
 	domainID := created.ID
-	var encryptedPrivateKey string
+	var encryptedPrivateKey, verificationToken string
 	if err := integrationPool.QueryRow(context.Background(), `
-		SELECT dkim_private_key FROM sending_domains WHERE id = $1 AND organization_id = $2
-	`, domainID, orgID).Scan(&encryptedPrivateKey); err != nil {
+		SELECT dkim_private_key, verification_token
+		FROM sending_domains WHERE id = $1 AND organization_id = $2
+	`, domainID, orgID).Scan(&encryptedPrivateKey, &verificationToken); err != nil {
 		t.Fatalf("read generated encrypted private key: %v", err)
 	}
 	if encryptedPrivateKey == "" || strings.Contains(encryptedPrivateKey, "PRIVATE KEY") {
 		t.Fatal("expected generated DKIM private key to be encrypted at rest")
+	}
+	if len(verificationToken) < 32 || verificationToken == created.Domain {
+		t.Fatalf("expected a unique, opaque verification token; got %q", verificationToken)
+	}
+	if strings.Contains(w.Body.String(), verificationToken) {
+		t.Fatal("create-domain response must not expose the verification token outside DNS records")
+	}
+
+	secondDomainBody := `{"domain":"newsletter-second-` + suffix + `.example.com"}`
+	w = doRequest(t, s, "POST", "/api/v1/domains", secondDomainBody, token)
+	assertStatus(t, w, http.StatusCreated)
+	var secondDomain struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &secondDomain); err != nil {
+		t.Fatalf("decode second created domain: %v", err)
+	}
+	var secondVerificationToken string
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT verification_token FROM sending_domains WHERE id = $1 AND organization_id = $2
+	`, secondDomain.ID, orgID).Scan(&secondVerificationToken); err != nil {
+		t.Fatalf("read second generated domain verification token: %v", err)
+	}
+	if secondVerificationToken == verificationToken {
+		t.Fatal("sending domains must have distinct verification tokens")
 	}
 
 	w = doRequest(t, s, "GET", "/api/v1/domains/"+domainID+"/dns-records", "", token)
@@ -719,6 +745,9 @@ func TestDomainsIntegration(t *testing.T) {
 	verificationRecord := recordsResp.DNSRecords[3]
 	if verificationRecord.Type != "TXT" || !strings.HasPrefix(verificationRecord.Name, "_sendwise-verification.") {
 		t.Fatalf("expected verification TXT record, got %+v", verificationRecord)
+	}
+	if verificationRecord.Value != "v=sendwise-verification "+verificationToken {
+		t.Fatalf("verification TXT record does not contain its unique token: %+v", verificationRecord)
 	}
 	if !strings.Contains(recordsResp.DNSRecords[1].Value, created.DKIMPublicKey) {
 		t.Fatalf("DKIM record does not contain generated public key: %+v", recordsResp.DNSRecords[1])
@@ -745,7 +774,7 @@ func TestDomainsIntegration(t *testing.T) {
 		created.Domain: {"v=spf1 mx ~all"},
 		created.DKIMSelector + "._domainkey." + created.Domain: {dkimRecordValue(created.DKIMPublicKey)},
 		"_dmarc." + created.Domain:                             {"v=DMARC1; p=quarantine"},
-		"_sendwise-verification." + created.Domain:             {"v=sendwise-verification " + created.Domain},
+		"_sendwise-verification." + created.Domain:             {"v=sendwise-verification " + verificationToken},
 	}}
 	w = doRequest(t, s, "POST", "/api/v1/domains/"+domainID+"/verify", "", token)
 	assertStatus(t, w, http.StatusOK)
