@@ -6,14 +6,16 @@ import (
 )
 
 type Message struct {
-	ID      string
-	From    string
-	To      string
-	Subject string
-	HTML    string
-	Text    string
-	Headers map[string]string
-	DKIM    *DKIMConfig
+	ID          string
+	WorkspaceID string
+	CampaignID  string
+	From        string
+	To          string
+	Subject     string
+	HTML        string
+	Text        string
+	Headers     map[string]string
+	DKIM        *DKIMConfig
 }
 
 type Result struct {
@@ -22,9 +24,11 @@ type Result struct {
 	Error     string
 }
 
-type Transport interface {
+type Provider interface {
 	Send(ctx context.Context, message Message) (*Result, error)
 }
+
+type Transport = Provider
 
 type PermanentError struct {
 	Err error

@@ -306,13 +306,15 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	}
 
 	message := delivery.Message{
-		ID:      row.MessageID,
-		From:    sender,
-		To:      row.Email,
-		Subject: row.Subject,
-		HTML:    htmlBody,
-		Text:    textBody,
-		Headers: headers,
+		ID:          row.MessageID,
+		WorkspaceID: row.OrganizationID,
+		CampaignID:  row.CampaignID,
+		From:        sender,
+		To:          row.Email,
+		Subject:     row.Subject,
+		HTML:        htmlBody,
+		Text:        textBody,
+		Headers:     headers,
 	}
 	message.DKIM, err = delivery.LoadDKIMConfig(ctx, w.pool, row.OrganizationID, row.SenderEmail, w.cfg.DKIMEncryptionKey)
 	if err != nil {

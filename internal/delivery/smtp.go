@@ -80,7 +80,7 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 		auth := smtp.PlainAuth("", t.Username, t.Password, t.Host)
 		if err := client.Auth(auth); err != nil {
 			if isPermanentSMTPError(err) {
-				return nil, &PermanentError{Err: fmt.Errorf("smtp auth: %w", err)}
+				return nil, &PermanentError{Err: &ProviderError{Temporary: true, Message: fmt.Sprintf("smtp auth: %v", err)}}
 			}
 			return nil, fmt.Errorf("smtp auth: %w", err)
 		}

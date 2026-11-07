@@ -35,6 +35,14 @@ var (
 		[]string{"result"},
 	)
 
+	ProviderFallbacks = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "delivery_provider_fallbacks_total",
+			Help: "Delivery provider fallback decisions.",
+		},
+		[]string{"kind", "from", "to", "reason"},
+	)
+
 	QueuePolls = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "campaign_scheduler_polls_total",
@@ -44,7 +52,7 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(HTTPRequests, HTTPDuration, DeliveryJobs, QueuePolls)
+	prometheus.MustRegister(HTTPRequests, HTTPDuration, DeliveryJobs, ProviderFallbacks, QueuePolls)
 }
 
 func MetricsHandler() http.Handler {
