@@ -1039,6 +1039,16 @@ Running 2 tests using 1 worker
 ```
 
 ```
+$ E2E_BASE_URL=http://localhost:3000 E2E_API_ORIGIN=http://localhost:8084 MAILPIT_API_URL=http://localhost:8025 npm run test:e2e -- e2e/domains.spec.ts
+> @email-platform/web@0.1.0 test:e2e
+> playwright test e2e/domains.spec.ts
+
+Running 1 test using 1 worker
+  ✓  1 [chromium] › e2e/domains.spec.ts:91:1 › sending domains load from the real API without browser errors (3.8s)
+1 passed (4.8s)
+```
+
+```
 $ recipient="sendwise-smoke-1794062118-32264@example.test"; ./scripts/smoke-mail.sh "$recipient"
 SMTP smoke passed: the configured relay accepted a verification email for sendwise-smoke-1794062118-32264@example.test.
 This confirms SMTP handoff only; it does not prove inbox delivery.

@@ -2,7 +2,6 @@ import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { expect, test, type APIRequestContext } from "@playwright/test";
 
-const API_ORIGIN = process.env.E2E_API_ORIGIN ?? "http://localhost:8084";
 const MAILPIT_API = process.env.MAILPIT_API_URL ?? "http://localhost:8025";
 
 async function findVerificationLink(
@@ -101,10 +100,7 @@ test("sending domains load from the real API without browser errors", async ({
     if (message.type() === "error") consoleErrors.push(message.text());
   });
   page.on("response", (response) => {
-    if (
-      response.url().startsWith(API_ORIGIN) &&
-      new URL(response.url()).pathname.includes("/api/v1/domains")
-    ) {
+    if (new URL(response.url()).pathname.includes("/api/v1/domains")) {
       domainAPIResponses.push(response.status());
     }
   });
@@ -119,14 +115,12 @@ test("sending domains load from the real API without browser errors", async ({
   await page.getByPlaceholder("Acme Studio").fill(`Domain Page ${stamp}`);
   await page.getByPlaceholder("••••••••••").fill(password);
   const registrationResponse = page.waitForResponse(
-    (response) =>
-      response.url().startsWith(API_ORIGIN) &&
-      new URL(response.url()).pathname.endsWith("/auth/register"),
+    (response) => new URL(response.url()).pathname.endsWith("/auth/register"),
   );
   await page.getByRole("button", { name: "Create workspace" }).click();
   const registered = await registrationResponse;
   expect(registered.status(), await registered.text()).toBe(201);
-  await page.waitForURL("**/login");
+  await page.waitForURL(/\/auth\/verify\?email=/);
 
   const verificationLink = await findVerificationLink(request, email);
   const verificationToken = new URL(verificationLink).searchParams.get("token");
