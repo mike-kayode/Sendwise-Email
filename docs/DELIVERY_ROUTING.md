@@ -89,7 +89,8 @@ The requested fixed warm-up ramp of 200, 500, 1,000, 2,500, 5,000, 10,000,
 bounces, is **not yet implemented**. Current generic worker warm-up settings
 are documented in [DELIVERABILITY.md](./DELIVERABILITY.md) and must not be
 mistaken for this Resend-specific schedule. Rolling Resend feedback pause
-threshold logic is also not yet verified over a production-like campaign.
+threshold logic has local synthetic-event coverage, but has not been verified
+against a production-like sending history.
 
 Monitor Resend's Metrics page for sending volume, delivery delays, bounces,
 complaints, opens, and clicks. Pause sending and investigate list quality,
@@ -101,6 +102,8 @@ placement.
 
 Postgres-backed fake-webhook tests cover signature acceptance/rejection,
 stale timestamps, replay deduplication, all supported event types, suppression
-behavior, and cross-workspace isolation. The complete Playwright routing
-journey and 100,000-recipient fake-Resend throughput run are **not yet
-verified**; see [STATUS.md](./STATUS.md).
+behavior, and cross-workspace isolation. A 100,000-recipient local SMTP sink
+run is recorded in [DELIVERABILITY.md](./DELIVERABILITY.md), but does not prove
+Resend batching or retry behavior. The complete Playwright routing journey and
+100,000-recipient fake-Resend throughput run are **not yet verified**; see
+[STATUS.md](./STATUS.md).

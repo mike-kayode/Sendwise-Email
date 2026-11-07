@@ -41,4 +41,18 @@ Use provider feedback loops where available. Remove hard bounces and complaints 
 
 ## Throughput proof status
 
-No 100,000-recipient campaign run against a discard-only SMTP sink is recorded here yet. Until that run reports wall-clock time, sends per second, peak memory, queue depth, and failures, bulk throughput remains **unverified**. Any future sink result proves only application/relay throughput under that test setup, not inbox placement or deliverability.
+The opt-in local SMTP discard-sink test `TestBulkCampaignSMTPThroughput100k`
+completed against the local scratch Postgres database:
+
+```
+$ RUN_BULK_THROUGHPUT=1 TEST_DATABASE_URL=****** go test ./internal/worker -run '^TestBulkCampaignSMTPThroughput100k$' -count=1 -v
+=== RUN   TestBulkCampaignSMTPThroughput100k
+bulk-sink: recipients=100000 elapsed=9m16.346s sends_per_second=179.74 peak_heap_bytes=33619928 heap_after_bytes=13831752 queue_depth_peak=100000 failures=0 warmup_reserved=100000
+--- PASS: TestBulkCampaignSMTPThroughput100k (563.73s)
+PASS
+ok  	github.com/khayode/email-platform/internal/worker	564.393s
+```
+
+This proves application throughput against the test's local SMTP sink only. It
+does not prove Resend throughput, injected Resend 429/5xx recovery, inbox
+placement, or deliverability.

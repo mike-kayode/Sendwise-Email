@@ -1569,10 +1569,27 @@ campaign work. The platform fallback test uses an `httptest` fake only. Local
 Postgres integration also checks the 24-hour rolling pause thresholds at
 exactly 2% and above 2% bounces, and below/above 0.05% complaints.
 
+The existing application-level 100,000-recipient SMTP discard-sink benchmark
+was run separately; the full Go suite above does not enable that opt-in test:
+
+```
+$ RUN_BULK_THROUGHPUT=1 TEST_DATABASE_URL=****** go test ./internal/worker -run '^TestBulkCampaignSMTPThroughput100k$' -count=1 -v
+=== RUN   TestBulkCampaignSMTPThroughput100k
+bulk-sink: recipients=100000 elapsed=9m16.346s sends_per_second=179.74 peak_heap_bytes=33619928 heap_after_bytes=13831752 queue_depth_peak=100000 failures=0 warmup_reserved=100000
+--- PASS: TestBulkCampaignSMTPThroughput100k (563.73s)
+PASS
+ok  	github.com/khayode/email-platform/internal/worker	564.393s
+```
+
+This sink result proves only the application path against a local SMTP test
+server. It does not prove Resend throughput, injected Resend 429/5xx recovery,
+or inbox placement.
+
 Still **Not done / not verified**:
 
 - No full Playwright routing journey has run.
-- No 100,000-recipient fake-Resend throughput run or performance report exists.
+- No 100,000-recipient fake-Resend throughput run with injected 429/5xx or
+  corresponding performance report exists.
 - The requested fixed Resend warm-up ramp (200 through 100,000/day, advancing
   only after a day below 2% bounces) is not implemented.
 - Campaign pause thresholds have only local synthetic-event coverage; no
@@ -1580,5 +1597,6 @@ Still **Not done / not verified**:
 - A UI/API workflow to authenticate the same domain with both Stalwart and
   Resend is incomplete; optional campaign fallback must remain unused until
   both provider-auth flags are independently verified.
-- No green GitHub Actions run exists for the current routing changes because
-  they have not been pushed. The routing task is therefore **Not done**.
+- No green GitHub Actions result exists yet for the current routing SHA; the
+  task remains **Not done** until CI finishes and the remaining routing
+  requirements are addressed.
