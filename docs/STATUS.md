@@ -420,6 +420,11 @@ records, mismatches, and cross-organization 404s through the API. DNS answers in
 these tests come from an injected fake resolver; this does not prove public DNS
 propagation or a live domain configuration.
 
+GitHub Actions run [#53](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42413710790)
+passed on implementation SHA `1fa1e4bbe71a808b3e5c0f8eba8661dc995c8f0a`,
+including Go tests, web checks, Docker builds, and the CI browser suite. The
+live-DNS limitation above remains.
+
 ### Task D follow-up — domain records and page stability (2026-11-06)
 
 The domains UI now renders the API's DNS record response, including the ownership
