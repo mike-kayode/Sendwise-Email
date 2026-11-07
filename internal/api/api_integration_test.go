@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -64,6 +65,7 @@ func TestMain(m *testing.M) {
 			RequireVerifiedDomain: false,
 			SMTPFrom:              "test@example.com",
 			DKIMEncryptionKey:     "integration-dkim-encryption-key-0123456789",
+			ResendWebhookSecret:   "whsec_" + base64.StdEncoding.EncodeToString([]byte("integration-resend-webhook-secret")),
 		}
 		integrationTokens = auth.NewManager(integrationCfg.JWTSecret, integrationCfg.JWTIssuer, integrationCfg.AccessTokenTTL)
 	}

@@ -54,7 +54,7 @@ func New(
 		tokens:        tokens,
 		campaigns:     campaignService,
 		apiKeys:       apiKeyService,
-		delivery:      NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret, cfg.MaxBounceRate, cfg.MaxComplaintRate),
+		delivery:      NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret, cfg.MaxBounceRate, cfg.MaxComplaintRate, cfg.ResendWebhookSecret),
 		dnsResolver:   newDNSResolver(cfg.DNSResolverAddr, cfg.DNSResolverTimeout),
 		resendDomains: &delivery.ResendTransport{RequestsRate: cfg.ResendRequestsPerSecond},
 		logger:        logger,
@@ -192,6 +192,7 @@ func (s *Server) Handler() http.Handler {
 	// Inbound bounce / feedback-loop webhooks (HMAC-secured, idempotent).
 	mux.Handle("POST /api/v1/webhooks/bounce", s.delivery.requireWebhookAuth(s.delivery.bounceWebhook))
 	mux.Handle("POST /api/v1/webhooks/complaint", s.delivery.requireWebhookAuth(s.delivery.complaintWebhook))
+	mux.HandleFunc("POST /api/v1/webhooks/resend", s.delivery.resendWebhook)
 
 	mux.Handle("GET /api/v1/analytics/overview", protect(s.analyticsOverview))
 	mux.Handle("GET /api/v1/analytics/campaigns/{id}", protect(s.campaignReport))
