@@ -214,6 +214,8 @@ export type SendingDomain = {
   id: string;
   domain: string;
   status: string;
+  provider?: "stalwart" | "resend";
+  resend_domain_id?: string;
   dkim_selector?: string;
   spf_status?: string;
   dkim_status?: string;
@@ -222,6 +224,13 @@ export type SendingDomain = {
   last_checked_at?: string;
   verified_at?: string;
   created_at: string;
+};
+
+export type WorkspaceDeliverySettings = {
+  provider: "stalwart" | "resend";
+  fallback_provider: "stalwart" | "resend" | null;
+  resend_api_key_set: boolean;
+  resend_api_key_last4?: string;
 };
 
 export type AnalyticsOverview = {

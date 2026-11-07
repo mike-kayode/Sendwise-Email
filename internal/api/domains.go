@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -22,34 +23,42 @@ var domainPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+
 // nullable in the schema, so it is coalesced in SQL: a NULL must never reach the
 // scanner as a typed nil and must never fail the whole domain read.
 const domainColumns = `
-	id, domain, status, dkim_selector, COALESCE(dkim_public_key, '') AS dkim_public_key, verification_token, spf_status, dkim_status,
-	dmarc_status, verification_status, last_checked_at, verified_at, created_at
+	id, domain, status, dkim_selector, COALESCE(dkim_public_key, '') AS dkim_public_key, verification_token,
+	spf_status, dkim_status, dmarc_status, verification_status, last_checked_at, verified_at, created_at,
+	provider, COALESCE(resend_domain_id, ''), COALESCE(resend_dns_records, '[]'::jsonb)::text
 `
 
 type sendingDomain struct {
-	ID                 string     `json:"id"`
-	Domain             string     `json:"domain"`
-	Status             string     `json:"status"`
-	DKIMSelector       string     `json:"dkim_selector"`
-	DKIMPublicKey      string     `json:"dkim_public_key,omitempty"`
-	VerificationToken  string     `json:"-"`
-	SPFStatus          string     `json:"spf_status"`
-	DKIMStatus         string     `json:"dkim_status"`
-	DMARCStatus        string     `json:"dmarc_status"`
-	VerificationStatus string     `json:"verification_status"`
-	LastCheckedAt      *time.Time `json:"last_checked_at"`
-	VerifiedAt         *time.Time `json:"verified_at"`
-	CreatedAt          time.Time  `json:"created_at"`
+	ID                 string                     `json:"id"`
+	Domain             string                     `json:"domain"`
+	Status             string                     `json:"status"`
+	DKIMSelector       string                     `json:"dkim_selector"`
+	DKIMPublicKey      string                     `json:"dkim_public_key,omitempty"`
+	VerificationToken  string                     `json:"-"`
+	SPFStatus          string                     `json:"spf_status"`
+	DKIMStatus         string                     `json:"dkim_status"`
+	DMARCStatus        string                     `json:"dmarc_status"`
+	VerificationStatus string                     `json:"verification_status"`
+	LastCheckedAt      *time.Time                 `json:"last_checked_at"`
+	VerifiedAt         *time.Time                 `json:"verified_at"`
+	CreatedAt          time.Time                  `json:"created_at"`
+	Provider           string                     `json:"provider"`
+	ResendDomainID     string                     `json:"resend_domain_id,omitempty"`
+	ResendDNSRecords   []delivery.ResendDNSRecord `json:"resend_dns_records,omitempty"`
 }
 
 func scanDomain(row pgx.Row) (*sendingDomain, error) {
 	var d sendingDomain
+	var resendRecords string
 	if err := row.Scan(
 		&d.ID, &d.Domain, &d.Status, &d.DKIMSelector, &d.DKIMPublicKey, &d.VerificationToken,
 		&d.SPFStatus, &d.DKIMStatus, &d.DMARCStatus, &d.VerificationStatus,
-		&d.LastCheckedAt, &d.VerifiedAt, &d.CreatedAt,
+		&d.LastCheckedAt, &d.VerifiedAt, &d.CreatedAt, &d.Provider, &d.ResendDomainID, &resendRecords,
 	); err != nil {
 		return nil, err
+	}
+	if err := json.Unmarshal([]byte(resendRecords), &d.ResendDNSRecords); err != nil {
+		return nil, fmt.Errorf("decode Resend DNS records: %w", err)
 	}
 	return &d, nil
 }
@@ -82,7 +91,8 @@ func (s *Server) listDomains(w http.ResponseWriter, r *http.Request) {
 }
 
 type domainInput struct {
-	Domain string `json:"domain"`
+	Domain   string `json:"domain"`
+	Provider string `json:"provider"`
 }
 
 func generateDKIMKeyPair(dkimEncryptionKey string) (publicKeyB64 string, encryptedPrivateKey string, err error) {
@@ -106,6 +116,19 @@ func (s *Server) createDomain(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid_domain", "Enter a valid domain such as newsletter.example.com.")
 		return
 	}
+	provider := strings.ToLower(strings.TrimSpace(input.Provider))
+	if provider == "" {
+		provider = delivery.ProviderStalwart
+	}
+	if provider != delivery.ProviderStalwart && provider != delivery.ProviderResend {
+		httpx.Error(w, http.StatusBadRequest, "invalid_provider", "Choose stalwart or resend as the domain provider.")
+		return
+	}
+
+	if provider == delivery.ProviderResend {
+		s.createResendDomain(w, r, domain)
+		return
+	}
 	if s.cfg.DKIMEncryptionKey == "" {
 		s.logger.Error("create domain", "error", errors.New("DKIM_ENCRYPTION_KEY is not configured"))
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not generate the sending domain DKIM key: DKIM_ENCRYPTION_KEY is not configured.")
@@ -120,10 +143,10 @@ func (s *Server) createDomain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	d, err := scanDomain(s.pool.QueryRow(r.Context(), `
-		INSERT INTO sending_domains (organization_id, domain, status, dkim_selector, dkim_public_key, dkim_private_key)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO sending_domains (organization_id, domain, status, dkim_selector, dkim_public_key, dkim_private_key, provider)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING `+domainColumns,
-		s.organizationID(r), domain, "pending", s.cfg.DKIMSelector, publicKeyB64, encryptedPrivateKey,
+		s.organizationID(r), domain, "pending", s.cfg.DKIMSelector, publicKeyB64, encryptedPrivateKey, delivery.ProviderStalwart,
 	))
 	if isUniqueViolation(err) {
 		httpx.Error(w, http.StatusConflict, "domain_exists", "This sending domain is already registered.")
@@ -151,6 +174,10 @@ func (s *Server) verifyDomain(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("get domain for verification", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load the sending domain.")
+		return
+	}
+	if d.Provider == delivery.ProviderResend {
+		s.verifyResendDomain(w, r, d)
 		return
 	}
 
@@ -188,7 +215,7 @@ func (s *Server) verifyDomain(w http.ResponseWriter, r *http.Request) {
 
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"domain":      updated,
-		"dns_records": dnsRecordsFor(*updated, verification, s.cfg.TrackingBaseURL, s.cfg.SPFInclude),
+		"dns_records": domainDNSRecordsFor(*updated, verification, s.cfg.TrackingBaseURL, s.cfg.SPFInclude),
 	})
 }
 
@@ -210,8 +237,188 @@ func (s *Server) domainDNSRecords(w http.ResponseWriter, r *http.Request) {
 
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"domain":      d,
-		"dns_records": dnsRecordsFor(*d, d.VerificationStatus, s.cfg.TrackingBaseURL, s.cfg.SPFInclude),
+		"dns_records": domainDNSRecordsFor(*d, d.VerificationStatus, s.cfg.TrackingBaseURL, s.cfg.SPFInclude),
 	})
+}
+
+func (s *Server) createResendDomain(w http.ResponseWriter, r *http.Request, domain string) {
+	if s.resendDomains == nil {
+		httpx.Error(w, http.StatusServiceUnavailable, "resend_unavailable", "Resend API client is not configured.")
+		return
+	}
+	workspaceID := s.organizationID(r)
+	apiKey, err := s.workspaceResendAPIKey(r, workspaceID)
+	if err != nil {
+		s.logger.Error("read Resend API key for domain creation", "workspace_id", workspaceID, "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not read the configured Resend API key.")
+		return
+	}
+	if apiKey == "" {
+		httpx.Error(w, http.StatusBadRequest, "resend_api_key_required", "Save a Resend API key in Settings before adding a Resend domain.")
+		return
+	}
+	tx, err := s.pool.Begin(r.Context())
+	if err != nil {
+		s.logger.Error("begin Resend domain transaction", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not add the sending domain.")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err := tx.Exec(r.Context(), `
+		INSERT INTO sending_domains (organization_id, domain, status, dkim_selector, provider)
+		VALUES ($1, $2, 'pending', '', 'resend')
+	`, workspaceID, domain); isUniqueViolation(err) {
+		httpx.Error(w, http.StatusConflict, "domain_exists", "This sending domain is already registered to a workspace.")
+		return
+	} else if err != nil {
+		s.logger.Error("reserve Resend domain ownership", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not reserve the sending domain.")
+		return
+	}
+	resendDomain, err := s.resendDomains.CreateDomain(r.Context(), apiKey, domain)
+	if err != nil {
+		s.logger.Warn("Resend domain creation failed", "workspace_id", workspaceID, "domain", domain, "error", err)
+		httpx.Error(w, http.StatusBadGateway, "resend_domain_create_failed", "Resend could not create the domain. Check the domain and API key, then try again.")
+		return
+	}
+	if resendDomain == nil || strings.TrimSpace(resendDomain.ID) == "" {
+		httpx.Error(w, http.StatusBadGateway, "resend_domain_invalid_response", "Resend returned an incomplete domain response.")
+		return
+	}
+	records, err := json.Marshal(resendDomain.Records)
+	if err != nil {
+		s.logger.Error("encode Resend DNS records", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not save Resend DNS records.")
+		return
+	}
+	status, spf, dkim, dmarc, verification := resendDomainStatuses(resendDomain)
+	updated, err := scanDomain(tx.QueryRow(r.Context(), `
+		UPDATE sending_domains
+		SET resend_domain_id = $3, resend_dns_records = $4::jsonb, status = $5,
+		    spf_status = $6, dkim_status = $7, dmarc_status = $8, verification_status = $9,
+		    last_checked_at = now(),
+		    verified_at = CASE WHEN $5 = 'verified' THEN now() ELSE NULL END,
+		    updated_at = now()
+		WHERE organization_id = $1 AND domain = $2
+		RETURNING `+domainColumns,
+		workspaceID, domain, resendDomain.ID, records, status, spf, dkim, dmarc, verification,
+	))
+	if err != nil {
+		s.logger.Error("save Resend domain", "workspace_id", workspaceID, "domain", domain, "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Resend created the domain but Sendwise could not save its DNS records.")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.logger.Error("commit Resend domain", "workspace_id", workspaceID, "domain", domain, "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Resend created the domain but Sendwise could not finish saving it.")
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, updated)
+}
+
+func (s *Server) verifyResendDomain(w http.ResponseWriter, r *http.Request, domain *sendingDomain) {
+	workspaceID := s.organizationID(r)
+	apiKey, err := s.workspaceResendAPIKey(r, workspaceID)
+	if err != nil {
+		s.logger.Error("read Resend API key for verification", "workspace_id", workspaceID, "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not read the configured Resend API key.")
+		return
+	}
+	if apiKey == "" || s.resendDomains == nil || domain.ResendDomainID == "" {
+		httpx.Error(w, http.StatusBadRequest, "resend_domain_unavailable", "The Resend domain or workspace API key is not configured.")
+		return
+	}
+	resendDomain, err := s.resendDomains.VerifyDomain(r.Context(), apiKey, domain.ResendDomainID)
+	if err != nil {
+		s.logger.Warn("Resend domain verification failed", "workspace_id", workspaceID, "domain", domain.Domain, "error", err)
+		httpx.Error(w, http.StatusBadGateway, "resend_verify_failed", "Resend could not verify the domain. Review its DNS records and retry.")
+		return
+	}
+	if resendDomain == nil {
+		httpx.Error(w, http.StatusBadGateway, "resend_status_failed", "Resend returned an incomplete verification response.")
+		return
+	}
+	if len(resendDomain.Records) == 0 {
+		resendDomain, err = s.resendDomains.GetDomain(r.Context(), apiKey, domain.ResendDomainID)
+		if err != nil {
+			s.logger.Warn("read Resend domain status after verification", "workspace_id", workspaceID, "domain", domain.Domain, "error", err)
+			httpx.Error(w, http.StatusBadGateway, "resend_status_failed", "Resend verification was requested, but its latest status could not be read.")
+			return
+		}
+		if resendDomain == nil {
+			httpx.Error(w, http.StatusBadGateway, "resend_status_failed", "Resend returned an incomplete domain status.")
+			return
+		}
+	}
+	status, spf, dkim, dmarc, verification := resendDomainStatuses(resendDomain)
+	records, err := json.Marshal(resendDomain.Records)
+	if err != nil {
+		s.logger.Error("encode Resend DNS records", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not save updated Resend DNS records.")
+		return
+	}
+	updated, err := scanDomain(s.pool.QueryRow(r.Context(), `
+		UPDATE sending_domains
+		SET status = $3, spf_status = $4, dkim_status = $5, dmarc_status = $6,
+		    verification_status = $7, resend_dns_records = $8::jsonb, last_checked_at = now(),
+		    verified_at = CASE WHEN $3 = 'verified' THEN COALESCE(verified_at, now()) ELSE verified_at END,
+		    updated_at = now()
+		WHERE id = $1 AND organization_id = $2
+		RETURNING `+domainColumns,
+		domain.ID, workspaceID, status, spf, dkim, dmarc, verification, records,
+	))
+	if err != nil {
+		s.logger.Error("update Resend domain verification", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not save Resend verification status.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"domain":      updated,
+		"dns_records": domainDNSRecordsFor(*updated, updated.VerificationStatus, s.cfg.TrackingBaseURL, s.cfg.SPFInclude),
+	})
+}
+
+func resendDomainStatuses(domain *delivery.ResendDomain) (status, spf, dkim, dmarc, verification string) {
+	status, spf, dkim, dmarc, verification = "pending", "missing", "missing", "missing", "pending"
+	if domain == nil {
+		return
+	}
+	for _, record := range domain.Records {
+		recordType := strings.ToLower(record.Record + " " + record.Type + " " + record.Name)
+		recordStatus := strings.ToLower(strings.TrimSpace(record.Status))
+		if recordStatus == "" {
+			recordStatus = "pending"
+		}
+		switch {
+		case strings.Contains(recordType, "spf"):
+			spf = recordStatus
+		case strings.Contains(recordType, "dkim") || strings.Contains(recordType, "_domainkey"):
+			dkim = recordStatus
+		case strings.Contains(recordType, "dmarc"):
+			dmarc = recordStatus
+		}
+	}
+	if strings.EqualFold(domain.Status, "verified") {
+		status, spf, dkim, dmarc, verification = "verified", "verified", "verified", "verified", "verified"
+	} else if strings.EqualFold(domain.Status, "failed") {
+		status, verification = "misconfigured", "mismatched"
+	}
+	return
+}
+
+func domainDNSRecordsFor(domain sendingDomain, verification, trackingBase, spfInclude string) []dnsRecord {
+	if domain.Provider != delivery.ProviderResend {
+		return dnsRecordsFor(domain, verification, trackingBase, spfInclude)
+	}
+	records := make([]dnsRecord, 0, len(domain.ResendDNSRecords))
+	for _, record := range domain.ResendDNSRecords {
+		records = append(records, dnsRecord{
+			Type: record.Type, Name: record.Name, Value: record.Value,
+			Purpose: "DNS record required by Resend for domain authentication.",
+			Status:  record.Status,
+		})
+	}
+	return records
 }
 
 type dnsRecord struct {

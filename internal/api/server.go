@@ -14,6 +14,7 @@ import (
 	"github.com/khayode/email-platform/internal/auth"
 	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/config"
+	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/httpx"
 	"github.com/khayode/email-platform/internal/observability"
 )
@@ -26,8 +27,16 @@ type Server struct {
 	apiKeys                *auth.Service
 	delivery               *DeliveryHandler
 	dnsResolver            DNSResolver
+	resendDomains          resendDomainAPI
 	logger                 *slog.Logger
 	formConfirmationSender func(context.Context, string, string, string) error
+}
+
+type resendDomainAPI interface {
+	ListDomains(context.Context, string) ([]delivery.ResendDomain, error)
+	CreateDomain(context.Context, string, string) (*delivery.ResendDomain, error)
+	GetDomain(context.Context, string, string) (*delivery.ResendDomain, error)
+	VerifyDomain(context.Context, string, string) (*delivery.ResendDomain, error)
 }
 
 func New(
@@ -40,14 +49,15 @@ func New(
 	logger *slog.Logger,
 ) *Server {
 	server := &Server{
-		cfg:         cfg,
-		pool:        pool,
-		tokens:      tokens,
-		campaigns:   campaignService,
-		apiKeys:     apiKeyService,
-		delivery:    NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret, cfg.MaxBounceRate, cfg.MaxComplaintRate),
-		dnsResolver: newDNSResolver(cfg.DNSResolverAddr, cfg.DNSResolverTimeout),
-		logger:      logger,
+		cfg:           cfg,
+		pool:          pool,
+		tokens:        tokens,
+		campaigns:     campaignService,
+		apiKeys:       apiKeyService,
+		delivery:      NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret, cfg.MaxBounceRate, cfg.MaxComplaintRate),
+		dnsResolver:   newDNSResolver(cfg.DNSResolverAddr, cfg.DNSResolverTimeout),
+		resendDomains: &delivery.ResendTransport{RequestsRate: cfg.ResendRequestsPerSecond},
+		logger:        logger,
 	}
 	server.formConfirmationSender = func(ctx context.Context, to, formName, confirmURL string) error {
 		return sendFormConfirmationEmail(ctx, cfg, to, formName, confirmURL)
@@ -168,6 +178,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/domains", protect(s.createDomain, domainManagers...))
 	mux.Handle("POST /api/v1/domains/{id}/verify", protect(s.verifyDomain, domainManagers...))
 	mux.Handle("GET /api/v1/domains/{id}/dns-records", protect(s.domainDNSRecords))
+	mux.Handle("GET /api/v1/settings/delivery", protect(s.getDeliverySettings, auth.RoleOwner, auth.RoleAdmin))
+	mux.Handle("PUT /api/v1/settings/delivery", protect(s.updateDeliverySettings, auth.RoleOwner, auth.RoleAdmin))
+	mux.Handle("POST /api/v1/settings/delivery/test", protect(s.testDeliveryConnection, auth.RoleOwner, auth.RoleAdmin))
 
 	// Dead-letter queue and suppression management (protected).
 	mux.Handle("GET /api/v1/delivery/dead-letter", protect(s.delivery.listDeadLetter, audienceManagers...))

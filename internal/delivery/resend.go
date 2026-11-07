@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +46,23 @@ type ResendTransport struct {
 	MaxRetries   int
 }
 
+type ResendDNSRecord struct {
+	Record   string `json:"record,omitempty"`
+	Type     string `json:"type"`
+	Name     string `json:"name"`
+	Value    string `json:"value"`
+	Status   string `json:"status"`
+	Priority int    `json:"priority,omitempty"`
+	TTL      string `json:"ttl,omitempty"`
+}
+
+type ResendDomain struct {
+	ID      string            `json:"id"`
+	Name    string            `json:"name"`
+	Status  string            `json:"status"`
+	Records []ResendDNSRecord `json:"records"`
+}
+
 type resendRateLimiter struct {
 	mu       sync.Mutex
 	limiters map[string]*rate.Limiter
@@ -53,11 +71,15 @@ type resendRateLimiter struct {
 var sharedResendLimiters = resendRateLimiter{limiters: make(map[string]*rate.Limiter)}
 
 func (t *ResendTransport) limiter() *rate.Limiter {
+	return t.limiterFor(t.APIKey)
+}
+
+func (t *ResendTransport) limiterFor(apiKey string) *rate.Limiter {
 	requestsPerSecond := t.RequestsRate
 	if requestsPerSecond < 1 {
 		requestsPerSecond = 8
 	}
-	digest := sha256.Sum256([]byte(t.APIKey))
+	digest := sha256.Sum256([]byte(apiKey))
 	key := hex.EncodeToString(digest[:])
 	sharedResendLimiters.mu.Lock()
 	defer sharedResendLimiters.mu.Unlock()
@@ -108,6 +130,82 @@ func (t *ResendTransport) Send(ctx context.Context, message Message) (*Result, e
 	return &Result{MessageID: results[0].MessageID, Accepted: results[0].Accepted}, nil
 }
 
+func (t *ResendTransport) ListDomains(ctx context.Context, apiKey string) ([]ResendDomain, error) {
+	var response struct {
+		Data []ResendDomain `json:"data"`
+	}
+	if err := t.requestJSON(ctx, http.MethodGet, "/domains", apiKey, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Data, nil
+}
+
+func (t *ResendTransport) CreateDomain(ctx context.Context, apiKey, domain string) (*ResendDomain, error) {
+	var response ResendDomain
+	if err := t.requestJSON(ctx, http.MethodPost, "/domains", apiKey, map[string]string{"name": domain}, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (t *ResendTransport) GetDomain(ctx context.Context, apiKey, domainID string) (*ResendDomain, error) {
+	var response ResendDomain
+	if err := t.requestJSON(ctx, http.MethodGet, "/domains/"+url.PathEscape(domainID), apiKey, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (t *ResendTransport) VerifyDomain(ctx context.Context, apiKey, domainID string) (*ResendDomain, error) {
+	var response ResendDomain
+	if err := t.requestJSON(ctx, http.MethodPost, "/domains/"+url.PathEscape(domainID)+"/verify", apiKey, struct{}{}, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (t *ResendTransport) requestJSON(ctx context.Context, method, path, apiKey string, body, output any) error {
+	if err := t.limiterFor(apiKey).Wait(ctx); err != nil {
+		return fmt.Errorf("wait for resend request limit: %w", err)
+	}
+	var requestBody io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("encode resend domains request: %w", err)
+		}
+		requestBody = bytes.NewReader(encoded)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, t.endpoint(path), requestBody)
+	if err != nil {
+		return fmt.Errorf("create resend domains request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	client := t.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("send resend domains request: %w", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read resend domains response: %w", err)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return parseResendError(response.StatusCode, response.Header, responseBody)
+	}
+	if err := json.Unmarshal(responseBody, output); err != nil {
+		return fmt.Errorf("decode resend domains response: %w", err)
+	}
+	return nil
+}
+
 func (t *ResendTransport) SendBatch(ctx context.Context, messages []Message, idempotencyKey string) ([]BatchResult, error) {
 	if len(messages) == 0 {
 		return []BatchResult{}, nil
@@ -120,9 +218,17 @@ func (t *ResendTransport) SendBatch(ctx context.Context, messages []Message, ide
 	}
 	payload := make([]resendEmail, 0, len(messages))
 	for _, message := range messages {
+		workspaceID := message.WorkspaceID
+		if workspaceID == "" {
+			workspaceID = "platform"
+		}
+		campaignID := message.CampaignID
+		if campaignID == "" {
+			campaignID = "platform"
+		}
 		tags := []resendTag{
-			{Name: "workspace_id", Value: message.WorkspaceID},
-			{Name: "campaign_id", Value: message.CampaignID},
+			{Name: "workspace_id", Value: workspaceID},
+			{Name: "campaign_id", Value: campaignID},
 			{Name: "message_id", Value: message.ID},
 		}
 		payload = append(payload, resendEmail{

@@ -17,6 +17,7 @@ const recordStatusText = (status?: string) => (status ? status.replaceAll("_", "
 
 export default function DomainsPage() {
   const [newDomain, setNewDomain] = useState("");
+  const [newProvider, setNewProvider] = useState<"stalwart" | "resend">("stalwart");
   const [selectedDomainId, setSelectedDomainId] = useState<string | null>(null);
   const [verifyingAll, setVerifyingAll] = useState(false);
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
@@ -59,9 +60,10 @@ export default function DomainsPage() {
     try {
       await apiFetch("/domains", {
         method: "POST",
-        body: JSON.stringify({ domain: newDomain }),
+        body: JSON.stringify({ domain: newDomain, provider: newProvider }),
       });
       setNewDomain("");
+      setNewProvider("stalwart");
       await queryClient.invalidateQueries({ queryKey: ["domains"] });
       toast({ title: "Domain added", description: "Add the DNS records below, then verify." });
     } catch (err: any) {
@@ -410,6 +412,18 @@ export default function DomainsPage() {
                 if (e.key === "Enter") void handleAddDomain();
               }}
             />
+            <label className="block text-xs font-medium text-slate-600" htmlFor="domain-provider">
+              Sending provider
+            </label>
+            <select
+              id="domain-provider"
+              value={newProvider}
+              onChange={(e) => setNewProvider(e.target.value === "resend" ? "resend" : "stalwart")}
+              className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm"
+            >
+              <option value="stalwart">Stalwart</option>
+              <option value="resend">Resend</option>
+            </select>
             <button
               onClick={() => void handleAddDomain()}
               className="inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-indigo-600 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
@@ -418,8 +432,8 @@ export default function DomainsPage() {
               <Plus className="h-4 w-4" /> Add domain
             </button>
             <div className="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
-              After adding, we show the exact records to create. Click <span className="font-medium">Verify now</span>{" "}
-              once your DNS provider has published them.
+              After adding, we show the exact records from the selected provider. Click{" "}
+              <span className="font-medium">Verify now</span> once they are published.
             </div>
           </CardContent>
         </Card>

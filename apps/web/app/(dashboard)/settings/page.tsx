@@ -9,7 +9,13 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, Thead, Tbody, Tr, Th, Td } from "@/components/ui/table";
 import { useAuthStore } from "@/stores/auth";
-import { apiFetch, type Organization, type Membership, type Invitation } from "@/lib/auth";
+import {
+  apiFetch,
+  type Organization,
+  type Membership,
+  type Invitation,
+  type WorkspaceDeliverySettings,
+} from "@/lib/auth";
 import { formatDate, initials } from "@/lib/utils";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
@@ -17,6 +23,7 @@ import { useToast } from "@/components/ui/use-toast";
 const sections = [
   { id: "workspace", label: "Workspace" },
   { id: "sending", label: "Sending defaults" },
+  { id: "delivery", label: "Delivery provider" },
   { id: "team", label: "Team" },
   { id: "notifications", label: "Notifications" },
   { id: "compliance", label: "Compliance" },
@@ -39,10 +46,61 @@ export default function SettingsPage() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("viewer");
   const [inviting, setInviting] = useState(false);
+  const [deliverySettings, setDeliverySettings] = useState<WorkspaceDeliverySettings | null>(null);
+  const [deliveryProvider, setDeliveryProvider] = useState<"stalwart" | "resend">("stalwart");
+  const [fallbackProvider, setFallbackProvider] = useState<"none" | "stalwart" | "resend">("none");
+  const [resendAPIKey, setResendAPIKey] = useState("");
+  const [savingDelivery, setSavingDelivery] = useState(false);
+  const [testingDelivery, setTestingDelivery] = useState(false);
 
   useEffect(() => {
-    loadData();
+    void loadData();
+    void loadDeliverySettings();
   }, []);
+
+  async function loadDeliverySettings() {
+    try {
+      const settings = await apiFetch<WorkspaceDeliverySettings>("/settings/delivery");
+      setDeliverySettings(settings);
+      setDeliveryProvider(settings.provider);
+      setFallbackProvider(settings.fallback_provider ?? "none");
+    } catch (err: any) {
+      toast({ title: "Unable to load delivery settings", description: err?.message ?? "Unknown error", variant: "destructive" });
+    }
+  }
+
+  async function handleSaveDeliverySettings() {
+    setSavingDelivery(true);
+    try {
+      const settings = await apiFetch<WorkspaceDeliverySettings>("/settings/delivery", {
+        method: "PUT",
+        body: JSON.stringify({
+          provider: deliveryProvider,
+          fallback_provider: fallbackProvider === "none" ? null : fallbackProvider,
+          resend_api_key: resendAPIKey,
+        }),
+      });
+      setDeliverySettings(settings);
+      setResendAPIKey("");
+      toast({ title: "Delivery settings saved", description: "The Resend key is stored encrypted and is never returned." });
+    } catch (err: any) {
+      toast({ title: "Could not save delivery settings", description: err?.message ?? "Unknown error", variant: "destructive" });
+    } finally {
+      setSavingDelivery(false);
+    }
+  }
+
+  async function handleTestDeliveryConnection() {
+    setTestingDelivery(true);
+    try {
+      const result = await apiFetch<{ domain_count: number }>("/settings/delivery/test", { method: "POST", body: "{}" });
+      toast({ title: "Resend connection succeeded", description: `Resend returned ${result.domain_count} domain(s).` });
+    } catch (err: any) {
+      toast({ title: "Resend connection failed", description: err?.message ?? "Unknown error", variant: "destructive" });
+    } finally {
+      setTestingDelivery(false);
+    }
+  }
 
   async function loadData(showSpinner = true) {
     if (showSpinner) setLoading(true);
@@ -236,6 +294,83 @@ export default function SettingsPage() {
               <div className="col-span-2">
                 <Button variant="outline" disabled>
                   Save defaults
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card id="delivery">
+            <CardHeader>
+              <CardTitle>Delivery provider</CardTitle>
+              <CardDescription>
+                Choose the default provider for this workspace. Resend fallback is used only when both providers
+                have authenticated the campaign sender domain.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-slate-700" htmlFor="delivery-provider">
+                    Campaign provider
+                  </label>
+                  <Select
+                    id="delivery-provider"
+                    value={deliveryProvider}
+                    onChange={(event) => setDeliveryProvider(event.target.value === "resend" ? "resend" : "stalwart")}
+                    disabled={savingDelivery}
+                  >
+                    <option value="stalwart">Stalwart (default)</option>
+                    <option value="resend">Resend</option>
+                  </Select>
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-slate-700" htmlFor="delivery-fallback">
+                    Optional fallback
+                  </label>
+                  <Select
+                    id="delivery-fallback"
+                    value={fallbackProvider}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setFallbackProvider(value === "stalwart" || value === "resend" ? value : "none");
+                    }}
+                    disabled={savingDelivery}
+                  >
+                    <option value="none">No fallback</option>
+                    <option value="stalwart">Stalwart</option>
+                    <option value="resend">Resend</option>
+                  </Select>
+                </div>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-slate-700" htmlFor="resend-api-key">
+                  Resend API key
+                </label>
+                <Input
+                  id="resend-api-key"
+                  type="password"
+                  autoComplete="new-password"
+                  value={resendAPIKey}
+                  onChange={(event) => setResendAPIKey(event.target.value)}
+                  placeholder={deliverySettings?.resend_api_key_set ? `Configured (••••${deliverySettings.resend_api_key_last4})` : "Paste a Resend API key"}
+                  disabled={savingDelivery}
+                />
+                <p className="mt-1 text-xs text-slate-500">
+                  {deliverySettings?.resend_api_key_set
+                    ? `A key ending in ${deliverySettings.resend_api_key_last4} is saved. Enter a new value only to replace it.`
+                    : "Keys are encrypted at rest and only the last four characters are shown."}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={handleSaveDeliverySettings} disabled={savingDelivery} className="w-auto">
+                  {savingDelivery ? "Saving..." : "Save delivery settings"}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleTestDeliveryConnection}
+                  disabled={testingDelivery || savingDelivery || !deliverySettings?.resend_api_key_set}
+                >
+                  {testingDelivery ? "Testing..." : "Test Resend connection"}
                 </Button>
               </div>
             </CardContent>
