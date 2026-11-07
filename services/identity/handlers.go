@@ -282,12 +282,7 @@ func (h *Handler) ready(w http.ResponseWriter, r *http.Request) {
 		kit.Error(w, http.StatusServiceUnavailable, "not_ready", "Identity database is not reachable.")
 		return
 	}
-	if h.mailer.Provider() == "smtp" {
-		probe, ok := h.mailer.(interface{ Probe(context.Context) error })
-		if !ok {
-			kit.Error(w, http.StatusServiceUnavailable, "smtp_probe_unavailable", "Identity SMTP health check is not configured.")
-			return
-		}
+	if probe, ok := h.mailer.(interface{ Probe(context.Context) error }); ok {
 		if err := probe.Probe(ctx); err != nil {
 			h.logger.Error("SMTP readiness probe failed", "error", err)
 			kit.Error(w, http.StatusServiceUnavailable, "smtp_unavailable", "The configured SMTP relay is not ready. Check SMTP address, TLS mode, username, and password.")

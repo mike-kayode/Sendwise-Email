@@ -15,7 +15,10 @@ import (
 	"net/smtp"
 	"net/textproto"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/khayode/email-platform/internal/observability"
 )
 
 // MailMessage is a transactional message sent by the Identity service.
@@ -38,6 +41,27 @@ type Mailer interface {
 // Resend when an API key is present, then SMTP, and finally falls back to a
 // development logger that prints links instead of sending mail.
 func NewMailer(cfg Config, logger *slog.Logger) Mailer {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if cfg.PlatformResendAPIKey != "" && cfg.SMTPAddr != "" && cfg.SMTPFrom != "" {
+		from := cfg.PlatformFromEmail
+		if from == "" {
+			from = cfg.SMTPFrom
+		}
+		return &platformMailer{
+			primary: &smtpMailer{
+				addr: cfg.SMTPAddr, host: cfg.SMTPHost, username: cfg.SMTPUsername,
+				password: cfg.SMTPPassword, from: from, tlsMode: cfg.SMTPTLSMode,
+			},
+			fallback: &resendMailer{
+				apiKey: cfg.PlatformResendAPIKey, fromEmail: from, fromName: cfg.ResendFromName,
+				client: &http.Client{Timeout: 10 * time.Second},
+			},
+			breaker: newMailerCircuitBreaker(5, time.Minute, 2*time.Minute),
+			logger:  logger,
+		}
+	}
 	provider := cfg.MailProvider
 	if provider == "auto" || provider == "" {
 		switch {
@@ -65,6 +89,113 @@ func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 		logger.Warn("mail provider is log: messages are printed, not delivered")
 		return NewLogMailer(logger)
 	}
+}
+
+type platformMailer struct {
+	primary  Mailer
+	fallback Mailer
+	breaker  *mailerCircuitBreaker
+	logger   *slog.Logger
+}
+
+func (m *platformMailer) Provider() string { return "smtp+resend" }
+
+func (m *platformMailer) Probe(ctx context.Context) error {
+	probe, ok := m.primary.(interface{ Probe(context.Context) error })
+	if !ok {
+		return errors.New("primary SMTP provider does not support readiness probes")
+	}
+	return probe.Probe(ctx)
+}
+
+func (m *platformMailer) Send(ctx context.Context, message MailMessage) error {
+	if !m.breaker.Allow() {
+		m.logFallback(message, "circuit_open", errors.New("Stalwart circuit is open"))
+		return m.fallback.Send(ctx, message)
+	}
+	if err := m.primary.Send(ctx, message); err == nil {
+		m.breaker.Success()
+		return nil
+	} else {
+		m.breaker.Failure()
+		if !shouldFailoverMail(err) {
+			return err
+		}
+		m.logFallback(message, "provider_error", err)
+		return m.fallback.Send(ctx, message)
+	}
+}
+
+func (m *platformMailer) logFallback(message MailMessage, reason string, err error) {
+	if m.logger != nil {
+		m.logger.Warn("platform email provider fallback",
+			"from", "stalwart", "to", "resend", "reason", reason,
+			"recipient_domain", mailRecipientDomain(message.To), "error", err,
+		)
+	}
+	observability.ProviderFallbacks.WithLabelValues("platform", "stalwart", "resend", reason).Inc()
+}
+
+func shouldFailoverMail(err error) bool {
+	var smtpErr *smtpDeliveryError
+	if errors.As(err, &smtpErr) {
+		return smtpErr.code >= 400
+	}
+	var resendErr *resendDeliveryError
+	if errors.As(err, &resendErr) {
+		return resendErr.temporary
+	}
+	return true
+}
+
+type mailerCircuitBreaker struct {
+	mu        sync.Mutex
+	failures  []time.Time
+	openUntil time.Time
+	threshold int
+	window    time.Duration
+	openFor   time.Duration
+	now       func() time.Time
+}
+
+func newMailerCircuitBreaker(threshold int, window, openFor time.Duration) *mailerCircuitBreaker {
+	return &mailerCircuitBreaker{threshold: threshold, window: window, openFor: openFor, now: time.Now}
+}
+
+func (b *mailerCircuitBreaker) Allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	if now.Before(b.openUntil) {
+		return false
+	}
+	if !b.openUntil.IsZero() {
+		b.openUntil = time.Time{}
+		b.failures = nil
+	}
+	return true
+}
+
+func (b *mailerCircuitBreaker) Failure() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	cutoff := now.Add(-b.window)
+	firstValid := 0
+	for firstValid < len(b.failures) && b.failures[firstValid].Before(cutoff) {
+		firstValid++
+	}
+	b.failures = append(b.failures[firstValid:], now)
+	if len(b.failures) >= b.threshold {
+		b.openUntil = now.Add(b.openFor)
+	}
+}
+
+func (b *mailerCircuitBreaker) Success() {
+	b.mu.Lock()
+	b.failures = nil
+	b.openUntil = time.Time{}
+	b.mu.Unlock()
 }
 
 // LogMailer prints messages; used in development and tests.
@@ -126,7 +257,18 @@ type resendMailer struct {
 	apiKey    string
 	fromEmail string
 	fromName  string
+	baseURL   string
 	client    *http.Client
+}
+
+type resendDeliveryError struct {
+	status    int
+	temporary bool
+	message   string
+}
+
+func (e *resendDeliveryError) Error() string {
+	return fmt.Sprintf("Resend returned HTTP %d: %s", e.status, e.message)
 }
 
 func (m *resendMailer) Provider() string { return "resend" }
@@ -152,7 +294,12 @@ func (m *resendMailer) Send(ctx context.Context, message MailMessage) error {
 	if err != nil {
 		return fmt.Errorf("marshal resend request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(body))
+	endpoint := m.baseURL
+	if endpoint == "" {
+		endpoint = "https://api.resend.com"
+	}
+	endpoint = strings.TrimRight(endpoint, "/") + "/emails"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build resend request: %w", err)
 	}
@@ -166,7 +313,12 @@ func (m *resendMailer) Send(ctx context.Context, message MailMessage) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("resend returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		return &resendDeliveryError{
+			status: resp.StatusCode,
+			temporary: resp.StatusCode == http.StatusRequestTimeout ||
+				resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500,
+			message: strings.TrimSpace(string(bodyBytes)),
+		}
 	}
 	return nil
 }
