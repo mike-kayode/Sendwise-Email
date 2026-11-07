@@ -82,6 +82,7 @@ services:
       target: migrate
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-email}:${POSTGRES_PASSWORD:-email}@postgres:5432/identity?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
       MIGRATIONS_DIR: /app/services/identity/migrations
     depends_on:
       postgres:
@@ -128,6 +129,7 @@ services:
       RESEND_FROM_NAME: ${RESEND_FROM_NAME:-Sendwise}
       PLATFORM_FROM_EMAIL: ${PLATFORM_FROM_EMAIL:-hello@pipsleague.com}
       PLATFORM_RESEND_API_KEY: ${PLATFORM_RESEND_API_KEY:-}
+      RESEND_REQUESTS_PER_SECOND: ${RESEND_REQUESTS_PER_SECOND:-8}
       WORKSPACE_URL: http://workspace:8080
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -136,6 +138,8 @@ services:
         condition: service_completed_successfully
       nats:
         condition: service_started
+      redis:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8082:8080"
     restart: unless-stopped

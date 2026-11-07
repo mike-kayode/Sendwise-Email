@@ -3,13 +3,107 @@ package delivery
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
+
+func TestSharedResendLimiterPrioritizesPlatformRequests(t *testing.T) {
+	apiKey := fmt.Sprintf("priority-test-%d", time.Now().UnixNano())
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := WaitResendRequest(ctx, apiKey, 4, false); err != nil {
+		t.Fatal(err)
+	}
+
+	campaignDone := make(chan error, 1)
+	go func() {
+		campaignDone <- WaitResendRequest(ctx, apiKey, 4, false)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	platformDone := make(chan error, 1)
+	go func() {
+		platformDone <- WaitResendRequest(ctx, apiKey, 4, true)
+	}()
+
+	select {
+	case err := <-platformDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case err := <-campaignDone:
+		t.Fatalf("campaign received the shared rate-limit slot before platform mail: %v", err)
+	case <-ctx.Done():
+		t.Fatal("platform mail did not receive a rate-limit slot")
+	}
+	select {
+	case err := <-campaignDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("campaign mail did not receive a rate-limit slot")
+	}
+}
+
+func TestDistributedResendLimiterSharesPriorityAcrossClients(t *testing.T) {
+	address := os.Getenv("TEST_REDIS_URL")
+	if address == "" {
+		t.Skip("set TEST_REDIS_URL to run the shared Redis limiter test")
+	}
+	options, err := redis.ParseURL(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	platformClient := redis.NewClient(options)
+	defer platformClient.Close()
+	campaignClient := redis.NewClient(options)
+	defer campaignClient.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := platformClient.Ping(ctx).Err(); err != nil {
+		t.Skipf("Redis is unavailable: %v", err)
+	}
+
+	apiKey := fmt.Sprintf("distributed-priority-test-%d", time.Now().UnixNano())
+	if err := waitDistributedResendRequest(ctx, campaignClient, apiKey, 4, false); err != nil {
+		t.Fatal(err)
+	}
+	campaignDone := make(chan error, 1)
+	go func() {
+		campaignDone <- waitDistributedResendRequest(ctx, campaignClient, apiKey, 4, false)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	platformDone := make(chan error, 1)
+	go func() {
+		platformDone <- waitDistributedResendRequest(ctx, platformClient, apiKey, 4, true)
+	}()
+	select {
+	case err := <-platformDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case err := <-campaignDone:
+		t.Fatalf("campaign received the distributed slot before platform mail: %v", err)
+	case <-ctx.Done():
+		t.Fatal("platform mail did not receive a distributed rate-limit slot")
+	}
+	select {
+	case err := <-campaignDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("campaign mail did not receive a distributed rate-limit slot")
+	}
+}
 
 func TestResendTransportSendsTaggedBatchWithIdempotencyKey(t *testing.T) {
 	var requests atomic.Int32

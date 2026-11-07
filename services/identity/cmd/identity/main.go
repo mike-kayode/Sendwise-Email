@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/kit"
 	"github.com/khayode/email-platform/internal/outbox"
 	"github.com/khayode/email-platform/services/identity"
@@ -23,6 +25,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	redisCtx, redisCancel := context.WithTimeout(ctx, 5*time.Second)
+	redisClient, err := delivery.ConfigureSharedResendRedis(redisCtx, cfg.RedisURL)
+	redisCancel()
+	if err != nil {
+		logger.Error("connect shared Resend limiter", "error", err)
+		os.Exit(1)
+	}
+	defer redisClient.Close()
 
 	if cfg.AutoMigrate {
 		if err := kit.Migrate(ctx, cfg.DatabaseURL, cfg.MigrationsDir); err != nil {

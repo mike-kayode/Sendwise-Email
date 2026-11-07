@@ -102,7 +102,10 @@ func TestPlatformMailerUsesResendFakeWhenSMTPIsUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(requestBody, `"from":"platform@example.test"`) ||
-		!strings.Contains(requestBody, `"to":["person@example.test"]`) {
+		!strings.Contains(requestBody, `"to":["person@example.test"]`) ||
+		!strings.Contains(requestBody, `"name":"workspace_id","value":"platform"`) ||
+		!strings.Contains(requestBody, `"name":"campaign_id","value":"platform"`) ||
+		!strings.Contains(requestBody, `"name":"message_id"`) {
 		t.Fatalf("Resend request did not contain platform sender and recipient: %s", requestBody)
 	}
 }

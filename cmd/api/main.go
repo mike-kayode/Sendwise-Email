@@ -14,6 +14,7 @@ import (
 	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/config"
 	"github.com/khayode/email-platform/internal/db"
+	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/messaging"
 	"github.com/khayode/email-platform/internal/observability"
 	"github.com/khayode/email-platform/internal/outbox"
@@ -30,6 +31,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	redisCtx, redisCancel := context.WithTimeout(ctx, 5*time.Second)
+	redisClient, err := delivery.ConfigureSharedResendRedis(redisCtx, cfg.RedisURL)
+	redisCancel()
+	if err != nil {
+		logger.Error("connect shared Resend limiter", "error", err)
+		os.Exit(1)
+	}
+	defer redisClient.Close()
 
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {

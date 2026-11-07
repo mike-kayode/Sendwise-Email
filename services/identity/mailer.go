@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/observability"
 )
 
@@ -56,7 +58,7 @@ func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 			},
 			fallback: &resendMailer{
 				apiKey: cfg.PlatformResendAPIKey, fromEmail: from, fromName: cfg.ResendFromName,
-				client: &http.Client{Timeout: 10 * time.Second},
+				client: &http.Client{Timeout: 10 * time.Second}, requestsPerSecond: cfg.ResendRequestsPerSecond,
 			},
 			breaker: newMailerCircuitBreaker(5, time.Minute, 2*time.Minute),
 			logger:  logger,
@@ -79,7 +81,10 @@ func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 			logger.Warn("MAIL_PROVIDER=resend but RESEND_API_KEY is empty; falling back to log mailer")
 			return NewLogMailer(logger)
 		}
-		return &resendMailer{apiKey: cfg.ResendAPIKey, fromEmail: cfg.ResendFromEmail, fromName: cfg.ResendFromName, client: &http.Client{Timeout: 10 * time.Second}}
+		return &resendMailer{
+			apiKey: cfg.ResendAPIKey, fromEmail: cfg.ResendFromEmail, fromName: cfg.ResendFromName,
+			client: &http.Client{Timeout: 10 * time.Second}, requestsPerSecond: cfg.ResendRequestsPerSecond,
+		}
 	case "smtp":
 		return &smtpMailer{
 			addr: cfg.SMTPAddr, host: cfg.SMTPHost, username: cfg.SMTPUsername,
@@ -254,11 +259,12 @@ func (m *LogMailer) Sent() []MailMessage {
 }
 
 type resendMailer struct {
-	apiKey    string
-	fromEmail string
-	fromName  string
-	baseURL   string
-	client    *http.Client
+	apiKey            string
+	fromEmail         string
+	fromName          string
+	baseURL           string
+	client            *http.Client
+	requestsPerSecond int
 }
 
 type resendDeliveryError struct {
@@ -281,11 +287,19 @@ func (m *resendMailer) Send(ctx context.Context, message MailMessage) error {
 	if m.fromName != "" {
 		from = fmt.Sprintf("%s <%s>", m.fromName, from)
 	}
+	if err := delivery.WaitResendRequest(ctx, m.apiKey, m.requestsPerSecond, true); err != nil {
+		return fmt.Errorf("wait for shared Resend request limit: %w", err)
+	}
 	payload := map[string]any{
 		"from":    from,
 		"to":      []string{message.To},
 		"subject": message.Subject,
 		"html":    message.HTML,
+		"tags": []map[string]string{
+			{"name": "workspace_id", "value": "platform"},
+			{"name": "campaign_id", "value": "platform"},
+			{"name": "message_id", "value": uuid.NewString()},
+		},
 	}
 	if message.Text != "" {
 		payload["text"] = message.Text

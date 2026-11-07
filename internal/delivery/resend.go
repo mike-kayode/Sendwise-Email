@@ -13,10 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 const resendBatchSize = 100
@@ -61,36 +58,6 @@ type ResendDomain struct {
 	Name    string            `json:"name"`
 	Status  string            `json:"status"`
 	Records []ResendDNSRecord `json:"records"`
-}
-
-type resendRateLimiter struct {
-	mu       sync.Mutex
-	limiters map[string]*rate.Limiter
-}
-
-var sharedResendLimiters = resendRateLimiter{limiters: make(map[string]*rate.Limiter)}
-
-func (t *ResendTransport) limiter() *rate.Limiter {
-	return t.limiterFor(t.APIKey)
-}
-
-func (t *ResendTransport) limiterFor(apiKey string) *rate.Limiter {
-	requestsPerSecond := t.RequestsRate
-	if requestsPerSecond < 1 {
-		requestsPerSecond = 8
-	}
-	digest := sha256.Sum256([]byte(apiKey))
-	key := hex.EncodeToString(digest[:])
-	sharedResendLimiters.mu.Lock()
-	defer sharedResendLimiters.mu.Unlock()
-	limiter := sharedResendLimiters.limiters[key]
-	if limiter == nil {
-		limiter = rate.NewLimiter(rate.Limit(requestsPerSecond), requestsPerSecond)
-		sharedResendLimiters.limiters[key] = limiter
-	} else {
-		limiter.SetLimit(rate.Limit(requestsPerSecond))
-	}
-	return limiter
 }
 
 type resendEmail struct {
@@ -168,7 +135,7 @@ func (t *ResendTransport) VerifyDomain(ctx context.Context, apiKey, domainID str
 }
 
 func (t *ResendTransport) requestJSON(ctx context.Context, method, path, apiKey string, body, output any) error {
-	if err := t.limiterFor(apiKey).Wait(ctx); err != nil {
+	if err := WaitResendRequest(ctx, apiKey, t.RequestsRate, false); err != nil {
 		return fmt.Errorf("wait for resend request limit: %w", err)
 	}
 	var requestBody io.Reader
@@ -256,7 +223,8 @@ func (t *ResendTransport) SendBatch(ctx context.Context, messages []Message, ide
 		maxRetries = 5
 	}
 	for attempt := 0; ; attempt++ {
-		if err := t.limiter().Wait(ctx); err != nil {
+		platformPriority := len(messages) > 0 && messages[0].WorkspaceID == ""
+		if err := WaitResendRequest(ctx, t.APIKey, t.RequestsRate, platformPriority); err != nil {
 			return nil, fmt.Errorf("wait for resend request limit: %w", err)
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, t.endpoint("/emails/batch"), bytes.NewReader(body))

@@ -132,6 +132,8 @@ services:
         condition: service_completed_successfully
       nats:
         condition: service_started
+      redis:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8080:8080"
 
@@ -142,6 +144,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: postgres://${POSTGRES_USER:-email}:${POSTGRES_PASSWORD:-email}@postgres:5432/${POSTGRES_DB:-email}?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
       NATS_URL: nats://nats:4222
       JWT_SECRET: ${JWT_SECRET:-}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:?Set WEBHOOK_SECRET in .env}
@@ -165,6 +168,8 @@ services:
         condition: service_completed_successfully
       nats:
         condition: service_started
+      redis:
+        condition: service_healthy
     ports:
       - "127.0.0.1:9091:9091"
 

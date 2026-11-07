@@ -23,18 +23,19 @@ type Config struct {
 	ServiceToken string
 
 	// Mail delivery for verification and reset messages.
-	MailProvider         string // "resend", "smtp", "log", or "auto"
-	SMTPAddr             string
-	SMTPHost             string
-	SMTPUsername         string
-	SMTPPassword         string
-	SMTPFrom             string
-	SMTPTLSMode          string
-	ResendAPIKey         string
-	ResendFromEmail      string
-	ResendFromName       string
-	PlatformFromEmail    string
-	PlatformResendAPIKey string
+	MailProvider            string // "resend", "smtp", "log", or "auto"
+	SMTPAddr                string
+	SMTPHost                string
+	SMTPUsername            string
+	SMTPPassword            string
+	SMTPFrom                string
+	SMTPTLSMode             string
+	ResendAPIKey            string
+	ResendFromEmail         string
+	ResendFromName          string
+	PlatformFromEmail       string
+	PlatformResendAPIKey    string
+	ResendRequestsPerSecond int
 }
 
 // LoadConfig reads Identity service configuration from environment variables.
@@ -53,18 +54,19 @@ func LoadConfig() (Config, error) {
 		WorkspaceURL: strings.TrimRight(kit.Getenv("WORKSPACE_URL", "http://localhost:8081"), "/"),
 		ServiceToken: kit.Getenv("SERVICE_TOKEN", ""),
 
-		MailProvider:         strings.ToLower(strings.TrimSpace(kit.Getenv("MAIL_PROVIDER", "auto"))),
-		SMTPAddr:             kit.Getenv("SMTP_ADDR", ""),
-		SMTPHost:             kit.Getenv("SMTP_HOST", ""),
-		SMTPUsername:         kit.Getenv("SMTP_USERNAME", ""),
-		SMTPPassword:         kit.Getenv("SMTP_PASSWORD", ""),
-		SMTPFrom:             kit.Getenv("SMTP_FROM", ""),
-		SMTPTLSMode:          strings.ToLower(strings.TrimSpace(kit.Getenv("SMTP_TLS_MODE", defaultSMTPTLSMode(base.Env)))),
-		ResendAPIKey:         kit.Getenv("RESEND_API_KEY", ""),
-		ResendFromEmail:      kit.Getenv("RESEND_FROM_EMAIL", ""),
-		ResendFromName:       kit.Getenv("RESEND_FROM_NAME", "Sendwise"),
-		PlatformFromEmail:    kit.Getenv("PLATFORM_FROM_EMAIL", kit.Getenv("SMTP_FROM", "")),
-		PlatformResendAPIKey: kit.Getenv("PLATFORM_RESEND_API_KEY", ""),
+		MailProvider:            strings.ToLower(strings.TrimSpace(kit.Getenv("MAIL_PROVIDER", "auto"))),
+		SMTPAddr:                kit.Getenv("SMTP_ADDR", ""),
+		SMTPHost:                kit.Getenv("SMTP_HOST", ""),
+		SMTPUsername:            kit.Getenv("SMTP_USERNAME", ""),
+		SMTPPassword:            kit.Getenv("SMTP_PASSWORD", ""),
+		SMTPFrom:                kit.Getenv("SMTP_FROM", ""),
+		SMTPTLSMode:             strings.ToLower(strings.TrimSpace(kit.Getenv("SMTP_TLS_MODE", defaultSMTPTLSMode(base.Env)))),
+		ResendAPIKey:            kit.Getenv("RESEND_API_KEY", ""),
+		ResendFromEmail:         kit.Getenv("RESEND_FROM_EMAIL", ""),
+		ResendFromName:          kit.Getenv("RESEND_FROM_NAME", "Sendwise"),
+		PlatformFromEmail:       kit.Getenv("PLATFORM_FROM_EMAIL", kit.Getenv("SMTP_FROM", "")),
+		PlatformResendAPIKey:    kit.Getenv("PLATFORM_RESEND_API_KEY", ""),
+		ResendRequestsPerSecond: kit.GetenvInt("RESEND_REQUESTS_PER_SECOND", 8),
 	}
 
 	if cfg.JWTSecret == "" {
