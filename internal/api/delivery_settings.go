@@ -40,42 +40,24 @@ func (s *Server) updateDeliverySettings(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	provider := strings.ToLower(strings.TrimSpace(input.Provider))
-	if provider != delivery.ProviderStalwart && provider != delivery.ProviderResend {
-		httpx.Error(w, http.StatusBadRequest, "invalid_provider", "Choose stalwart or resend as the workspace delivery provider.")
+	if provider == "" {
+		provider = delivery.ProviderStalwart
+	}
+	if provider != delivery.ProviderStalwart {
+		httpx.Error(w, http.StatusBadRequest, "campaign_delivery_stalwart_only", "Campaign delivery is Stalwart-only. Resend is disabled for workspace campaigns.")
 		return
 	}
 	fallback := normalizeOptionalProvider(input.FallbackProvider)
-	if fallback != nil && (*fallback != delivery.ProviderStalwart && *fallback != delivery.ProviderResend || *fallback == provider) {
-		httpx.Error(w, http.StatusBadRequest, "invalid_fallback", "The fallback must be a different supported provider.")
+	if fallback != nil && *fallback != delivery.ProviderStalwart {
+		httpx.Error(w, http.StatusBadRequest, "invalid_fallback", "Campaign delivery does not allow a Resend fallback.")
 		return
 	}
 
 	var encryptedKey []byte
 	key := strings.TrimSpace(input.ResendAPIKey)
 	if key != "" {
-		if s.cfg.DKIMEncryptionKey == "" {
-			httpx.Error(w, http.StatusServiceUnavailable, "encryption_unavailable", "Workspace API-key encryption is not configured.")
-			return
-		}
-		var err error
-		encryptedKey, err = delivery.EncryptSecret(s.cfg.DKIMEncryptionKey, key)
-		if err != nil {
-			s.logger.Error("encrypt workspace Resend API key", "error", err)
-			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not protect the Resend API key.")
-			return
-		}
-	}
-	if (provider == delivery.ProviderResend || fallback != nil && *fallback == delivery.ProviderResend) && len(encryptedKey) == 0 {
-		existing, err := s.workspaceResendAPIKey(r, s.organizationID(r))
-		if err != nil {
-			s.logger.Error("read workspace Resend API key", "error", err)
-			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not read the configured Resend API key.")
-			return
-		}
-		if existing == "" {
-			httpx.Error(w, http.StatusBadRequest, "resend_api_key_required", "Enter a Resend API key before selecting Resend.")
-			return
-		}
+		httpx.Error(w, http.StatusBadRequest, "resend_disabled_for_campaigns", "Resend API keys are disabled for campaign delivery settings.")
+		return
 	}
 
 	_, err := s.pool.Exec(r.Context(), `
@@ -102,27 +84,7 @@ func (s *Server) updateDeliverySettings(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) testDeliveryConnection(w http.ResponseWriter, r *http.Request) {
-	apiKey, err := s.workspaceResendAPIKey(r, s.organizationID(r))
-	if err != nil {
-		s.logger.Error("read Resend API key for connection test", "error", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not read the configured Resend API key.")
-		return
-	}
-	if apiKey == "" {
-		httpx.Error(w, http.StatusBadRequest, "resend_api_key_required", "Save a Resend API key before testing the connection.")
-		return
-	}
-	if s.resendDomains == nil {
-		httpx.Error(w, http.StatusServiceUnavailable, "resend_unavailable", "Resend API client is not configured.")
-		return
-	}
-	domains, err := s.resendDomains.ListDomains(r.Context(), apiKey)
-	if err != nil {
-		s.logger.Warn("Resend connection test failed", "workspace_id", s.organizationID(r), "error", err)
-		httpx.Error(w, http.StatusBadGateway, "resend_connection_failed", "Resend rejected the connection. Check the API key and try again.")
-		return
-	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "domain_count": len(domains)})
+	httpx.Error(w, http.StatusBadRequest, "campaign_delivery_stalwart_only", "Campaign delivery is Stalwart-only. Resend connection tests are disabled for workspace campaigns.")
 }
 
 func (s *Server) readDeliverySettings(r *http.Request) (deliverySettings, error) {
@@ -140,7 +102,14 @@ func (s *Server) readDeliverySettings(r *http.Request) (deliverySettings, error)
 	if err != nil {
 		return deliverySettings{}, err
 	}
+	if strings.EqualFold(provider, delivery.ProviderResend) {
+		provider = delivery.ProviderStalwart
+	}
 	settings := deliverySettings{Provider: provider, FallbackProvider: fallback}
+	if fallback != nil && strings.EqualFold(*fallback, delivery.ProviderResend) {
+		fallback = nil
+		settings.FallbackProvider = nil
+	}
 	if len(encrypted) == 0 {
 		return settings, nil
 	}
@@ -157,6 +126,8 @@ func (s *Server) readDeliverySettings(r *http.Request) (deliverySettings, error)
 	} else {
 		settings.ResendAPIKeyLast4 = apiKey
 	}
+	settings.ResendAPIKeySet = false
+	settings.ResendAPIKeyLast4 = ""
 	return settings, nil
 }
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -469,7 +468,7 @@ func (s *Server) validateCampaign(w http.ResponseWriter, r *http.Request) {
 				SELECT 1
 				FROM sending_domains d
 				LEFT JOIN workspace_delivery_settings w ON w.workspace_id = d.organization_id
-				WHERE d.organization_id = $1 AND lower(d.domain) = $2 AND d.status = 'verified'
+				WHERE d.organization_id = $1 AND lower(d.domain) = $2
 				  AND CASE COALESCE(w.provider, 'stalwart')
 				      WHEN 'resend' THEN d.resend_authenticated
 				      ELSE d.stalwart_authenticated
@@ -639,20 +638,30 @@ func (s *Server) warmupRemainingToday(ctx context.Context, organizationID, sende
 		maximum = 10000
 	}
 
+	var warmupProfile string
+	if err := s.pool.QueryRow(ctx, `
+		SELECT warmup_profile FROM sending_domains
+		WHERE organization_id = $1 AND lower(domain) = $2
+	`, organizationID, domain).Scan(&warmupProfile); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("load sending-domain warm-up profile: %w", err)
+	}
+	if warmupProfile == "" {
+		warmupProfile = "standard"
+	}
+	qualifiedDayFilter := ""
+	if warmupProfile == "resend" {
+		qualifiedDayFilter = " AND bounce_count::numeric / NULLIF(successful_count, 0) < 0.02"
+	}
 	var successfulDays, reserved int
 	if err := s.pool.QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE sending_day < CURRENT_DATE AND successful_count > 0),
+		SELECT count(*) FILTER (WHERE sending_day < CURRENT_DATE AND successful_count > 0`+qualifiedDayFilter+`),
 		       COALESCE(max(reserved_count) FILTER (WHERE sending_day = CURRENT_DATE), 0)
 		FROM sending_domain_daily_stats
 		WHERE organization_id = $1 AND domain = $2
 	`, organizationID, domain).Scan(&successfulDays, &reserved); err != nil {
 		return 0, fmt.Errorf("load sending-domain warm-up usage: %w", err)
 	}
-	capValue := float64(start) * math.Pow(growth, float64(successfulDays))
-	if math.IsInf(capValue, 1) || capValue >= float64(maximum) {
-		return max(maximum-reserved, 0), nil
-	}
-	cap := int(capValue)
+	cap := delivery.WarmupDailyCap(warmupProfile, start, growth, maximum, successfulDays)
 	return max(cap-reserved, 0), nil
 }
 

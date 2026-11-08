@@ -25,10 +25,9 @@ func TestRoutingResolver(t *testing.T) {
 		want     []string
 	}{
 		{name: "platform defaults to stalwart and resend", kind: PlatformDelivery, want: []string{ProviderStalwart, ProviderResend}},
-		{name: "workspace default is stalwart", kind: CampaignDelivery, want: []string{ProviderStalwart}},
-		{name: "resend campaign has no cross-provider fallback", kind: CampaignDelivery, settings: WorkspaceRouting{Provider: ProviderResend}, want: []string{ProviderResend}},
-		{name: "fallback requires both providers authenticated", kind: CampaignDelivery, settings: WorkspaceRouting{Provider: ProviderStalwart, FallbackProvider: ProviderResend, StalwartDomainAuth: true}, want: []string{ProviderStalwart}},
-		{name: "authenticated providers allow explicit fallback", kind: CampaignDelivery, settings: WorkspaceRouting{Provider: ProviderResend, FallbackProvider: ProviderStalwart, StalwartDomainAuth: true, ResendDomainAuth: true}, want: []string{ProviderResend, ProviderStalwart}},
+		{name: "workspace campaigns are stalwart-only", kind: CampaignDelivery, want: []string{ProviderStalwart}},
+		{name: "resend campaign config is ignored", kind: CampaignDelivery, settings: WorkspaceRouting{Provider: ProviderResend}, want: []string{ProviderStalwart}},
+		{name: "campaign fallback config is ignored", kind: CampaignDelivery, settings: WorkspaceRouting{Provider: ProviderStalwart, FallbackProvider: ProviderResend, StalwartDomainAuth: true, ResendDomainAuth: true}, want: []string{ProviderStalwart}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -50,12 +49,13 @@ func TestRoutingResolver(t *testing.T) {
 }
 
 func TestRoutingResolverRejectsInvalidConfiguration(t *testing.T) {
-	resolver := RoutingResolver{Settings: staticRoutingSettings{settings: WorkspaceRouting{Provider: ProviderResend, FallbackProvider: ProviderResend}}}
-	if _, err := resolver.Resolve(context.Background(), CampaignDelivery, "workspace-a", "example.test"); err == nil {
-		t.Fatal("expected same-provider fallback to be rejected")
-	}
 	if _, err := (RoutingResolver{}).Resolve(context.Background(), "unknown", "workspace-a", "example.test"); err == nil {
 		t.Fatal("expected unknown delivery kind to be rejected")
+	}
+	resolver := RoutingResolver{Settings: staticRoutingSettings{settings: WorkspaceRouting{Provider: ProviderResend, FallbackProvider: ProviderResend}}}
+	got, err := resolver.Resolve(context.Background(), CampaignDelivery, "workspace-a", "example.test")
+	if err != nil || len(got) != 1 || got[0] != ProviderStalwart {
+		t.Fatalf("campaign routing should remain stalwart-only, got=%v err=%v", got, err)
 	}
 }
 
@@ -103,6 +103,7 @@ func TestRouterPlatformFailoverAndCampaignIsolation(t *testing.T) {
 	var mu sync.Mutex
 	stalwartCalls := 0
 	resendCalls := 0
+	platformFirstStalwartFail := true
 	router := &Router{
 		Resolver: RoutingResolver{Settings: routingSettingsFunc(func(context.Context, string, string) (WorkspaceRouting, error) {
 			return WorkspaceRouting{Provider: ProviderResend}, nil
@@ -111,8 +112,15 @@ func TestRouterPlatformFailoverAndCampaignIsolation(t *testing.T) {
 			ProviderStalwart: providerFunc(func(context.Context, Message) (*Result, error) {
 				mu.Lock()
 				stalwartCalls++
+				fail := platformFirstStalwartFail
+				if fail {
+					platformFirstStalwartFail = false
+				}
 				mu.Unlock()
-				return nil, errors.New("connection refused")
+				if fail {
+					return nil, errors.New("connection refused")
+				}
+				return &Result{MessageID: "stalwart-id", Accepted: true}, nil
 			}),
 			ProviderResend: providerFunc(func(context.Context, Message) (*Result, error) {
 				mu.Lock()
@@ -124,16 +132,16 @@ func TestRouterPlatformFailoverAndCampaignIsolation(t *testing.T) {
 	}
 	result, err := router.Send(context.Background(), PlatformDelivery, "", "platform.example", Message{ID: "platform-1"})
 	if err != nil || result.MessageID != "resend-id" {
-		t.Fatalf("platform send = (%v, %v), want resend success", result, err)
+		t.Fatalf("platform send = (%v, %v), want resend success after stalwart failure", result, err)
 	}
 	result, err = router.Send(context.Background(), CampaignDelivery, "workspace-a", "workspace.example", Message{ID: "campaign-1"})
-	if err != nil || result.MessageID != "resend-id" {
-		t.Fatalf("campaign send = (%v, %v), want resend success", result, err)
+	if err != nil || result.MessageID != "stalwart-id" {
+		t.Fatalf("campaign send = (%v, %v), want stalwart-only success", result, err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if stalwartCalls != 1 || resendCalls != 2 {
-		t.Fatalf("provider calls = stalwart:%d resend:%d; campaign must not fall back across providers", stalwartCalls, resendCalls)
+	if stalwartCalls != 2 || resendCalls != 1 {
+		t.Fatalf("provider calls = stalwart:%d resend:%d; campaign delivery must stay on Stalwart", stalwartCalls, resendCalls)
 	}
 }
 

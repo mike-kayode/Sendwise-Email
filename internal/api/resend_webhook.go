@@ -293,6 +293,22 @@ func applyResendEvent(ctx context.Context, tx pgx.Tx, workspaceID, campaignID, m
 		}
 	}
 	if eventType == "bounced" || eventType == "complained" {
+		if eventType == "bounced" {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO sending_domain_daily_stats
+					(organization_id, domain, sending_day, reserved_count, successful_count, bounce_count)
+				SELECT $1, lower(split_part(c.sender_email, '@', 2)),
+				       COALESCE(dj.accepted_at::date, CURRENT_DATE), 1, 1, 1
+				FROM delivery_jobs dj
+				JOIN campaigns c ON c.id = dj.campaign_id AND c.organization_id = dj.organization_id
+				WHERE dj.id = $2 AND dj.organization_id = $1
+				ON CONFLICT (organization_id, domain, sending_day)
+				DO UPDATE SET bounce_count = sending_domain_daily_stats.bounce_count + 1,
+				              updated_at = now()
+			`, workspaceID, jobID); err != nil {
+				return err
+			}
+		}
 		return pauseResendCampaignIfNeeded(ctx, tx, workspaceID, campaignID)
 	}
 	return nil

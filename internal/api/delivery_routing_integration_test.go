@@ -9,9 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/khayode/email-platform/internal/auth"
@@ -24,64 +22,18 @@ func (f integrationProviderFunc) Send(ctx context.Context, message delivery.Mess
 	return f(ctx, message)
 }
 
-func TestWorkspaceResendSettingsAndDomainOnboarding(t *testing.T) {
+func TestWorkspaceCampaignRoutingRejectsResendSettings(t *testing.T) {
 	if integrationPool == nil {
 		t.Skip("no PostgreSQL database available")
 	}
 	const fakeAPIKey = "re_fake_not_a_real_key_1234"
 	orgA := uuid.NewString()
-	orgB := uuid.NewString()
 	domainName := "news-" + strings.ReplaceAll(orgA[:8], "-", "") + ".example"
-	var creates atomic.Int32
-	var batchRequests atomic.Int32
-	var batchSizes []int
-	fakeResend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer "+fakeAPIKey {
-			t.Errorf("authorization header = %q", got)
-		}
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/emails/batch":
-			var emails []json.RawMessage
-			if err := json.NewDecoder(r.Body).Decode(&emails); err != nil {
-				t.Error(err)
-			}
-			batchRequests.Add(1)
-			batchSizes = append(batchSizes, len(emails))
-			data := make([]map[string]string, len(emails))
-			for i := range emails {
-				data[i] = map[string]string{"id": fmt.Sprintf("resend_message_%d", i+1)}
-			}
-			w.Header().Set("Content-Type", "application/json")
-			if err := json.NewEncoder(w).Encode(map[string]any{"data": data}); err != nil {
-				t.Error(err)
-			}
-		case r.Method == http.MethodGet && r.URL.Path == "/domains":
-			_, _ = io.WriteString(w, `{"data":[]}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/domains":
-			creates.Add(1)
-			var body map[string]string
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Error(err)
-			}
-			if body["name"] != domainName {
-				t.Errorf("created domain = %q", body["name"])
-			}
-			_, _ = fmt.Fprintf(w, `{"id":"domain_fake_1","name":%q,"status":"pending","records":[{"record":"SPF","type":"TXT","name":"send","value":"resend-spf-value","status":"pending"},{"record":"DKIM","type":"TXT","name":"resend._domainkey","value":"resend-dkim-value","status":"pending"}]}`, domainName)
-		case r.Method == http.MethodPost && r.URL.Path == "/domains/domain_fake_1/verify":
-			_, _ = fmt.Fprintf(w, `{"id":"domain_fake_1","name":%q,"status":"verified","records":[{"record":"SPF","type":"TXT","name":"send","value":"resend-spf-value","status":"verified"},{"record":"DKIM","type":"TXT","name":"resend._domainkey","value":"resend-dkim-value","status":"verified"}]}`, domainName)
-		default:
-			http.Error(w, "unexpected fake Resend request", http.StatusNotFound)
-		}
-	}))
-	defer fakeResend.Close()
-
 	server := newIntegrationServer(t)
-	server.resendDomains = &delivery.ResendTransport{BaseURL: fakeResend.URL, RequestsRate: 1000, Client: fakeResend.Client()}
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
 
 	tokenA := integrationToken(t, orgA, auth.RoleOwner)
-	tokenB := integrationToken(t, orgB, auth.RoleOwner)
 	request := func(token, method, path, body string) *http.Response {
 		t.Helper()
 		req, err := http.NewRequestWithContext(context.Background(), method, httpServer.URL+path, bytes.NewBufferString(body))
@@ -101,138 +53,45 @@ func TestWorkspaceResendSettingsAndDomainOnboarding(t *testing.T) {
 
 	settingsBody := `{"provider":"resend","resend_api_key":"` + fakeAPIKey + `"}`
 	response := request(tokenA, http.MethodPut, "/api/v1/settings/delivery", settingsBody)
-	settingsResponse, _ := io.ReadAll(response.Body)
+	body, _ := io.ReadAll(response.Body)
 	response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("save settings status = %d, body = %s", response.StatusCode, settingsResponse)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("resend campaign setting status = %d, body = %s", response.StatusCode, body)
 	}
-	if strings.Contains(string(settingsResponse), fakeAPIKey) || !strings.Contains(string(settingsResponse), "1234") {
-		t.Fatalf("settings response exposed a key or omitted last-four mask: %s", settingsResponse)
-	}
-	var encryptedKey []byte
-	if err := integrationPool.QueryRow(context.Background(), `
-		SELECT resend_api_key_enc FROM workspace_delivery_settings WHERE workspace_id = $1
-	`, orgA).Scan(&encryptedKey); err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(encryptedKey, []byte(fakeAPIKey)) {
-		t.Fatal("workspace Resend API key was stored in plaintext")
-	}
-	decryptedKey, err := delivery.DecryptSecret(integrationCfg.DKIMEncryptionKey, encryptedKey)
-	if err != nil || decryptedKey != fakeAPIKey {
-		t.Fatalf("decrypt stored workspace key = %q, err = %v", decryptedKey, err)
-	}
-
-	response = request(tokenA, http.MethodPost, "/api/v1/settings/delivery/test", "{}")
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("test Resend connection status = %d", response.StatusCode)
+	if !strings.Contains(string(body), "campaign_delivery_stalwart_only") {
+		t.Fatalf("expected Stalwart-only rejection, got %s", body)
 	}
 
 	response = request(tokenA, http.MethodPost, "/api/v1/domains", fmt.Sprintf(`{"domain":%q,"provider":"resend"}`, domainName))
-	var created sendingDomain
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("resend domain creation status = %d, body = %s", response.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "campaign_delivery_stalwart_only") {
+		t.Fatalf("expected Stalwart-only domain rejection, got %s", body)
+	}
+
+	response = request(tokenA, http.MethodPut, "/api/v1/settings/delivery", `{"provider":"stalwart"}`)
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("stalwart settings status = %d, body = %s", response.StatusCode, body)
+	}
+
+	response = request(tokenA, http.MethodPost, "/api/v1/domains", fmt.Sprintf(`{"domain":%q,"provider":"stalwart"}`, domainName))
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
 	if response.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(response.Body)
-		response.Body.Close()
-		t.Fatalf("create Resend domain status = %d, body = %s", response.StatusCode, body)
+		t.Fatalf("stalwart domain creation status = %d, body = %s", response.StatusCode, body)
 	}
-	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
-		response.Body.Close()
-		t.Fatal(err)
+	var created struct {
+		Domain string `json:"domain"`
 	}
-	response.Body.Close()
-	if created.Provider != delivery.ProviderResend || created.ResendDomainID != "domain_fake_1" {
-		t.Fatalf("created domain = %#v", created)
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("decode created domain: %v body=%s", err, body)
 	}
-
-	response = request(tokenA, http.MethodGet, "/api/v1/domains/"+created.ID+"/dns-records", "")
-	var dnsResponse struct {
-		Records []dnsRecord `json:"dns_records"`
-	}
-	if response.StatusCode != http.StatusOK {
-		response.Body.Close()
-		t.Fatalf("get Resend DNS records status = %d", response.StatusCode)
-	}
-	if err := json.NewDecoder(response.Body).Decode(&dnsResponse); err != nil {
-		response.Body.Close()
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if len(dnsResponse.Records) != 2 || dnsResponse.Records[0].Value != "resend-spf-value" {
-		t.Fatalf("DNS records did not use Resend response: %#v", dnsResponse.Records)
-	}
-
-	response = request(tokenA, http.MethodPost, "/api/v1/domains/"+created.ID+"/verify", "")
-	var verifyResponse struct {
-		Domain sendingDomain `json:"domain"`
-	}
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		response.Body.Close()
-		t.Fatalf("verify Resend domain status = %d, body = %s", response.StatusCode, body)
-	}
-	if err := json.NewDecoder(response.Body).Decode(&verifyResponse); err != nil {
-		response.Body.Close()
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if verifyResponse.Domain.Status != "verified" {
-		t.Fatalf("verified domain status = %q", verifyResponse.Domain.Status)
-	}
-	campaignRouter := delivery.Router{
-		Resolver: delivery.RoutingResolver{Settings: delivery.PostgresRoutingSettings{Pool: integrationPool}},
-		Providers: map[string]delivery.Provider{
-			delivery.ProviderResend: &delivery.WorkspaceResendProvider{
-				Pool: integrationPool, EncryptionKey: integrationCfg.DKIMEncryptionKey,
-				RequestsPerSec: 1000, BaseURL: fakeResend.URL, BatchWait: 50 * time.Millisecond,
-			},
-			delivery.ProviderStalwart: integrationProviderFunc(func(context.Context, delivery.Message) (*delivery.Result, error) {
-				t.Fatal("campaign unexpectedly fell back to Stalwart")
-				return nil, nil
-			}),
-		},
-	}
-	sendResult, err := campaignRouter.Send(context.Background(), delivery.CampaignDelivery, orgA, domainName, delivery.Message{
-		ID: "message_fake_1", WorkspaceID: orgA, CampaignID: "campaign_fake_1",
-		From: "Newsletter@" + domainName, To: "recipient@example.test", Subject: "Test", Text: "Message",
-	})
-	if err != nil || sendResult == nil || sendResult.MessageID == "" {
-		t.Fatalf("send through workspace Resend route = (%#v, %v)", sendResult, err)
-	}
-	results := make(chan error, 2)
-	start := make(chan struct{})
-	for i := 0; i < 2; i++ {
-		i := i
-		go func() {
-			<-start
-			_, err := campaignRouter.Send(context.Background(), delivery.CampaignDelivery, orgA, domainName, delivery.Message{
-				ID: fmt.Sprintf("message_fake_%d", i+2), WorkspaceID: orgA, CampaignID: "campaign_fake_1",
-				From: "offers@" + domainName, To: fmt.Sprintf("recipient%d@example.test", i), Subject: "Test", Text: "Message",
-			})
-			results <- err
-		}()
-	}
-	close(start)
-	for range 2 {
-		if err := <-results; err != nil {
-			t.Fatalf("batched Resend send failed: %v", err)
-		}
-	}
-	if batchRequests.Load() != 2 || len(batchSizes) != 2 || batchSizes[0] != 1 || batchSizes[1] != 2 {
-		t.Fatalf("Resend batch calls = %d, sizes = %v; want one single and one two-recipient batch", batchRequests.Load(), batchSizes)
-	}
-
-	response = request(tokenB, http.MethodPut, "/api/v1/settings/delivery", settingsBody)
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("save workspace B settings status = %d", response.StatusCode)
-	}
-	response = request(tokenB, http.MethodPost, "/api/v1/domains", fmt.Sprintf(`{"domain":%q,"provider":"resend"}`, domainName))
-	response.Body.Close()
-	if response.StatusCode != http.StatusConflict {
-		t.Fatalf("cross-workspace domain creation status = %d, want 409", response.StatusCode)
-	}
-	if creates.Load() != 1 {
-		t.Fatalf("Resend create called %d times, want 1", creates.Load())
+	if created.Domain != domainName {
+		t.Fatalf("created domain = %q, want %q", created.Domain, domainName)
 	}
 }

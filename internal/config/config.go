@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/mail"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -61,6 +62,7 @@ type Config struct {
 	PlatformResendAPIKey    string
 	ResendWebhookSecret     string
 	ResendRequestsPerSecond int
+	ResendAPIBaseURL        string
 	SuperAdminEmails        []string
 	WebhookSecret           string
 }
@@ -146,6 +148,14 @@ func load(lookup func(string) string) (Config, error) {
 	}
 
 	resendAPIKey := getenv(lookup, "RESEND_API_KEY", "")
+	resendAPIBaseURL := strings.TrimRight(strings.TrimSpace(getenv(lookup, "RESEND_API_BASE_URL", "https://api.resend.com")), "/")
+	parsedResendURL, err := url.ParseRequestURI(resendAPIBaseURL)
+	if err != nil || parsedResendURL.Host == "" || parsedResendURL.Scheme != "https" && secureEnv {
+		return Config{}, fmt.Errorf("RESEND_API_BASE_URL must be an HTTPS URL in staging and production")
+	}
+	if parsedResendURL.Scheme != "https" && parsedResendURL.Scheme != "http" {
+		return Config{}, fmt.Errorf("RESEND_API_BASE_URL must use HTTP or HTTPS")
+	}
 	resendFromEmail := getenv(lookup, "RESEND_FROM_EMAIL", "activate@pipsleague.com")
 	resendFromName := getenv(lookup, "RESEND_FROM_NAME", "Sendwise")
 	superAdminEmails := splitCSV(getenv(lookup, "SUPER_ADMIN_EMAILS", ""))
@@ -202,6 +212,7 @@ func load(lookup func(string) string) (Config, error) {
 		PlatformResendAPIKey:    getenv(lookup, "PLATFORM_RESEND_API_KEY", ""),
 		ResendWebhookSecret:     resendWebhookSecret,
 		ResendRequestsPerSecond: resendRequestsPerSecond,
+		ResendAPIBaseURL:        resendAPIBaseURL,
 		SuperAdminEmails:        superAdminEmails,
 		WebhookSecret:           webhookSecret,
 	}

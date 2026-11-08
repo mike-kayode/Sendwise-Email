@@ -203,12 +203,9 @@ func (p CampaignRouter) Send(ctx context.Context, message Message) (*Result, err
 
 func NewCampaignRouter(pool *pgxpool.Pool, encryptionKey string, requestsPerSecond int, stalwart Provider, logger *slog.Logger) Provider {
 	router := &Router{
-		Resolver: RoutingResolver{Settings: PostgresRoutingSettings{Pool: pool}},
+		Resolver: RoutingResolver{},
 		Providers: map[string]Provider{
 			ProviderStalwart: stalwart,
-			ProviderResend: &WorkspaceResendProvider{
-				Pool: pool, EncryptionKey: encryptionKey, RequestsPerSec: requestsPerSecond,
-			},
 		},
 		Logger: logger,
 	}

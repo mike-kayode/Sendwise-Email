@@ -188,7 +188,6 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 		if domain == "" {
 			return 0, ErrDomainUnverified
 		}
-		var domainStatus string
 		var stalwartAuthenticated, resendAuthenticated bool
 		var provider string
 		if err := tx.QueryRow(ctx, `
@@ -201,17 +200,14 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 			return 0, fmt.Errorf("load workspace delivery provider: %w", err)
 		}
 		err = tx.QueryRow(ctx, `
-			SELECT status, stalwart_authenticated, resend_authenticated FROM sending_domains
+			SELECT stalwart_authenticated, resend_authenticated FROM sending_domains
 			WHERE domain = $1 AND organization_id = $2
-		`, domain, organizationID).Scan(&domainStatus, &stalwartAuthenticated, &resendAuthenticated)
+		`, domain, organizationID).Scan(&stalwartAuthenticated, &resendAuthenticated)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, ErrDomainUnverified
 		}
 		if err != nil {
 			return 0, fmt.Errorf("check sending domain: %w", err)
-		}
-		if domainStatus != "verified" {
-			return 0, ErrDomainUnverified
 		}
 		if provider == "resend" && !resendAuthenticated || provider == "stalwart" && !stalwartAuthenticated {
 			return 0, ErrDomainUnverified

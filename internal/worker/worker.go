@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
-	"math"
 	"net/url"
 	"strings"
 	"sync"
@@ -733,16 +732,31 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 		return false, tx.Commit(ctx)
 	}
 
+	var warmupProfile string
+	if err := tx.QueryRow(ctx, `
+		SELECT warmup_profile
+		FROM sending_domains
+		WHERE organization_id = $1 AND lower(domain) = $2
+	`, row.OrganizationID, domain).Scan(&warmupProfile); err != nil && err != pgx.ErrNoRows {
+		return false, fmt.Errorf("load sending-domain warm-up profile: %w", err)
+	}
+	if warmupProfile == "" {
+		warmupProfile = "standard"
+	}
 	var successfulDays int
+	qualifiedDayFilter := ""
+	if warmupProfile == "resend" {
+		qualifiedDayFilter = " AND bounce_count::numeric / NULLIF(successful_count, 0) < 0.02"
+	}
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
 		FROM sending_domain_daily_stats
 		WHERE organization_id = $1 AND domain = $2
 		  AND sending_day < CURRENT_DATE AND successful_count > 0
-	`, row.OrganizationID, domain).Scan(&successfulDays); err != nil {
+	`+qualifiedDayFilter, row.OrganizationID, domain).Scan(&successfulDays); err != nil {
 		return false, fmt.Errorf("count successful warm-up days: %w", err)
 	}
-	cap := warmupDailyCap(w.cfg.WarmupStartPerDay, w.cfg.WarmupGrowthFactor, w.cfg.MaxDailyEmails, successfulDays)
+	cap := delivery.WarmupDailyCap(warmupProfile, w.cfg.WarmupStartPerDay, w.cfg.WarmupGrowthFactor, w.cfg.MaxDailyEmails, successfulDays)
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO sending_domain_daily_stats (organization_id, domain, sending_day)
@@ -799,11 +813,7 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 }
 
 func warmupDailyCap(start int, growth float64, maximum, successfulDays int) int {
-	cap := float64(start) * math.Pow(growth, float64(successfulDays))
-	if math.IsInf(cap, 1) || cap >= float64(maximum) {
-		return maximum
-	}
-	return int(cap)
+	return delivery.WarmupDailyCap("standard", start, growth, maximum, successfulDays)
 }
 
 func (w *Worker) recipientLimiter(domain string) *rate.Limiter {

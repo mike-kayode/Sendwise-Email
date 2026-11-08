@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -47,36 +46,9 @@ func (r RoutingResolver) Resolve(ctx context.Context, kind DeliveryKind, workspa
 	if kind != CampaignDelivery {
 		return nil, fmt.Errorf("unsupported delivery kind %q", kind)
 	}
-	if r.Settings == nil {
-		return []string{ProviderStalwart}, nil
-	}
-
-	settings, err := r.Settings.ForWorkspace(ctx, workspaceID, strings.ToLower(strings.TrimSpace(fromDomain)))
-	if err != nil {
-		return nil, fmt.Errorf("resolve workspace delivery settings: %w", err)
-	}
-	provider := strings.ToLower(strings.TrimSpace(settings.Provider))
-	if provider == "" {
-		provider = ProviderStalwart
-	}
-	if provider != ProviderStalwart && provider != ProviderResend {
-		return nil, fmt.Errorf("unsupported workspace delivery provider %q", provider)
-	}
-	providers := []string{provider}
-	fallback := strings.ToLower(strings.TrimSpace(settings.FallbackProvider))
-	if fallback == "" {
-		return providers, nil
-	}
-	if fallback != ProviderStalwart && fallback != ProviderResend {
-		return nil, fmt.Errorf("unsupported fallback delivery provider %q", fallback)
-	}
-	if fallback == provider {
-		return nil, errors.New("fallback provider must differ from primary provider")
-	}
-	if !settings.StalwartDomainAuth || !settings.ResendDomainAuth {
-		return providers, nil
-	}
-	return append(providers, fallback), nil
+	// Campaign delivery is intentionally Stalwart-only. The platform mail path may
+	// still use Resend as an optional fallback, but workspace campaigns never do.
+	return []string{ProviderStalwart}, nil
 }
 
 type CircuitBreaker struct {
