@@ -107,9 +107,9 @@ jobs:
           STALWART_DOMAIN: sendwise.test
           STALWART_HOSTNAME: mail.sendwise.test
           STALWART_ADMIN_USERNAME: admin
-          STALWART_ADMIN_PASSWORD: ci-only-stalwart-admin-password
+          STALWART_ADMIN_PASSWORD: ci-only-Stalwart-Admin-2026!
           STALWART_SUBMIT_USERNAME: noreply
-          STALWART_SUBMIT_PASSWORD: ci-only-stalwart-submit-password
+          STALWART_SUBMIT_PASSWORD: ci-only-Stalwart-Submit-2026!
         run: ./scripts/provision-stalwart.sh
       - name: Go test
         env:
@@ -127,7 +127,7 @@ jobs:
           STALWART_DOMAIN: sendwise.test
           STALWART_HOSTNAME: mail.sendwise.test
           STALWART_SUBMIT_USERNAME: noreply
-          STALWART_SUBMIT_PASSWORD: ci-only-stalwart-submit-password
+          STALWART_SUBMIT_PASSWORD: ci-only-Stalwart-Submit-2026!
           STALWART_SMTP_ADDR: 127.0.0.1:587
           STALWART_SMTP_HOST: localhost
         run: go test ./...
