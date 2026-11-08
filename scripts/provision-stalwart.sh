@@ -19,9 +19,9 @@ done
 
 STALWART_URL="${STALWART_URL:-http://127.0.0.1:8081}"
 STALWART_HOSTNAME="${STALWART_HOSTNAME:-mail.${STALWART_DOMAIN}}"
-STALWART_ADMIN_USERNAME="${STALWART_ADMIN_USERNAME:-admin@${STALWART_DOMAIN}}"
+STALWART_ADMIN_USERNAME="${STALWART_ADMIN_USERNAME:-admin}"
 STALWART_SUBMIT_USERNAME="${STALWART_SUBMIT_USERNAME:-noreply}"
-STALWART_RECOVERY_ADMIN="${STALWART_RECOVERY_ADMIN:-${STALWART_ADMIN_USERNAME%@*}:${STALWART_ADMIN_PASSWORD}}"
+STALWART_RECOVERY_ADMIN="${STALWART_RECOVERY_ADMIN:-${STALWART_ADMIN_USERNAME}:${STALWART_ADMIN_PASSWORD}}"
 
 case "$STALWART_URL" in
   http://localhost:*|http://127.0.0.1:*|https://localhost:*|https://127.0.0.1:*) ;;
@@ -30,6 +30,17 @@ esac
 [[ "$STALWART_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || fail "STALWART_DOMAIN must be a DNS domain"
 [[ "$STALWART_HOSTNAME" =~ ^[A-Za-z0-9.-]+$ ]] || fail "STALWART_HOSTNAME must be a DNS hostname"
 [[ "$STALWART_SUBMIT_USERNAME" =~ ^[A-Za-z0-9._+-]+$ ]] || fail "STALWART_SUBMIT_USERNAME is invalid"
+password_is_strong() {
+  local password="$1"
+  [[ ${#password} -ge 16 ]] || return 1
+  [[ "$password" =~ [A-Z] ]] || return 1
+  [[ "$password" =~ [a-z] ]] || return 1
+  [[ "$password" =~ [0-9] ]] || return 1
+  [[ "$password" =~ [^A-Za-z0-9] ]] || return 1
+  return 0
+}
+password_is_strong "$STALWART_ADMIN_PASSWORD" || fail "STALWART_ADMIN_PASSWORD must be at least 16 characters and include upper/lowercase, a number and a symbol"
+password_is_strong "$STALWART_SUBMIT_PASSWORD" || fail "STALWART_SUBMIT_PASSWORD must be at least 16 characters and include upper/lowercase, a number and a symbol"
 
 umask 077
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/sendwise-stalwart.XXXXXX")"
@@ -41,7 +52,8 @@ response_file="$tmp_dir/response.json"
 session_file="$tmp_dir/session.json"
 
 write_auth() {
-  local user="$1" password="$2"
+  local user="$1"
+  local password="$2"
   printf 'user = %s\n' "$(jq -nr --arg credentials "$user:$password" '$credentials | @json')" >"$auth_file"
   chmod 600 "$auth_file"
 }
