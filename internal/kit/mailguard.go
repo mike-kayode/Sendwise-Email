@@ -50,9 +50,9 @@ func DevelopmentSMTPHost(smtpAddr, smtpHost string) (string, bool) {
 // ValidateProductionMail fails fast when a secure environment (staging or
 // production) is configured to deliver mail to a development relay or to the
 // log mailer. Campaign delivery always uses SMTP regardless of MAIL_PROVIDER,
-// so a local SMTP target is rejected even when transactional mail is sent
-// through Resend. Services call this from their configuration loaders so a bad
-// deployment exits at startup instead of at send time.
+// so a local SMTP target is rejected even when the platform transactional
+// fallback is configured. Services call this from their configuration loaders
+// so a bad deployment exits at startup instead of at send time.
 func ValidateProductionMail(env, provider, smtpAddr, smtpHost string) error {
 	if env != "staging" && env != "production" {
 		return nil
@@ -60,9 +60,9 @@ func ValidateProductionMail(env, provider, smtpAddr, smtpHost string) error {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "log":
 		return fmt.Errorf("MAIL_PROVIDER=log is not allowed in APP_ENV=%s: it prints messages instead of delivering them", env)
-	case "", "auto", "smtp", "resend":
+	case "", "auto", "smtp":
 	default:
-		return fmt.Errorf("MAIL_PROVIDER must be auto, smtp, resend, or log, got %q", provider)
+		return fmt.Errorf("MAIL_PROVIDER must be auto, smtp, or log, got %q", provider)
 	}
 	if host, ok := DevelopmentSMTPHost(smtpAddr, smtpHost); ok {
 		return fmt.Errorf("SMTP target %q is a development-only relay and must not be used in APP_ENV=%s; set SMTP_ADDR and SMTP_HOST to a real relay", host, env)

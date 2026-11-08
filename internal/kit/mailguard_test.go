@@ -60,7 +60,9 @@ func TestValidateProductionMail(t *testing.T) {
 			addr: "smtp.example.test:465", host: "smtp.example.test",
 		},
 		{
-			name: "production accepts resend with no smtp target", env: "production", provider: "resend",
+			name: "production rejects the removed resend provider", env: "production", provider: "resend",
+			addr: "smtp.example.test:587", host: "smtp.example.test",
+			wantErr: "MAIL_PROVIDER must be",
 		},
 		{
 			// The same configuration is correct in the local and CI stacks.

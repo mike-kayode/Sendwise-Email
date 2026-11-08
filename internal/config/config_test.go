@@ -20,9 +20,6 @@ func TestLoadDevelopmentDefaults(t *testing.T) {
 	if cfg.SendingRate != 20 || cfg.MaxDeliveryAttempts != 5 {
 		t.Fatalf("unexpected delivery defaults: rate=%d attempts=%d", cfg.SendingRate, cfg.MaxDeliveryAttempts)
 	}
-	if cfg.ResendRequestsPerSecond != 8 {
-		t.Fatalf("ResendRequestsPerSecond = %d, want 8", cfg.ResendRequestsPerSecond)
-	}
 	if cfg.SchedulerInterval != 15*time.Second {
 		t.Fatalf("SchedulerInterval = %s, want 15s", cfg.SchedulerInterval)
 	}
@@ -78,7 +75,6 @@ func TestLoadRejectsInvalidRuntimeLimits(t *testing.T) {
 		value string
 	}{
 		{name: "zero sending rate", key: "SENDING_RATE_PER_SECOND", value: "0"},
-		{name: "zero resend requests rate", key: "RESEND_REQUESTS_PER_SECOND", value: "0"},
 		{name: "zero delivery attempts", key: "MAX_DELIVERY_ATTEMPTS", value: "0"},
 		{name: "zero scheduler interval", key: "SCHEDULER_INTERVAL", value: "0s"},
 		{name: "zero access token ttl", key: "ACCESS_TOKEN_TTL", value: "0s"},
@@ -195,15 +191,11 @@ func TestLoadAcceptsValidProductionConfiguration(t *testing.T) {
 	}
 }
 
-func TestLoadProductionMailProviderResendAcceptsRealRelay(t *testing.T) {
+func TestLoadProductionRejectsResendMailProvider(t *testing.T) {
 	values := productionConfig()
 	values["MAIL_PROVIDER"] = "resend"
-	cfg, err := load(configLookup(values))
-	if err != nil {
-		t.Fatalf("load production config with resend: %v", err)
-	}
-	if cfg.MailProvider != "resend" {
-		t.Fatalf("MailProvider = %q, want resend", cfg.MailProvider)
+	if _, err := load(configLookup(values)); err == nil {
+		t.Fatal("load accepted MAIL_PROVIDER=resend; campaigns send through Stalwart only")
 	}
 }
 
@@ -242,7 +234,6 @@ func productionConfig() map[string]string {
 		"SERVICE_TOKEN":           "service-token",
 		"REQUIRE_VERIFIED_DOMAIN": "true",
 		"WEBHOOK_SECRET":          strings.Repeat("b", 32),
-		"RESEND_WEBHOOK_SECRET":   strings.Repeat("c", 32),
 	}
 }
 

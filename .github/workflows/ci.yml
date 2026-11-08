@@ -33,6 +33,18 @@ jobs:
             echo "Remove coming-soon placeholder text before merging."
             exit 1
           fi
+      - name: Enforce Stalwart-only campaign delivery
+        run: |
+          # router_test.go is explicitly allowlisted: it sets the platform-mail
+          # fallback key to prove campaign sends still use only Stalwart.
+          if git grep -n -i 'resend' -- \
+            internal/campaigns internal/delivery internal/worker internal/api \
+            'apps/web/app/(dashboard)' \
+            docs/DELIVERABILITY.md docs/EMAIL_DELIVERY_ARCHITECTURE.md \
+            ':(exclude)internal/delivery/router_test.go'; then
+            echo "Campaign code, UI, and docs must not reference the platform fallback."
+            exit 1
+          fi
       - name: Validate Compose files
         env:
           SERVICE_TOKEN: ci-only-service-token

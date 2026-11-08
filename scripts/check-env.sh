@@ -64,7 +64,6 @@ required=(
   SMTP_HOST
   SMTP_TLS_MODE
   SMTP_FROM
-  PLATFORM_FROM_EMAIL
 )
 missing=0
 for v in "${required[@]}"; do
@@ -103,15 +102,14 @@ if [ "$ENV_NAME" = "production" ] || [ "$ENV_NAME" = "staging" ]; then
       echo "MAIL_PROVIDER=log is not allowed in APP_ENV=$ENV_NAME: it prints messages instead of delivering them" >&2
       exit 1
       ;;
-    auto|smtp|resend) ;;
+    auto|smtp) ;;
     *)
-      echo "MAIL_PROVIDER must be auto, smtp, resend, or log" >&2
+      echo "MAIL_PROVIDER must be auto, smtp, or log" >&2
       exit 1
       ;;
   esac
 
-  # Campaign delivery always uses SMTP, so the relay must be real even when
-  # transactional mail goes through Resend.
+  # Campaign delivery always uses SMTP/Stalwart, so the relay must be real.
   addr_host="${SMTP_ADDR%%:*}"
   for candidate in "$SMTP_HOST" "$addr_host"; do
     normalized="$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]')"
@@ -125,18 +123,6 @@ if [ "$ENV_NAME" = "production" ] || [ "$ENV_NAME" = "staging" ]; then
   if [ -z "${SMTP_USERNAME:-}" ] || [ -z "${SMTP_PASSWORD:-}" ]; then
     echo "missing required env var: SMTP_USERNAME/SMTP_PASSWORD (campaign delivery authenticates in $ENV_NAME)" >&2
     exit 1
-  fi
-  if [ -z "${RESEND_WEBHOOK_SECRET:-}" ]; then
-    echo "missing required env var: RESEND_WEBHOOK_SECRET (Resend webhook signature verification in $ENV_NAME)" >&2
-    exit 1
-  fi
-  if [ "${MAIL_PROVIDER:-auto}" = "resend" ]; then
-    for v in RESEND_API_KEY RESEND_FROM_EMAIL; do
-      if [ -z "${!v:-}" ]; then
-        echo "missing required env var: $v (MAIL_PROVIDER=resend in $ENV_NAME)" >&2
-        exit 1
-      fi
-    done
   fi
 fi
 

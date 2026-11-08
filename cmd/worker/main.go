@@ -31,15 +31,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	redisCtx, redisCancel := context.WithTimeout(ctx, 5*time.Second)
-	redisClient, err := delivery.ConfigureSharedResendRedis(redisCtx, cfg.RedisURL)
-	redisCancel()
-	if err != nil {
-		logger.Error("connect shared Resend limiter", "error", err)
-		os.Exit(1)
-	}
-	defer redisClient.Close()
-
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
 		logger.Error("connect database", "error", err)
@@ -80,7 +71,7 @@ func main() {
 		cfg.SMTPPassword,
 		cfg.Env == "development" || cfg.Env == "test",
 	)
-	transport = delivery.NewCampaignRouter(pool, cfg.DKIMEncryptionKey, cfg.ResendRequestsPerSecond, transport, logger)
+	transport = delivery.NewCampaignRouter(transport, logger)
 	campaignService := campaigns.NewService(pool, bus, logger, cfg.MaxDeliveryAttempts, cfg.RequireVerifiedDomain)
 
 	// Mirror identity/workspace events into the legacy schema so foreign keys

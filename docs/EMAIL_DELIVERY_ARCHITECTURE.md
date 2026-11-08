@@ -21,7 +21,7 @@
 - A stable delivery ID, tenant, campaign version, recipient and content version are immutable. Retry ID stays stable.
 - Atomically claim DB work before SMTP. Record attempt state and an explicit ambiguous result for network uncertainty; do not assume SMTP is exactly-once.
 - NATS is at-least-once. Consumer inbox and DB lease prevent concurrent processing; a transport idempotency key is advisory unless relay supports it.
-- SMTP acceptance and final reply are persisted before ACK. If result persistence fails, reconcile from an attempt journal instead of blindly resending.
+- SMTP acceptance and final reply are persisted before ACK. If result persistence fails, reconcile from an attempt journal instead of retrying blindly.
 - Retryable and permanent SMTP classes are explicit and tested against representative responses.
 - Per-tenant, destination-provider, sending-domain and relay limits use distributed coordination and backpressure.
 - DLQ stores the real job ID, original failure, attempts, replay metadata and operator identity; replay is authorized, idempotent, observable and cannot bypass suppression.
@@ -31,7 +31,7 @@
 
 Source inspection identifies a duplicate-send window, startup-only republish, fragile NAK pause behavior, broken DLQ identifier mapping, unauthenticated bounce/complaint endpoints, broken message-ID association, GET unsubscribe side effects, and non-deduplicated tracking. See [audit section 10](./SYSTEM_ARCHITECTURE_AND_DEVELOPMENT_AUDIT.md#10-email-delivery-infrastructure).
 
-Compose contains a Stalwart image and volume, but no production Stalwart configuration, authenticated DSN/FBL bridge, key provisioning, PTR/port-25 setup, warm-up controller, reputation integration, multi-node relay selection, or live test result. Resend is separately called for account verification/reset when configured; it is not the marketing transport and must not silently become a mandatory campaign provider.
+Compose contains a Stalwart image and volume, but no production Stalwart configuration, authenticated DSN/FBL bridge, key provisioning, PTR/port-25 setup, warm-up controller, reputation integration, multi-node relay selection, or live test result. Platform transactional mail may use an explicitly configured optional fallback; campaigns use Stalwart only.
 
 ## Delivery state vocabulary
 
@@ -40,4 +40,3 @@ Keep distinct statuses for queued, claimed, attempting, submitted-to-relay, defe
 ## Commercial readiness gates
 
 Controlled SMTP sink; real STARTTLS/auth test; DKIM signature verification; SPF/DMARC alignment test; provider bounce and complaint ingestion; replay/duplicate/failure-injection tests; rate-limit and tenant fairness load tests; reputation/abuse runbooks; verified unsubscribe compliance; measured queue lag and service SLOs.
-

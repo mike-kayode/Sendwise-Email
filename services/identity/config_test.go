@@ -123,10 +123,8 @@ func TestLoadProductionRequiresWorkingMailProvider(t *testing.T) {
 	}
 
 	t.Setenv("MAIL_PROVIDER", "resend")
-	t.Setenv("RESEND_API_KEY", "")
-	t.Setenv("RESEND_FROM_EMAIL", "")
 	if _, err := LoadConfig(); err == nil {
-		t.Fatal("LoadConfig() accepted production Resend without credentials")
+		t.Fatal("LoadConfig() accepted the removed resend MAIL_PROVIDER")
 	}
 
 	t.Setenv("MAIL_PROVIDER", "log")
@@ -152,8 +150,6 @@ func TestLoadProductionRejectsDevelopmentMailRelay(t *testing.T) {
 	t.Setenv("SMTP_USERNAME", "mailer")
 	t.Setenv("SMTP_PASSWORD", "smtp-secret")
 	t.Setenv("SMTP_FROM", "hello@example.test")
-	t.Setenv("RESEND_API_KEY", "test-resend-key")
-	t.Setenv("RESEND_FROM_EMAIL", "hello@example.test")
 	t.Setenv("DKIM_ENCRYPTION_KEY", "test-mail-outbox-key")
 
 	for _, test := range []struct {
@@ -166,7 +162,7 @@ func TestLoadProductionRejectsDevelopmentMailRelay(t *testing.T) {
 		{name: "mailpit relay", provider: "smtp", addr: "mailpit:1025", host: "mailpit", want: "development-only relay"},
 		{name: "localhost relay", provider: "smtp", addr: "localhost:587", host: "localhost", want: "development-only relay"},
 		{name: "loopback ip relay", provider: "smtp", addr: "127.0.0.1:587", host: "127.0.0.1", want: "development-only relay"},
-		{name: "mailpit with resend provider", provider: "resend", addr: "mailpit:1025", host: "mailpit", want: "development-only relay"},
+		{name: "mailpit with auto provider", provider: "auto", addr: "mailpit:1025", host: "mailpit", want: "development-only relay"},
 		{name: "log mailer", provider: "log", addr: "smtp.example.test:587", host: "smtp.example.test", want: "MAIL_PROVIDER=log is not allowed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

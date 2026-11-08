@@ -745,7 +745,7 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 	}
 	var successfulDays int
 	qualifiedDayFilter := ""
-	if warmupProfile == "resend" {
+	if warmupProfile == "accelerated" {
 		qualifiedDayFilter = " AND bounce_count::numeric / NULLIF(successful_count, 0) < 0.02"
 	}
 	if err := tx.QueryRow(ctx, `

@@ -1,12 +1,11 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/mail"
 	"regexp"
@@ -228,24 +227,14 @@ func (s *Server) verifyAccount(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// sendVerificationEmail sends an account confirmation email via Resend.
+// sendVerificationEmail sends an account confirmation email over the platform
+// SMTP relay (Stalwart).
 func sendVerificationEmail(cfg config.Config, to, name, verifyURL string) error {
-	if cfg.ResendAPIKey == "" {
-		return fmt.Errorf("resend API key not configured")
-	}
-
-	type resendRequest struct {
-		From    string   `json:"from"`
-		To      []string `json:"to"`
-		Subject string   `json:"subject"`
-		Html    string   `json:"html"`
-	}
-
 	body := fmt.Sprintf(`
 		<!DOCTYPE html>
 		<html>
 		<body style="font-family: sans-serif; line-height: 1.6; color: #333;">
-			<h2>Welcome to %s, %s!</h2>
+			<h2>Welcome to Sendwise, %s!</h2>
 			<p>Please verify your email address to activate your account.</p>
 			<p><a href="%s" style="background-color: #4f46e5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Verify Email Address</a></p>
 			<p>Or copy and paste this link: %s</p>
@@ -253,40 +242,9 @@ func sendVerificationEmail(cfg config.Config, to, name, verifyURL string) error 
 			<p>If you didn't create an account, you can safely ignore this email.</p>
 		</body>
 		</html>
-	`, cfg.ResendFromName, name, verifyURL, verifyURL)
+	`, name, verifyURL, verifyURL)
 
-	reqBody := resendRequest{
-		From:    fmt.Sprintf("%s <%s>", cfg.ResendFromName, cfg.ResendFromEmail),
-		To:      []string{to},
-		Subject: "Verify your email address",
-		Html:    body,
-	}
-
-	payload, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("marshal resend request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "https://api.resend.com/emails", strings.NewReader(string(payload)))
-	if err != nil {
-		return fmt.Errorf("create resend request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.ResendAPIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("send resend request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("resend API returned status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	return nil
+	return sendPlatformSMTP(context.Background(), cfg, to, "Verify your email address", body)
 }
 
 type loginInput struct {
@@ -583,19 +541,9 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// sendPasswordResetEmail sends a password reset email via Resend.
+// sendPasswordResetEmail sends a password reset email over the platform SMTP
+// relay (Stalwart).
 func sendPasswordResetEmail(cfg config.Config, to, name, resetURL string) error {
-	if cfg.ResendAPIKey == "" {
-		return fmt.Errorf("resend API key not configured")
-	}
-
-	type resendRequest struct {
-		From    string   `json:"from"`
-		To      []string `json:"to"`
-		Subject string   `json:"subject"`
-		Html    string   `json:"html"`
-	}
-
 	body := fmt.Sprintf(`
 		<!DOCTYPE html>
 		<html>
@@ -611,36 +559,5 @@ func sendPasswordResetEmail(cfg config.Config, to, name, resetURL string) error 
 		</html>
 	`, name, resetURL, resetURL)
 
-	reqBody := resendRequest{
-		From:    fmt.Sprintf("%s <%s>", cfg.ResendFromName, cfg.ResendFromEmail),
-		To:      []string{to},
-		Subject: "Reset your Sendwise password",
-		Html:    body,
-	}
-
-	payload, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("marshal resend request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "https://api.resend.com/emails", strings.NewReader(string(payload)))
-	if err != nil {
-		return fmt.Errorf("create resend request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.ResendAPIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("send resend request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("resend API returned status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	return nil
+	return sendPlatformSMTP(context.Background(), cfg, to, "Reset your Sendwise password", body)
 }

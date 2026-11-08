@@ -20,35 +20,22 @@ const (
 
 const (
 	ProviderStalwart = "stalwart"
-	ProviderResend   = "resend"
 	ProviderLog      = "log"
 )
 
-type WorkspaceRouting struct {
-	Provider           string
-	FallbackProvider   string
-	StalwartDomainAuth bool
-	ResendDomainAuth   bool
-}
+type RoutingResolver struct{}
 
-type RoutingSettings interface {
-	ForWorkspace(ctx context.Context, workspaceID, fromDomain string) (WorkspaceRouting, error)
-}
-
-type RoutingResolver struct {
-	Settings RoutingSettings
-}
-
+// Resolve returns the provider chain for a delivery kind. Everything that
+// flows through this router — campaigns and the platform alike — sends via
+// Stalwart. Platform transactional fallback is not part of this package, so
+// campaign code cannot route through it.
 func (r RoutingResolver) Resolve(ctx context.Context, kind DeliveryKind, workspaceID, fromDomain string) ([]string, error) {
-	if kind == PlatformDelivery {
-		return []string{ProviderStalwart, ProviderResend}, nil
-	}
-	if kind != CampaignDelivery {
+	switch kind {
+	case PlatformDelivery, CampaignDelivery:
+		return []string{ProviderStalwart}, nil
+	default:
 		return nil, fmt.Errorf("unsupported delivery kind %q", kind)
 	}
-	// Campaign delivery is intentionally Stalwart-only. The platform mail path may
-	// still use Resend as an optional fallback, but workspace campaigns never do.
-	return []string{ProviderStalwart}, nil
 }
 
 type CircuitBreaker struct {

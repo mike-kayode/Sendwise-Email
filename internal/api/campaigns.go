@@ -467,12 +467,8 @@ func (s *Server) validateCampaign(w http.ResponseWriter, r *http.Request) {
 			SELECT EXISTS (
 				SELECT 1
 				FROM sending_domains d
-				LEFT JOIN workspace_delivery_settings w ON w.workspace_id = d.organization_id
 				WHERE d.organization_id = $1 AND lower(d.domain) = $2
-				  AND CASE COALESCE(w.provider, 'stalwart')
-				      WHEN 'resend' THEN d.resend_authenticated
-				      ELSE d.stalwart_authenticated
-				  END
+				  AND d.stalwart_authenticated
 			)
 		`, s.organizationID(r), senderDomain).Scan(&verified); err != nil {
 			add("sending_domain", "error", "Could not check sending domain verification.")
@@ -649,7 +645,7 @@ func (s *Server) warmupRemainingToday(ctx context.Context, organizationID, sende
 		warmupProfile = "standard"
 	}
 	qualifiedDayFilter := ""
-	if warmupProfile == "resend" {
+	if warmupProfile == "accelerated" {
 		qualifiedDayFilter = " AND bounce_count::numeric / NULLIF(successful_count, 0) < 0.02"
 	}
 	var successfulDays, reserved int
@@ -784,7 +780,7 @@ func (s *Server) writeQueueError(w http.ResponseWriter, err error) {
 	case errors.Is(err, campaigns.ErrInvalidSender):
 		httpx.Error(w, http.StatusBadRequest, "invalid_sender_email", "Enter a valid sender email and use a non-reserved local-part.")
 	case errors.Is(err, campaigns.ErrDomainUnverified):
-		httpx.Error(w, http.StatusBadRequest, "sending_domain_unverified", "Verify the sender domain with the selected delivery provider before sending.")
+		httpx.Error(w, http.StatusBadRequest, "sending_domain_unverified", "Verify the sender domain with Stalwart before sending.")
 	case errors.Is(err, campaigns.ErrPostalAddress):
 		httpx.Error(w, http.StatusBadRequest, "postal_address_required", "Add the sender's postal address before sending.")
 	case errors.Is(err, campaigns.ErrNotFound):

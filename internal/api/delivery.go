@@ -78,7 +78,6 @@ type DeliveryHandler struct {
 	replayer         deliveryService
 	publisher        publisher
 	webhookSecret    string
-	resendSecret     string
 	idempotency      *idempotencyStore
 }
 
@@ -86,7 +85,7 @@ type publisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
 }
 
-func NewDeliveryHandler(pool *pgxpool.Pool, tokens *auth.Manager, logger *slog.Logger, replayer deliveryService, publisher publisher, webhookSecret string, maxBounceRate, maxComplaintRate float64, resendSecret string) *DeliveryHandler {
+func NewDeliveryHandler(pool *pgxpool.Pool, tokens *auth.Manager, logger *slog.Logger, replayer deliveryService, publisher publisher, webhookSecret string, maxBounceRate, maxComplaintRate float64) *DeliveryHandler {
 	return &DeliveryHandler{
 		pool:             pool,
 		tokens:           tokens,
@@ -96,7 +95,6 @@ func NewDeliveryHandler(pool *pgxpool.Pool, tokens *auth.Manager, logger *slog.L
 		replayer:         replayer,
 		publisher:        publisher,
 		webhookSecret:    webhookSecret,
-		resendSecret:     resendSecret,
 		idempotency:      newIdempotencyStore(),
 	}
 }

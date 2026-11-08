@@ -10,7 +10,7 @@ BEGIN
     ) THEN
         ALTER TABLE sending_domains
             ADD CONSTRAINT sending_domains_warmup_profile_check
-            CHECK (warmup_profile IN ('standard', 'resend'));
+            CHECK (warmup_profile IN ('standard', 'accelerated'));
     END IF;
 END $$;
 

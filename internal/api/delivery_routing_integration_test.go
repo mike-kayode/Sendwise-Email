@@ -22,13 +22,14 @@ func (f integrationProviderFunc) Send(ctx context.Context, message delivery.Mess
 	return f(ctx, message)
 }
 
-func TestWorkspaceCampaignRoutingRejectsResendSettings(t *testing.T) {
+// TestCampaignDomainsAreStalwartOnly proves there is no per-workspace provider
+// selection left: the delivery-settings endpoint is gone and a domain can only
+// be created through the Stalwart path.
+func TestCampaignDomainsAreStalwartOnly(t *testing.T) {
 	if integrationPool == nil {
 		t.Skip("no PostgreSQL database available")
 	}
-	const fakeAPIKey = "re_fake_not_a_real_key_1234"
 	orgA := uuid.NewString()
-	domainName := "news-" + strings.ReplaceAll(orgA[:8], "-", "") + ".example"
 	server := newIntegrationServer(t)
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
@@ -51,39 +52,21 @@ func TestWorkspaceCampaignRoutingRejectsResendSettings(t *testing.T) {
 		return resp
 	}
 
-	settingsBody := `{"provider":"resend","resend_api_key":"` + fakeAPIKey + `"}`
-	response := request(tokenA, http.MethodPut, "/api/v1/settings/delivery", settingsBody)
+	// The workspace delivery-settings endpoint no longer exists.
+	response := request(tokenA, http.MethodPut, "/api/v1/settings/delivery", `{}`)
 	body, _ := io.ReadAll(response.Body)
 	response.Body.Close()
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("resend campaign setting status = %d, body = %s", response.StatusCode, body)
-	}
-	if !strings.Contains(string(body), "campaign_delivery_stalwart_only") {
-		t.Fatalf("expected Stalwart-only rejection, got %s", body)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("workspace delivery settings status = %d, body = %s, want 404", response.StatusCode, body)
 	}
 
-	response = request(tokenA, http.MethodPost, "/api/v1/domains", fmt.Sprintf(`{"domain":%q,"provider":"resend"}`, domainName))
-	body, _ = io.ReadAll(response.Body)
-	response.Body.Close()
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("resend domain creation status = %d, body = %s", response.StatusCode, body)
-	}
-	if !strings.Contains(string(body), "campaign_delivery_stalwart_only") {
-		t.Fatalf("expected Stalwart-only domain rejection, got %s", body)
-	}
-
-	response = request(tokenA, http.MethodPut, "/api/v1/settings/delivery", `{"provider":"stalwart"}`)
-	body, _ = io.ReadAll(response.Body)
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("stalwart settings status = %d, body = %s", response.StatusCode, body)
-	}
-
-	response = request(tokenA, http.MethodPost, "/api/v1/domains", fmt.Sprintf(`{"domain":%q,"provider":"stalwart"}`, domainName))
+	// The plain Stalwart path still creates the domain.
+	otherDomain := "news-" + strings.ReplaceAll(orgA[9:17], "-", "") + ".example"
+	response = request(tokenA, http.MethodPost, "/api/v1/domains", fmt.Sprintf(`{"domain":%q}`, otherDomain))
 	body, _ = io.ReadAll(response.Body)
 	response.Body.Close()
 	if response.StatusCode != http.StatusCreated {
-		t.Fatalf("stalwart domain creation status = %d, body = %s", response.StatusCode, body)
+		t.Fatalf("domain creation status = %d, body = %s", response.StatusCode, body)
 	}
 	var created struct {
 		Domain string `json:"domain"`
@@ -91,7 +74,7 @@ func TestWorkspaceCampaignRoutingRejectsResendSettings(t *testing.T) {
 	if err := json.Unmarshal(body, &created); err != nil {
 		t.Fatalf("decode created domain: %v body=%s", err, body)
 	}
-	if created.Domain != domainName {
-		t.Fatalf("created domain = %q, want %q", created.Domain, domainName)
+	if created.Domain != otherDomain {
+		t.Fatalf("created domain = %q, want %q", created.Domain, otherDomain)
 	}
 }

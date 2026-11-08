@@ -1,6 +1,6 @@
 # Transactional Email Setup
 
-Identity supports `MAIL_PROVIDER=smtp`, `resend`, or `log`. `log` is for
+Identity uses Stalwart over SMTP for transactional email. `log` is for
 development only. Mailpit is useful for local UI tests, but a message accepted
 by Mailpit is not proof of delivery by Stalwart or an external provider.
 
@@ -25,9 +25,9 @@ Identity rejects `none` when SMTP is the selected provider. With SMTP selected,
 SMTP error response code/text and recipient domain are logged; passwords are
 never logged.
 
-For Resend, configure `MAIL_PROVIDER=resend`, `RESEND_API_KEY`, and
-`RESEND_FROM_EMAIL`. Identity will not probe SMTP readiness when Resend is
-selected.
+Optional platform-mail failover is configured only with both
+`PLATFORM_RESEND_API_KEY` and `PLATFORM_FROM_EMAIL`. When either is unset,
+Identity uses Stalwart only. Campaign delivery never uses this fallback.
 
 ## Local Stalwart
 

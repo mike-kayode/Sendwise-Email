@@ -35,7 +35,7 @@ Campaigns require a sender postal address before sending. The address and visibl
 
 ## Volume and feedback-loop operations
 
-For sustained or high-volume campaigns, use a managed relay such as Amazon SES or Resend rather than assuming a single self-hosted IP is ready for bulk delivery. Configure provider event webhooks for bounces and complaints, verify their signatures, and test that each event suppresses the recipient and pauses campaigns at the configured thresholds.
+For sustained or high-volume campaigns, do not assume a single self-hosted IP is ready for bulk delivery. Configure authenticated bounce and complaint ingestion, then test that each event suppresses the recipient and pauses campaigns at the configured thresholds.
 
 Use provider feedback loops where available. Remove hard bounces and complaints immediately, honor unsubscribe requests, and do not re-add suppressed contacts without a valid consent event. Review complaint and bounce rates by recipient domain and pause sending if they rise unexpectedly.
 
@@ -54,5 +54,4 @@ ok  	github.com/khayode/email-platform/internal/worker	564.393s
 ```
 
 This proves application throughput against the test's local SMTP sink only. It
-does not prove Resend throughput, injected Resend 429/5xx recovery, inbox
-placement, or deliverability.
+does not prove production relay throughput, inbox placement, or deliverability.

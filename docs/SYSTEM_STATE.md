@@ -113,7 +113,7 @@ No skipped or unavailable check is counted as passing.
 | `GET /public/unsubscribe?token=…` (valid token) | **BROKEN — mutates**: contact `subscribed` → GET → `unsubscribed` (link-scanner simulation; defect D9) |
 | Tracking `/t/open`, `/t/click` invalid token | dispatch **VERIFIED** 400; valid-token tracking untested (needs a real send) |
 | Webhooks `POST /webhooks/bounce`, `/complaint` (no credentials) | **BROKEN**: both **204**; the forged bounce created a suppression row (`source=bounce_webhook`) visible via authenticated `GET /suppressions` (defect D10) |
-| Legacy auth direct (`:8080`, not gateway-reachable): register → login → verify (raw token from DB) → login → forgot/reset (active user) → reuse | **VERIFIED**: 201 → 403 `account_inactive` → 200 → 200 (access) → 200 → 200 → login 200 → reuse 404 `invalid_token`. Email send fails (`resend API key not configured`) — no delivery (defect D12) |
+| Legacy auth direct (`:8080`, not gateway-reachable): register → login → verify (raw token from DB) → login → forgot/reset (active user) → reuse | **VERIFIED**: 201 → 403 `account_inactive` → 200 → 200 (access) → 200 → 200 → login 200 → reuse 404 `invalid_token`. Historic delivery failed because no mail provider credentials were configured (defect D12) |
 | Service-local `/healthz`, `/readyz`, `/metrics` (direct) | **VERIFIED** 200; via gateway 404 (gateway does not proxy them — expected) |
 
 ### Gateway readiness baseline (for T1)
@@ -128,9 +128,8 @@ reachability is not a readiness gate yet — T1 must add it and re-run this chec
   `:587` refuses connections. Identity (smtp provider) logged
   `smtp dial … connection refused`; register returned **503
   `verification_email_unavailable`** until `MAIL_PROVIDER=log` was set locally.
-- Legacy API uses Resend directly; without `RESEND_API_KEY` it logs
-  `resend API key not configured` and does not deliver (register still returns 201;
-  forgot-password still returns 200).
+- Legacy API transactional messages now use the configured SMTP relay. Earlier
+  runs had no relay credentials and did not deliver verification/reset mail.
 - System from-address was `noreply@pipsleague.com` (in use elsewhere); changed to
   **`hello@pipsleague.com`** in `.env`, compose defaults, and `.env.example`, and
   confirmed live inside the restarted `api`/`identity`/`worker` containers.

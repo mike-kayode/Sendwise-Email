@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/observability"
 )
 
@@ -39,36 +38,20 @@ type Mailer interface {
 	Provider() string
 }
 
-// NewMailer selects a mail backend from configuration. The "auto" mode prefers
-// Resend when an API key is present, then SMTP, and finally falls back to a
-// development logger that prints links instead of sending mail.
+// NewMailer selects a mail backend from configuration. Stalwart (SMTP) is
+// always the primary transactional transport for verification, password reset,
+// and invitation mail. The Resend fallback is attached only when both
+// PLATFORM_RESEND_API_KEY and PLATFORM_FROM_EMAIL are set; both are optional
+// and neither is ever used by campaign delivery. The "log" provider (and the
+// automatic choice when SMTP is not configured) prints messages instead of
+// sending them and is development-only.
 func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if cfg.PlatformResendAPIKey != "" && cfg.SMTPAddr != "" && cfg.SMTPFrom != "" {
-		from := cfg.PlatformFromEmail
-		if from == "" {
-			from = cfg.SMTPFrom
-		}
-		return &platformMailer{
-			primary: &smtpMailer{
-				addr: cfg.SMTPAddr, host: cfg.SMTPHost, username: cfg.SMTPUsername,
-				password: cfg.SMTPPassword, from: from, tlsMode: cfg.SMTPTLSMode,
-			},
-			fallback: &resendMailer{
-				apiKey: cfg.PlatformResendAPIKey, fromEmail: from, fromName: cfg.ResendFromName,
-				client: &http.Client{Timeout: 10 * time.Second}, requestsPerSecond: cfg.ResendRequestsPerSecond,
-			},
-			breaker: newMailerCircuitBreaker(5, time.Minute, 2*time.Minute),
-			logger:  logger,
-		}
-	}
 	provider := cfg.MailProvider
 	if provider == "auto" || provider == "" {
 		switch {
-		case cfg.ResendAPIKey != "":
-			provider = "resend"
 		case cfg.SMTPAddr != "" && cfg.SMTPFrom != "":
 			provider = "smtp"
 		default:
@@ -76,20 +59,27 @@ func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 		}
 	}
 	switch provider {
-	case "resend":
-		if cfg.ResendAPIKey == "" {
-			logger.Warn("MAIL_PROVIDER=resend but RESEND_API_KEY is empty; falling back to log mailer")
-			return NewLogMailer(logger)
-		}
-		return &resendMailer{
-			apiKey: cfg.ResendAPIKey, fromEmail: cfg.ResendFromEmail, fromName: cfg.ResendFromName,
-			client: &http.Client{Timeout: 10 * time.Second}, requestsPerSecond: cfg.ResendRequestsPerSecond,
-		}
 	case "smtp":
-		return &smtpMailer{
-			addr: cfg.SMTPAddr, host: cfg.SMTPHost, username: cfg.SMTPUsername,
-			password: cfg.SMTPPassword, from: cfg.SMTPFrom, tlsMode: cfg.SMTPTLSMode,
+		from := cfg.PlatformFromEmail
+		if from == "" {
+			from = cfg.SMTPFrom
 		}
+		primary := &smtpMailer{
+			addr: cfg.SMTPAddr, host: cfg.SMTPHost, username: cfg.SMTPUsername,
+			password: cfg.SMTPPassword, from: from, tlsMode: cfg.SMTPTLSMode,
+		}
+		if cfg.PlatformResendAPIKey != "" && cfg.PlatformFromEmail != "" {
+			return &platformMailer{
+				primary: primary,
+				fallback: &resendMailer{
+					apiKey: cfg.PlatformResendAPIKey, fromEmail: cfg.PlatformFromEmail,
+					client: &http.Client{Timeout: 10 * time.Second},
+				},
+				breaker: newMailerCircuitBreaker(5, time.Minute, 2*time.Minute),
+				logger:  logger,
+			}
+		}
+		return primary
 	default:
 		logger.Warn("mail provider is log: messages are printed, not delivered")
 		return NewLogMailer(logger)
@@ -103,7 +93,7 @@ type platformMailer struct {
 	logger   *slog.Logger
 }
 
-func (m *platformMailer) Provider() string { return "smtp+resend" }
+func (m *platformMailer) Provider() string { return "smtp+fallback" }
 
 func (m *platformMailer) Probe(ctx context.Context) error {
 	probe, ok := m.primary.(interface{ Probe(context.Context) error })
@@ -259,12 +249,10 @@ func (m *LogMailer) Sent() []MailMessage {
 }
 
 type resendMailer struct {
-	apiKey            string
-	fromEmail         string
-	fromName          string
-	baseURL           string
-	client            *http.Client
-	requestsPerSecond int
+	apiKey    string
+	fromEmail string
+	baseURL   string
+	client    *http.Client
 }
 
 type resendDeliveryError struct {
@@ -283,12 +271,6 @@ func (m *resendMailer) Send(ctx context.Context, message MailMessage) error {
 	from := m.fromEmail
 	if from == "" {
 		return fmt.Errorf("resend from address is not configured")
-	}
-	if m.fromName != "" {
-		from = fmt.Sprintf("%s <%s>", m.fromName, from)
-	}
-	if err := delivery.WaitResendRequest(ctx, m.apiKey, m.requestsPerSecond, true); err != nil {
-		return fmt.Errorf("wait for shared Resend request limit: %w", err)
 	}
 	payload := map[string]any{
 		"from":    from,

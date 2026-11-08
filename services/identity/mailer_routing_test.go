@@ -110,6 +110,38 @@ func TestPlatformMailerUsesResendFakeWhenSMTPIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestNewMailerAttachesPlatformFallbackOnlyWhenBothSettingsExist(t *testing.T) {
+	tests := []struct {
+		name         string
+		apiKey       string
+		fromAddress  string
+		wantFallback bool
+	}{
+		{name: "both platform settings", apiKey: "fake-platform-key", fromAddress: "platform@example.test", wantFallback: true},
+		{name: "missing API key", fromAddress: "platform@example.test"},
+		{name: "missing explicit platform sender", apiKey: "fake-platform-key"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mailer := NewMailer(Config{
+				MailProvider:         "smtp",
+				SMTPAddr:             "127.0.0.1:587",
+				SMTPHost:             "mail.example.test",
+				SMTPUsername:         "noreply@example.test",
+				SMTPPassword:         "test-password",
+				SMTPFrom:             "smtp@example.test",
+				SMTPTLSMode:          "starttls",
+				PlatformResendAPIKey: test.apiKey,
+				PlatformFromEmail:    test.fromAddress,
+			}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			_, hasFallback := mailer.(*platformMailer)
+			if hasFallback != test.wantFallback {
+				t.Fatalf("fallback attached = %t, want %t", hasFallback, test.wantFallback)
+			}
+		})
+	}
+}
+
 func TestMailerCircuitBreakerCooldown(t *testing.T) {
 	now := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
 	breaker := newMailerCircuitBreaker(2, time.Minute, 2*time.Minute)

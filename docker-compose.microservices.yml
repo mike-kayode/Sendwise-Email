@@ -125,12 +125,8 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-hello@pipsleague.com}
       DKIM_ENCRYPTION_KEY: ${DKIM_ENCRYPTION_KEY:-}
-      RESEND_API_KEY: ${RESEND_API_KEY:-}
-      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-hello@pipsleague.com}
-      RESEND_FROM_NAME: ${RESEND_FROM_NAME:-Sendwise}
       PLATFORM_FROM_EMAIL: ${PLATFORM_FROM_EMAIL:-hello@pipsleague.com}
       PLATFORM_RESEND_API_KEY: ${PLATFORM_RESEND_API_KEY:-}
-      RESEND_REQUESTS_PER_SECOND: ${RESEND_REQUESTS_PER_SECOND:-8}
       WORKSPACE_URL: http://workspace:8080
     extra_hosts:
       - "host.docker.internal:host-gateway"

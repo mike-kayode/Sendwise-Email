@@ -188,28 +188,18 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 		if domain == "" {
 			return 0, ErrDomainUnverified
 		}
-		var stalwartAuthenticated, resendAuthenticated bool
-		var provider string
-		if err := tx.QueryRow(ctx, `
-			SELECT COALESCE(provider, 'stalwart')
-			FROM workspace_delivery_settings
-			WHERE workspace_id = $1
-		`, organizationID).Scan(&provider); errors.Is(err, pgx.ErrNoRows) {
-			provider = "stalwart"
-		} else if err != nil {
-			return 0, fmt.Errorf("load workspace delivery provider: %w", err)
-		}
-		err = tx.QueryRow(ctx, `
-			SELECT stalwart_authenticated, resend_authenticated FROM sending_domains
+		var stalwartAuthenticated bool
+		err := tx.QueryRow(ctx, `
+			SELECT stalwart_authenticated FROM sending_domains
 			WHERE domain = $1 AND organization_id = $2
-		`, domain, organizationID).Scan(&stalwartAuthenticated, &resendAuthenticated)
+		`, domain, organizationID).Scan(&stalwartAuthenticated)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, ErrDomainUnverified
 		}
 		if err != nil {
 			return 0, fmt.Errorf("check sending domain: %w", err)
 		}
-		if provider == "resend" && !resendAuthenticated || provider == "stalwart" && !stalwartAuthenticated {
+		if !stalwartAuthenticated {
 			return 0, ErrDomainUnverified
 		}
 	}

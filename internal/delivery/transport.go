@@ -3,6 +3,8 @@ package delivery
 import (
 	"context"
 	"errors"
+	"fmt"
+	"time"
 )
 
 type Message struct {
@@ -40,6 +42,25 @@ func (e *PermanentError) Error() string {
 
 func (e *PermanentError) Unwrap() error {
 	return e.Err
+}
+
+// ProviderError describes a delivery-provider failure with enough detail for
+// the router to decide whether to fail over or stop.
+type ProviderError struct {
+	StatusCode int
+	Temporary  bool
+	RetryAfter time.Duration
+	Message    string
+}
+
+func (e *ProviderError) Error() string {
+	if e.StatusCode != 0 && e.Message != "" {
+		return fmt.Sprintf("provider returned HTTP %d: %s", e.StatusCode, e.Message)
+	}
+	if e.StatusCode != 0 {
+		return fmt.Sprintf("provider returned HTTP %d", e.StatusCode)
+	}
+	return e.Message
 }
 
 func IsPermanent(err error) bool {

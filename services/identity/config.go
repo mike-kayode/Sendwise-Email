@@ -23,7 +23,7 @@ type Config struct {
 	ServiceToken string
 
 	// Mail delivery for verification and reset messages.
-	MailProvider            string // "resend", "smtp", "log", or "auto"
+	MailProvider            string // "smtp", "log", or "auto"
 	SMTPAddr                string
 	SMTPHost                string
 	SMTPUsername            string
@@ -31,12 +31,8 @@ type Config struct {
 	SMTPFrom                string
 	SMTPTLSMode             string
 	MailOutboxEncryptionKey string
-	ResendAPIKey            string
-	ResendFromEmail         string
-	ResendFromName          string
 	PlatformFromEmail       string
 	PlatformResendAPIKey    string
-	ResendRequestsPerSecond int
 }
 
 // LoadConfig reads Identity service configuration from environment variables.
@@ -63,12 +59,8 @@ func LoadConfig() (Config, error) {
 		SMTPFrom:                kit.Getenv("SMTP_FROM", ""),
 		SMTPTLSMode:             strings.ToLower(strings.TrimSpace(kit.Getenv("SMTP_TLS_MODE", defaultSMTPTLSMode(base.Env)))),
 		MailOutboxEncryptionKey: kit.Getenv("DKIM_ENCRYPTION_KEY", ""),
-		ResendAPIKey:            kit.Getenv("RESEND_API_KEY", ""),
-		ResendFromEmail:         kit.Getenv("RESEND_FROM_EMAIL", ""),
-		ResendFromName:          kit.Getenv("RESEND_FROM_NAME", "Sendwise"),
-		PlatformFromEmail:       kit.Getenv("PLATFORM_FROM_EMAIL", kit.Getenv("SMTP_FROM", "")),
+		PlatformFromEmail:       kit.Getenv("PLATFORM_FROM_EMAIL", ""),
 		PlatformResendAPIKey:    kit.Getenv("PLATFORM_RESEND_API_KEY", ""),
-		ResendRequestsPerSecond: kit.GetenvInt("RESEND_REQUESTS_PER_SECOND", 8),
 	}
 
 	if cfg.JWTSecret == "" {
@@ -78,9 +70,9 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("SERVICE_TOKEN is required")
 	}
 	switch cfg.MailProvider {
-	case "auto", "resend", "smtp", "log":
+	case "auto", "smtp", "log":
 	default:
-		return Config{}, fmt.Errorf("MAIL_PROVIDER must be auto, resend, smtp, or log")
+		return Config{}, fmt.Errorf("MAIL_PROVIDER must be auto, smtp, or log")
 	}
 	switch cfg.SMTPTLSMode {
 	case "none", "starttls", "tls":
@@ -91,30 +83,19 @@ func LoadConfig() (Config, error) {
 		if cfg.MailOutboxEncryptionKey == "" {
 			return Config{}, fmt.Errorf("DKIM_ENCRYPTION_KEY is required for encrypted transactional mail retries")
 		}
-		provider := cfg.MailProvider
-		if provider == "auto" {
-			if cfg.ResendAPIKey != "" {
-				provider = "resend"
-			} else {
-				provider = "smtp"
-			}
-		}
-		switch provider {
-		case "smtp":
-			if cfg.SMTPTLSMode == "none" {
-				return Config{}, fmt.Errorf("SMTP_TLS_MODE must be starttls or tls for production SMTP mail")
-			}
-			if cfg.SMTPAddr == "" || cfg.SMTPHost == "" || cfg.SMTPUsername == "" ||
-				cfg.SMTPPassword == "" || cfg.SMTPFrom == "" {
-				return Config{}, fmt.Errorf("SMTP_ADDR, SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM are required for production SMTP mail")
-			}
-
-		case "resend":
-			if cfg.ResendAPIKey == "" || cfg.ResendFromEmail == "" {
-				return Config{}, fmt.Errorf("RESEND_API_KEY and RESEND_FROM_EMAIL are required for production Resend mail")
-			}
-		default:
+		if cfg.MailProvider == "log" {
 			return Config{}, fmt.Errorf("MAIL_PROVIDER=log is not allowed in production")
+		}
+		// Stalwart (SMTP) is the primary transactional transport. The Resend
+		// fallback is optional: when PLATFORM_RESEND_API_KEY and
+		// PLATFORM_FROM_EMAIL are both set the mailer falls back to it, and
+		// when they are not the message simply fails with the SMTP error.
+		if cfg.SMTPTLSMode == "none" {
+			return Config{}, fmt.Errorf("SMTP_TLS_MODE must be starttls or tls for production SMTP mail")
+		}
+		if cfg.SMTPAddr == "" || cfg.SMTPHost == "" || cfg.SMTPUsername == "" ||
+			cfg.SMTPPassword == "" || cfg.SMTPFrom == "" {
+			return Config{}, fmt.Errorf("SMTP_ADDR, SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM are required for production SMTP mail")
 		}
 	}
 	// Fail fast when a secure environment would deliver mail to Mailpit or the

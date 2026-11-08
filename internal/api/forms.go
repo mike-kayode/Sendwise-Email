@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	htmltemplate "html/template"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -1074,38 +1073,14 @@ func (s *Server) sendFormConfirmation(ctx context.Context, to, formName, confirm
 	return s.formConfirmationSender(ctx, to, formName, confirmURL)
 }
 
+// sendFormConfirmationEmail sends the double-opt-in confirmation over the
+// platform SMTP relay (Stalwart).
 func sendFormConfirmationEmail(ctx context.Context, cfg config.Config, to, formName, confirmURL string) error {
-	if cfg.ResendAPIKey == "" || cfg.ResendFromEmail == "" {
-		return errors.New("Resend API key and sender email are required for double opt-in")
-	}
 	var body bytes.Buffer
 	if err := htmltemplate.Must(htmltemplate.New("confirmation").Parse(
 		`<p>You requested to join the mailing list for {{.FormName}}.</p><p><a href="{{.URL}}">Confirm subscription</a></p><p>If you did not request this, you can ignore this message.</p>`,
 	)).Execute(&body, map[string]string{"FormName": formName, "URL": confirmURL}); err != nil {
 		return fmt.Errorf("render form confirmation: %w", err)
 	}
-	payload, err := json.Marshal(map[string]any{
-		"from": fmt.Sprintf("%s <%s>", cfg.ResendFromName, cfg.ResendFromEmail),
-		"to":   []string{to}, "subject": "Confirm your subscription", "html": body.String(),
-	})
-	if err != nil {
-		return fmt.Errorf("encode form confirmation email: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("create form confirmation request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.ResendAPIKey)
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 10 * time.Second}
-	response, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("send form confirmation email: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("email provider returned status %d", response.StatusCode)
-	}
-	return nil
+	return sendPlatformSMTP(ctx, cfg, to, "Confirm your subscription", body.String())
 }

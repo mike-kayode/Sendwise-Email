@@ -133,23 +133,19 @@ func LoadDKIMConfig(ctx context.Context, pool *pgxpool.Pool, organizationID, fro
 
 	var config DKIMConfig
 	var encryptedPrivateKey string
-	var provider string
 	err = pool.QueryRow(ctx, `
 		SELECT lower(domain), dkim_selector, COALESCE(dkim_public_key, ''),
-		       COALESCE(dkim_private_key, ''), provider
+		       COALESCE(dkim_private_key, '')
 		FROM sending_domains
 		WHERE organization_id = $1 AND lower(domain) = $2
 	`, organizationID, senderDomain).Scan(
-		&config.Domain, &config.Selector, &config.PublicKey, &encryptedPrivateKey, &provider,
+		&config.Domain, &config.Selector, &config.PublicKey, &encryptedPrivateKey,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load sending domain dkim key: %w", err)
-	}
-	if provider == ProviderResend {
-		return nil, nil
 	}
 	if config.Domain == "" || config.Selector == "" || config.PublicKey == "" {
 		return nil, fmt.Errorf("sending domain %q has incomplete dkim configuration", senderDomain)

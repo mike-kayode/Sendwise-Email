@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"net/mail"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -14,57 +13,50 @@ import (
 )
 
 type Config struct {
-	Env                     string
-	HTTPAddr                string
-	WorkerMetricsAddr       string
-	AppBaseURL              string
-	APIBaseURL              string
-	TrackingBaseURL         string
-	DatabaseURL             string
-	RedisURL                string
-	NATSURL                 string
-	MigrationsDir           string
-	AutoMigrate             bool
-	JWTSecret               string
-	JWTIssuer               string
-	IdentityURL             string
-	ServiceToken            string
-	AccessTokenTTL          time.Duration
-	SMTPAddr                string
-	SMTPHost                string
-	SMTPUsername            string
-	SMTPPassword            string
-	SMTPFrom                string
-	DKIMSelector            string
-	DKIMEncryptionKey       string
-	SPFInclude              string
-	DNSResolverAddr         string
-	DNSResolverTimeout      time.Duration
-	SendingRate             int
-	MaxDeliveryAttempts     int
-	SchedulerInterval       time.Duration
-	MaxMessageAge           time.Duration
-	MaxDailyEmails          int
-	WarmupStartPerDay       int
-	WarmupGrowthFactor      float64
-	MaxBounceRate           float64
-	MaxComplaintRate        float64
-	DomainConcurrencyLimit  int
-	RecipientDomainRates    map[string]int
-	RecipientDomainDefault  int
-	CORSOrigins             []string
-	RequireVerifiedDomain   bool
-	MailProvider            string
-	ResendAPIKey            string
-	ResendFromEmail         string
-	ResendFromName          string
-	PlatformFromEmail       string
-	PlatformResendAPIKey    string
-	ResendWebhookSecret     string
-	ResendRequestsPerSecond int
-	ResendAPIBaseURL        string
-	SuperAdminEmails        []string
-	WebhookSecret           string
+	Env                    string
+	HTTPAddr               string
+	WorkerMetricsAddr      string
+	AppBaseURL             string
+	APIBaseURL             string
+	TrackingBaseURL        string
+	DatabaseURL            string
+	RedisURL               string
+	NATSURL                string
+	MigrationsDir          string
+	AutoMigrate            bool
+	JWTSecret              string
+	JWTIssuer              string
+	IdentityURL            string
+	ServiceToken           string
+	AccessTokenTTL         time.Duration
+	SMTPAddr               string
+	SMTPHost               string
+	SMTPUsername           string
+	SMTPPassword           string
+	SMTPFrom               string
+	DKIMSelector           string
+	DKIMEncryptionKey      string
+	SPFInclude             string
+	DNSResolverAddr        string
+	DNSResolverTimeout     time.Duration
+	SendingRate            int
+	MaxDeliveryAttempts    int
+	SchedulerInterval      time.Duration
+	MaxMessageAge          time.Duration
+	MaxDailyEmails         int
+	WarmupStartPerDay      int
+	WarmupGrowthFactor     float64
+	MaxBounceRate          float64
+	MaxComplaintRate       float64
+	DomainConcurrencyLimit int
+	RecipientDomainRates   map[string]int
+	RecipientDomainDefault int
+	CORSOrigins            []string
+	RequireVerifiedDomain  bool
+	MailProvider           string
+	PlatformFromEmail      string
+	SuperAdminEmails       []string
+	WebhookSecret          string
 }
 
 func Load() (Config, error) {
@@ -93,10 +85,6 @@ func load(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	maxDeliveryAttempts, err := getenvInt(lookup, "MAX_DELIVERY_ATTEMPTS", 5)
-	if err != nil {
-		return Config{}, err
-	}
-	resendRequestsPerSecond, err := getenvInt(lookup, "RESEND_REQUESTS_PER_SECOND", 8)
 	if err != nil {
 		return Config{}, err
 	}
@@ -147,80 +135,61 @@ func load(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
-	resendAPIKey := getenv(lookup, "RESEND_API_KEY", "")
-	resendAPIBaseURL := strings.TrimRight(strings.TrimSpace(getenv(lookup, "RESEND_API_BASE_URL", "https://api.resend.com")), "/")
-	parsedResendURL, err := url.ParseRequestURI(resendAPIBaseURL)
-	if err != nil || parsedResendURL.Host == "" || parsedResendURL.Scheme != "https" && secureEnv {
-		return Config{}, fmt.Errorf("RESEND_API_BASE_URL must be an HTTPS URL in staging and production")
-	}
-	if parsedResendURL.Scheme != "https" && parsedResendURL.Scheme != "http" {
-		return Config{}, fmt.Errorf("RESEND_API_BASE_URL must use HTTP or HTTPS")
-	}
-	resendFromEmail := getenv(lookup, "RESEND_FROM_EMAIL", "activate@pipsleague.com")
-	resendFromName := getenv(lookup, "RESEND_FROM_NAME", "Sendwise")
 	superAdminEmails := splitCSV(getenv(lookup, "SUPER_ADMIN_EMAILS", ""))
 	webhookSecret := getenv(lookup, "WEBHOOK_SECRET", "")
-	resendWebhookSecret := getenv(lookup, "RESEND_WEBHOOK_SECRET", "")
 	platformFromEmail := getenv(lookup, "PLATFORM_FROM_EMAIL", getenv(lookup, "SMTP_FROM", "hello@pipsleague.com"))
 
 	cfg := Config{
-		Env:                     env,
-		HTTPAddr:                getenv(lookup, "HTTP_ADDR", ":8080"),
-		WorkerMetricsAddr:       getenv(lookup, "WORKER_METRICS_ADDR", ":9091"),
-		AppBaseURL:              getenv(lookup, "APP_BASE_URL", "http://localhost:3000"),
-		APIBaseURL:              getenv(lookup, "API_BASE_URL", "http://localhost:8080"),
-		TrackingBaseURL:         getenv(lookup, "TRACKING_BASE_URL", "http://localhost:8080"),
-		DatabaseURL:             getenv(lookup, "DATABASE_URL", "postgres://email:email@localhost:5432/email?sslmode=disable"),
-		RedisURL:                getenv(lookup, "REDIS_URL", "redis://localhost:6379/0"),
-		NATSURL:                 getenv(lookup, "NATS_URL", "nats://localhost:4222"),
-		MigrationsDir:           getenv(lookup, "MIGRATIONS_DIR", "./migrations"),
-		AutoMigrate:             autoMigrate,
-		JWTSecret:               getenv(lookup, "JWT_SECRET", ""),
-		JWTIssuer:               getenv(lookup, "JWT_ISSUER", "email-platform"),
-		IdentityURL:             strings.TrimRight(getenv(lookup, "IDENTITY_URL", ""), "/"),
-		ServiceToken:            strings.TrimSpace(getenv(lookup, "SERVICE_TOKEN", "")),
-		AccessTokenTTL:          accessTokenTTL,
-		SMTPAddr:                getenv(lookup, "SMTP_ADDR", "localhost:587"),
-		SMTPHost:                getenv(lookup, "SMTP_HOST", "localhost"),
-		SMTPUsername:            getenv(lookup, "SMTP_USERNAME", ""),
-		SMTPPassword:            getenv(lookup, "SMTP_PASSWORD", ""),
-		SMTPFrom:                getenv(lookup, "SMTP_FROM", "newsletter@example.com"),
-		DKIMSelector:            getenv(lookup, "DKIM_SELECTOR", "mail"),
-		DKIMEncryptionKey:       getenv(lookup, "DKIM_ENCRYPTION_KEY", ""),
-		SPFInclude:              strings.TrimSpace(getenv(lookup, "SPF_INCLUDE", "")),
-		DNSResolverAddr:         getenv(lookup, "DNS_RESOLVER_ADDR", ""),
-		DNSResolverTimeout:      dnsResolverTimeout,
-		SendingRate:             sendingRate,
-		MaxDeliveryAttempts:     maxDeliveryAttempts,
-		SchedulerInterval:       schedulerInterval,
-		MaxMessageAge:           maxMessageAge,
-		MaxDailyEmails:          maxDailyEmails,
-		WarmupStartPerDay:       warmupStartPerDay,
-		WarmupGrowthFactor:      warmupGrowthFactor,
-		MaxBounceRate:           maxBounceRate,
-		MaxComplaintRate:        maxComplaintRate,
-		DomainConcurrencyLimit:  domainConcurrencyLimit,
-		RecipientDomainRates:    recipientDomainRates,
-		RecipientDomainDefault:  recipientDomainDefault,
-		CORSOrigins:             splitCSV(getenv(lookup, "CORS_ORIGINS", "http://localhost:3000")),
-		RequireVerifiedDomain:   requireVerifiedDomain,
-		MailProvider:            strings.ToLower(strings.TrimSpace(getenv(lookup, "MAIL_PROVIDER", "auto"))),
-		ResendAPIKey:            resendAPIKey,
-		ResendFromEmail:         resendFromEmail,
-		ResendFromName:          resendFromName,
-		PlatformFromEmail:       platformFromEmail,
-		PlatformResendAPIKey:    getenv(lookup, "PLATFORM_RESEND_API_KEY", ""),
-		ResendWebhookSecret:     resendWebhookSecret,
-		ResendRequestsPerSecond: resendRequestsPerSecond,
-		ResendAPIBaseURL:        resendAPIBaseURL,
-		SuperAdminEmails:        superAdminEmails,
-		WebhookSecret:           webhookSecret,
+		Env:                    env,
+		HTTPAddr:               getenv(lookup, "HTTP_ADDR", ":8080"),
+		WorkerMetricsAddr:      getenv(lookup, "WORKER_METRICS_ADDR", ":9091"),
+		AppBaseURL:             getenv(lookup, "APP_BASE_URL", "http://localhost:3000"),
+		APIBaseURL:             getenv(lookup, "API_BASE_URL", "http://localhost:8080"),
+		TrackingBaseURL:        getenv(lookup, "TRACKING_BASE_URL", "http://localhost:8080"),
+		DatabaseURL:            getenv(lookup, "DATABASE_URL", "postgres://email:email@localhost:5432/email?sslmode=disable"),
+		RedisURL:               getenv(lookup, "REDIS_URL", "redis://localhost:6379/0"),
+		NATSURL:                getenv(lookup, "NATS_URL", "nats://localhost:4222"),
+		MigrationsDir:          getenv(lookup, "MIGRATIONS_DIR", "./migrations"),
+		AutoMigrate:            autoMigrate,
+		JWTSecret:              getenv(lookup, "JWT_SECRET", ""),
+		JWTIssuer:              getenv(lookup, "JWT_ISSUER", "email-platform"),
+		IdentityURL:            strings.TrimRight(getenv(lookup, "IDENTITY_URL", ""), "/"),
+		ServiceToken:           strings.TrimSpace(getenv(lookup, "SERVICE_TOKEN", "")),
+		AccessTokenTTL:         accessTokenTTL,
+		SMTPAddr:               getenv(lookup, "SMTP_ADDR", "localhost:587"),
+		SMTPHost:               getenv(lookup, "SMTP_HOST", "localhost"),
+		SMTPUsername:           getenv(lookup, "SMTP_USERNAME", ""),
+		SMTPPassword:           getenv(lookup, "SMTP_PASSWORD", ""),
+		SMTPFrom:               getenv(lookup, "SMTP_FROM", "newsletter@example.com"),
+		DKIMSelector:           getenv(lookup, "DKIM_SELECTOR", "mail"),
+		DKIMEncryptionKey:      getenv(lookup, "DKIM_ENCRYPTION_KEY", ""),
+		SPFInclude:             strings.TrimSpace(getenv(lookup, "SPF_INCLUDE", "")),
+		DNSResolverAddr:        getenv(lookup, "DNS_RESOLVER_ADDR", ""),
+		DNSResolverTimeout:     dnsResolverTimeout,
+		SendingRate:            sendingRate,
+		MaxDeliveryAttempts:    maxDeliveryAttempts,
+		SchedulerInterval:      schedulerInterval,
+		MaxMessageAge:          maxMessageAge,
+		MaxDailyEmails:         maxDailyEmails,
+		WarmupStartPerDay:      warmupStartPerDay,
+		WarmupGrowthFactor:     warmupGrowthFactor,
+		MaxBounceRate:          maxBounceRate,
+		MaxComplaintRate:       maxComplaintRate,
+		DomainConcurrencyLimit: domainConcurrencyLimit,
+		RecipientDomainRates:   recipientDomainRates,
+		RecipientDomainDefault: recipientDomainDefault,
+		CORSOrigins:            splitCSV(getenv(lookup, "CORS_ORIGINS", "http://localhost:3000")),
+		RequireVerifiedDomain:  requireVerifiedDomain,
+		MailProvider:           strings.ToLower(strings.TrimSpace(getenv(lookup, "MAIL_PROVIDER", "auto"))),
+		PlatformFromEmail:      platformFromEmail,
+		SuperAdminEmails:       superAdminEmails,
+		WebhookSecret:          webhookSecret,
 	}
 
 	switch cfg.MailProvider {
-	case "auto", "smtp", "resend", "log":
+	case "auto", "smtp", "log":
 	default:
-		return cfg, fmt.Errorf("MAIL_PROVIDER must be auto, smtp, resend, or log, got %q", cfg.MailProvider)
+		return cfg, fmt.Errorf("MAIL_PROVIDER must be auto, smtp, or log, got %q", cfg.MailProvider)
 	}
 
 	if cfg.JWTSecret == "" {
@@ -254,18 +223,12 @@ func load(lookup func(string) string) (Config, error) {
 		if cfg.WebhookSecret == "" {
 			return cfg, fmt.Errorf("WEBHOOK_SECRET is required in staging and production")
 		}
-		if cfg.ResendWebhookSecret == "" {
-			return cfg, fmt.Errorf("RESEND_WEBHOOK_SECRET is required in staging and production")
-		}
 	}
 	if cfg.AccessTokenTTL <= 0 || (secureEnv && cfg.AccessTokenTTL > time.Hour) {
 		return cfg, fmt.Errorf("ACCESS_TOKEN_TTL must be positive and no longer than 1h in staging and production")
 	}
 	if cfg.SendingRate < 1 {
 		return cfg, fmt.Errorf("SENDING_RATE_PER_SECOND must be at least 1")
-	}
-	if cfg.ResendRequestsPerSecond < 1 {
-		return cfg, fmt.Errorf("RESEND_REQUESTS_PER_SECOND must be at least 1")
 	}
 	if cfg.MaxDeliveryAttempts < 1 {
 		return cfg, fmt.Errorf("MAX_DELIVERY_ATTEMPTS must be at least 1")
