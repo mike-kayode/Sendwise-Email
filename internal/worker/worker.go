@@ -208,6 +208,19 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		return 0, w.cancelPendingJob(ctx, row, "suppressed")
 	}
 
+	var ownerConflict bool
+	if err := w.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM sending_domains
+			WHERE organization_id = $1 AND lower(domain) = lower($2) AND owner_conflict
+		)
+	`, row.OrganizationID, domainOf(row.SenderEmail)).Scan(&ownerConflict); err != nil {
+		return 0, fmt.Errorf("check sending-domain ownership: %w", err)
+	}
+	if ownerConflict {
+		return 0, w.failJob(ctx, row, fmt.Errorf("sending domain %q is already owned by another workspace", domainOf(row.SenderEmail)))
+	}
+
 	if w.cfg.RequireVerifiedDomain {
 		senderDomain := domainOf(row.SenderEmail)
 		var verified bool

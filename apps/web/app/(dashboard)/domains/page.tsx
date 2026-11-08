@@ -49,8 +49,9 @@ export default function DomainsPage() {
       return Object.fromEntries(entries);
     },
   });
-  const unverified = domains.filter((d) => d.status !== "verified");
-  const verifiedCount = domains.length - unverified.length;
+  const unverified = domains.filter((d) => d.status !== "verified" && !d.owner_conflict);
+  const needsAttention = domains.filter((d) => d.status !== "verified" || d.owner_conflict);
+  const verifiedCount = domains.length - needsAttention.length;
   const selectedDomain = domains.find((d) => d.id === selectedDomainId) ?? null;
   const domainsForTable = selectedDomain ? [selectedDomain] : domains;
 
@@ -116,7 +117,7 @@ export default function DomainsPage() {
   };
 
   const handleReviewRecords = () => {
-    const target = unverified[0] ?? domains[0];
+    const target = unverified[0] ?? domains.find((domain) => domain.owner_conflict) ?? domains[0];
     if (target) setSelectedDomainId(target.id);
     dnsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
@@ -174,7 +175,7 @@ export default function DomainsPage() {
         }
       />
 
-      {domains.length === 0 ? null : unverified.length === 0 ? (
+      {domains.length === 0 ? null : needsAttention.length === 0 ? (
         <div className="mb-5 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
           <Send className="h-4 w-4 shrink-0" />
           <span>
@@ -188,7 +189,7 @@ export default function DomainsPage() {
             <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
             <span>
               <span className="font-medium">
-                {unverified.length} of {domains.length} domain(s) need attention.
+                {needsAttention.length} of {domains.length} domain(s) need attention.
               </span>{" "}
               Unverified domains hurt deliverability and may block sending.
             </span>
@@ -211,7 +212,7 @@ export default function DomainsPage() {
           </div>
         ) : (
           domains.map((domain) => {
-            const isReady = domain.status === "verified";
+            const isReady = domain.status === "verified" && !domain.owner_conflict;
             const isSelected = selectedDomainId === domain.id;
             return (
               <Card
@@ -228,7 +229,9 @@ export default function DomainsPage() {
                     >
                       <Globe className="h-4 w-4" />
                     </span>
-                    {isReady ? (
+                    {domain.owner_conflict ? (
+                      <Badge variant="danger">Ownership conflict</Badge>
+                    ) : isReady ? (
                       <Badge variant="success">
                         <CheckCircle2 className="mr-1 h-3 w-3" /> Ready to send
                       </Badge>
@@ -243,7 +246,11 @@ export default function DomainsPage() {
                     {domain.last_checked_at
                       ? `Checked ${formatDateTime(domain.last_checked_at)}`
                       : "Never checked"}{" "}
-                    · <StatusBadge status={domain.status} />
+                    · {domain.owner_conflict ? (
+                      <Badge variant="danger">Domain already owned by another workspace</Badge>
+                    ) : (
+                      <StatusBadge status={domain.status} />
+                    )}
                   </p>
 
                   <div className="mt-4 grid grid-cols-3 gap-2 border-t border-slate-100 pt-3 text-xs">

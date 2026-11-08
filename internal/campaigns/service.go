@@ -21,6 +21,7 @@ var (
 	ErrSegmentNotFound  = errors.New("campaign segment not found")
 	ErrInvalidSegment   = errors.New("campaign segment rules are invalid")
 	ErrDomainUnverified = errors.New("sending domain is not verified")
+	ErrDomainConflict   = errors.New("sending domain is owned by another workspace")
 	ErrInvalidSender    = errors.New("campaign sender email is invalid")
 	ErrPostalAddress    = errors.New("campaign sender postal address is required")
 )
@@ -183,24 +184,28 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 		}
 	}
 	senderEmail = normalizedSender
-	if s.requireVerifiedDomain && senderEmail != "" {
+	if senderEmail != "" {
 		domain := domainOf(senderEmail)
 		if domain == "" {
-			return 0, ErrDomainUnverified
-		}
-		var stalwartAuthenticated bool
-		err := tx.QueryRow(ctx, `
-			SELECT stalwart_authenticated FROM sending_domains
-			WHERE domain = $1 AND organization_id = $2
-		`, domain, organizationID).Scan(&stalwartAuthenticated)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, ErrDomainUnverified
-		}
-		if err != nil {
-			return 0, fmt.Errorf("check sending domain: %w", err)
-		}
-		if !stalwartAuthenticated {
-			return 0, ErrDomainUnverified
+			if s.requireVerifiedDomain {
+				return 0, ErrDomainUnverified
+			}
+		} else {
+			var ownerConflict, stalwartAuthenticated bool
+			err := tx.QueryRow(ctx, `
+				SELECT owner_conflict, stalwart_authenticated
+				FROM sending_domains
+				WHERE lower(domain) = $1 AND organization_id = $2
+			`, domain, organizationID).Scan(&ownerConflict, &stalwartAuthenticated)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return 0, fmt.Errorf("check sending domain: %w", err)
+			}
+			if err == nil && ownerConflict {
+				return 0, ErrDomainConflict
+			}
+			if s.requireVerifiedDomain && (errors.Is(err, pgx.ErrNoRows) || !stalwartAuthenticated) {
+				return 0, ErrDomainUnverified
+			}
 		}
 	}
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khayode/email-platform/internal/auth"
+	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/config"
 	"github.com/khayode/email-platform/internal/db"
 	"github.com/khayode/email-platform/internal/kit"
@@ -444,6 +446,70 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 }
 
+func TestConflictedSendingDomainCannotValidateOrSendCampaign(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	s := newIntegrationServer(t)
+	registered := registerIntegrationUser(
+		t, s, "domain-conflict@example.com", "domain-conflict-password", "Conflict Owner", "Conflict Org",
+	)
+	s.campaigns = campaigns.NewService(integrationPool, nil, s.logger, 3, false)
+	domain := "owned-" + strings.ReplaceAll(uuid.NewString(), "-", "") + ".example"
+	if _, err := integrationPool.Exec(context.Background(), `
+		INSERT INTO sending_domains (
+			organization_id, domain, status, dkim_selector, dkim_public_key,
+			spf_status, dkim_status, dmarc_status, verification_status,
+			stalwart_authenticated, owner_conflict
+		) VALUES ($1, $2, 'verified', 'mail', 'public-key',
+		          'verified', 'verified', 'verified', 'verified', true, true)
+	`, registered.Organization.ID, domain); err != nil {
+		t.Fatalf("insert conflicted sending domain: %v", err)
+	}
+
+	createBody := fmt.Sprintf(`{
+		"name":"Ownership conflict test",
+		"subject":"Conflict",
+		"sender_name":"Test Sender",
+		"sender_email":"news@%s",
+		"sender_postal_address":"123 Test Street",
+		"content":{"version":1,"blocks":[{"type":"paragraph","content":"Hello"}]}
+	}`, domain)
+	w := doRequest(t, s, http.MethodPost, "/api/v1/campaigns", createBody, registered.AccessToken)
+	assertStatus(t, w, http.StatusCreated)
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode conflict campaign: %v", err)
+	}
+
+	w = doRequest(t, s, http.MethodPost, "/api/v1/campaigns/"+created.ID+"/validate", "", registered.AccessToken)
+	assertStatus(t, w, http.StatusOK)
+	var validation struct {
+		Checks []validationCheck `json:"checks"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &validation); err != nil {
+		t.Fatalf("decode conflict campaign validation: %v", err)
+	}
+	foundConflict := false
+	for _, check := range validation.Checks {
+		if check.Name == "sending_domain" && check.Status == "error" &&
+			check.Message == "Domain already owned by another workspace." {
+			foundConflict = true
+		}
+	}
+	if !foundConflict {
+		t.Fatalf("validation did not reject conflicted domain: %s", w.Body.String())
+	}
+
+	w = doRequest(t, s, http.MethodPost, "/api/v1/campaigns/"+created.ID+"/send", "", registered.AccessToken)
+	assertStatus(t, w, http.StatusBadRequest)
+	if !strings.Contains(w.Body.String(), "Domain already owned by another workspace.") {
+		t.Fatalf("send response did not explain domain conflict: %s", w.Body.String())
+	}
+}
+
 func TestReputationThresholdPausesCampaignIntegration(t *testing.T) {
 	if integrationPool == nil {
 		t.Skip("no database available")
@@ -601,6 +667,7 @@ func TestDomainsIntegration(t *testing.T) {
 	nullKeyDomain := "null-key-smoke-" + suffix + ".example.com"
 	emptyKeyDomain := "empty-key-smoke-" + suffix + ".example.com"
 	verifiedDomain := "verified-smoke-" + suffix + ".example.com"
+	conflictedDomain := "conflicted-smoke-" + suffix + ".example.com"
 	_, err := integrationPool.Exec(context.Background(), `
 		INSERT INTO sending_domains (
 			organization_id, domain, status, dkim_selector, dkim_public_key,
@@ -613,6 +680,16 @@ func TestDomainsIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert sending domain shape rows: %v", err)
 	}
+	if _, err := integrationPool.Exec(context.Background(), `
+		INSERT INTO sending_domains (
+			organization_id, domain, status, dkim_selector, dkim_public_key,
+			spf_status, dkim_status, dmarc_status, verification_status,
+			stalwart_authenticated, owner_conflict
+		) VALUES ($1, $2, 'verified', 'mail', 'public-key',
+		          'verified', 'verified', 'verified', 'verified', true, true)
+	`, orgID, conflictedDomain); err != nil {
+		t.Fatalf("insert conflicted sending domain: %v", err)
+	}
 
 	w := doRequest(t, s, "GET", "/api/v1/domains", "", token)
 	assertStatus(t, w, http.StatusOK)
@@ -620,6 +697,7 @@ func TestDomainsIntegration(t *testing.T) {
 		Data []struct {
 			Domain             string     `json:"domain"`
 			Status             string     `json:"status"`
+			OwnerConflict      bool       `json:"owner_conflict"`
 			DKIMPublicKey      string     `json:"dkim_public_key"`
 			SPFStatus          string     `json:"spf_status"`
 			DKIMStatus         string     `json:"dkim_status"`
@@ -635,6 +713,7 @@ func TestDomainsIntegration(t *testing.T) {
 	foundEmptyKey := false
 	foundMisconfigured := false
 	foundVerified := false
+	foundConflict := false
 	for _, d := range listResp.Data {
 		if d.Domain == nullKeyDomain {
 			foundNullKey = true
@@ -653,12 +732,15 @@ func TestDomainsIntegration(t *testing.T) {
 				d.LastCheckedAt == nil && d.SPFStatus == "verified" &&
 				d.DKIMStatus == "verified" && d.DMARCStatus == "verified"
 		}
+		if d.Domain == conflictedDomain {
+			foundConflict = d.Status == "verified" && d.OwnerConflict
+		}
 	}
 	if !foundNullKey {
 		t.Fatalf("expected %s in domain list", nullKeyDomain)
 	}
-	if !foundEmptyKey || !foundMisconfigured || !foundVerified {
-		t.Fatalf("expected empty-key/misconfigured and verified rows in domain list; got %+v", listResp.Data)
+	if !foundEmptyKey || !foundMisconfigured || !foundVerified || !foundConflict {
+		t.Fatalf("expected empty-key/misconfigured, verified, and ownership-conflict rows in domain list; got %+v", listResp.Data)
 	}
 
 	w = doRequest(t, s, "GET", "/api/v1/domains/"+mustDomainID(t, orgID, nullKeyDomain)+"/dns-records", "", token)

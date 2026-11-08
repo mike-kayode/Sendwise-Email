@@ -24,7 +24,7 @@ var domainPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+
 const domainColumns = `
 	id, domain, status, dkim_selector, COALESCE(dkim_public_key, '') AS dkim_public_key, verification_token,
 	spf_status, dkim_status, dmarc_status, verification_status, last_checked_at, verified_at, created_at,
-	stalwart_authenticated, warmup_profile
+	owner_conflict, stalwart_authenticated, warmup_profile
 `
 
 type sendingDomain struct {
@@ -41,6 +41,7 @@ type sendingDomain struct {
 	LastCheckedAt         *time.Time `json:"last_checked_at"`
 	VerifiedAt            *time.Time `json:"verified_at"`
 	CreatedAt             time.Time  `json:"created_at"`
+	OwnerConflict         bool       `json:"owner_conflict"`
 	StalwartAuthenticated bool       `json:"stalwart_authenticated"`
 	WarmupProfile         string     `json:"warmup_profile"`
 }
@@ -50,7 +51,8 @@ func scanDomain(row pgx.Row) (*sendingDomain, error) {
 	if err := row.Scan(
 		&d.ID, &d.Domain, &d.Status, &d.DKIMSelector, &d.DKIMPublicKey, &d.VerificationToken,
 		&d.SPFStatus, &d.DKIMStatus, &d.DMARCStatus, &d.VerificationStatus,
-		&d.LastCheckedAt, &d.VerifiedAt, &d.CreatedAt, &d.StalwartAuthenticated, &d.WarmupProfile,
+		&d.LastCheckedAt, &d.VerifiedAt, &d.CreatedAt, &d.OwnerConflict,
+		&d.StalwartAuthenticated, &d.WarmupProfile,
 	); err != nil {
 		return nil, err
 	}

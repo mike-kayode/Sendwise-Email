@@ -462,17 +462,17 @@ func (s *Server) validateCampaign(w http.ResponseWriter, r *http.Request) {
 	if senderErr != nil || senderDomain == "" {
 		add("sending_domain", "error", "Enter a valid sender email. Reserved local-parts are not allowed.")
 	} else {
-		var verified bool
-		if err := s.pool.QueryRow(r.Context(), `
-			SELECT EXISTS (
-				SELECT 1
-				FROM sending_domains d
-				WHERE d.organization_id = $1 AND lower(d.domain) = $2
-				  AND d.stalwart_authenticated
-			)
-		`, s.organizationID(r), senderDomain).Scan(&verified); err != nil {
+		var ownerConflict, verified bool
+		err := s.pool.QueryRow(r.Context(), `
+			SELECT owner_conflict, stalwart_authenticated
+			FROM sending_domains
+			WHERE organization_id = $1 AND lower(domain) = $2
+		`, s.organizationID(r), senderDomain).Scan(&ownerConflict, &verified)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			add("sending_domain", "error", "Could not check sending domain verification.")
-		} else if verified {
+		} else if err == nil && ownerConflict {
+			add("sending_domain", "error", "Domain already owned by another workspace.")
+		} else if err == nil && verified {
 			add("sending_domain", "pass", "Sending domain is verified.")
 		} else if s.cfg.RequireVerifiedDomain {
 			add("sending_domain", "error", "Verify the sending domain before sending.")
@@ -781,6 +781,8 @@ func (s *Server) writeQueueError(w http.ResponseWriter, err error) {
 		httpx.Error(w, http.StatusBadRequest, "invalid_sender_email", "Enter a valid sender email and use a non-reserved local-part.")
 	case errors.Is(err, campaigns.ErrDomainUnverified):
 		httpx.Error(w, http.StatusBadRequest, "sending_domain_unverified", "Verify the sender domain with Stalwart before sending.")
+	case errors.Is(err, campaigns.ErrDomainConflict):
+		httpx.Error(w, http.StatusBadRequest, "sending_domain_conflict", "Domain already owned by another workspace.")
 	case errors.Is(err, campaigns.ErrPostalAddress):
 		httpx.Error(w, http.StatusBadRequest, "postal_address_required", "Add the sender's postal address before sending.")
 	case errors.Is(err, campaigns.ErrNotFound):

@@ -214,6 +214,7 @@ export type SendingDomain = {
   id: string;
   domain: string;
   status: string;
+  owner_conflict?: boolean;
   stalwart_authenticated?: boolean;
   dkim_selector?: string;
   spf_status?: string;

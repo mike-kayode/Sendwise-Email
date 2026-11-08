@@ -84,6 +84,20 @@ function seedMisconfiguredDomain(organizationID: string, stamp: number): void {
   `);
 }
 
+function seedConflictedDomain(organizationID: string, stamp: number): void {
+  runLocalSQL(`
+    INSERT INTO sending_domains (
+      organization_id, domain, status, dkim_selector, dkim_public_key,
+      spf_status, dkim_status, dmarc_status, verification_status,
+      stalwart_authenticated, owner_conflict, last_checked_at, verified_at
+    ) VALUES (
+      '${organizationID}', 'conflicted-${stamp}.example.test',
+      'verified', 'mail', '', 'verified', 'verified', 'verified', 'verified',
+      true, true, now(), now()
+    )
+  `);
+}
+
 test("sending domains load from the real API without browser errors", async ({
   page,
   request,
@@ -167,6 +181,16 @@ test("sending domains load from the real API without browser errors", async ({
   await expect(page.getByText("misconfigured", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("mismatched", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("missing", { exact: true }).first()).toBeVisible();
+
+  seedConflictedDomain(claims.org!, stamp);
+  await page.reload();
+  await expect(
+    page.getByText(`conflicted-${stamp}.example.test`, { exact: true }).first(),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Domain already owned by another workspace", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Ownership conflict", { exact: true })).toBeVisible();
 
   expect(pageErrors, pageErrors.join("\n")).toEqual([]);
   expect(consoleErrors, consoleErrors.join("\n")).toEqual([]);
