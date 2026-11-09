@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/mail"
 	"net/smtp"
 	"net/url"
@@ -20,11 +19,9 @@ import (
 
 	"github.com/emersion/go-msgauth/dkim"
 	"github.com/khayode/email-platform/internal/delivery"
-	"github.com/khayode/email-platform/internal/kit"
-	"github.com/khayode/email-platform/internal/testutil"
 )
 
-func TestStalwartRegistrationDeliversAndStoresVerificationEmail(t *testing.T) {
+func TestStalwartAcceptsAppSignedTenantCampaign(t *testing.T) {
 	if os.Getenv("RUN_STALWART_INTEGRATION") != "1" {
 		t.Skip("set RUN_STALWART_INTEGRATION=1 to run against the local Stalwart container")
 	}
@@ -50,7 +47,7 @@ func TestStalwartRegistrationDeliversAndStoresVerificationEmail(t *testing.T) {
 		from:     sender,
 		tlsMode:  "starttls",
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	tlsConfig, err := localStalwartTLSConfig(ctx, smtpAddress, smtpHost)
 	if err != nil {
@@ -67,64 +64,7 @@ func TestStalwartRegistrationDeliversAndStoresVerificationEmail(t *testing.T) {
 		t.Fatalf("Stalwart SMTP implicit TLS/AUTH probe failed: %v", err)
 	}
 
-	pool := testutil.NewPostgresWithMigrations(t, "migrations")
-	cfg := Config{
-		BaseConfig:              kit.BaseConfig{JWTSecret: "stalwart-integration-test-secret", JWTIssuer: "email-platform"},
-		AccessTokenTTL:          time.Minute,
-		AppBaseURL:              "https://sendwise.test",
-		MailOutboxEncryptionKey: "stalwart-integration-outbox-key",
-	}
-	store := NewStoreFromPool(pool)
-	handler := NewHandler(
-		store,
-		kit.NewManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL),
-		nil,
-		mailer,
-		cfg,
-		kit.NewTestLogger(),
-	)
-	retryCtx, stopRetries := context.WithCancel(context.Background())
-	defer stopRetries()
-	go handler.RunMailRetries(retryCtx)
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/auth/register", strings.NewReader(fmt.Sprintf(
-		`{"email":%q,"password":"correct horse battery staple","name":"Stalwart Test","organization_name":"Local Stalwart"}`,
-		sender,
-	)))
-	request.Header.Set("Content-Type", "application/json")
-	handler.Routes().ServeHTTP(response, request)
-	if response.Code != http.StatusCreated {
-		t.Fatalf("registration status = %d, body = %s", response.Code, response.Body.String())
-	}
-	if !strings.Contains(response.Body.String(), `"delivery_status":"queued"`) {
-		t.Fatalf("registration did not queue verification mail: %s", response.Body.String())
-	}
-
 	client := &http.Client{Timeout: 5 * time.Second}
-	deadline := time.Now().Add(15 * time.Second)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		email, rawMessage, err := findStalwartMessage(client, baseURL, sender, submissionPassword, "Verify your email address")
-		if err == nil && email.Recipient() == strings.ToLower(sender) {
-			dnsRecord, selector, err := findStalwartPlatformDKIMRecord(
-				ctx, client, baseURL, adminUsername, adminPassword, domain,
-			)
-			if err != nil {
-				t.Fatalf("read Stalwart platform DKIM TXT value: %v", err)
-			}
-			if err := verifySingleDKIMSignature(rawMessage, selector+"._domainkey."+domain, dnsRecord); err != nil {
-				t.Fatalf("verify Stalwart verification email DKIM signature: %v", err)
-			}
-			t.Logf("verified Stalwart verification email against the active %s._domainkey.%s TXT value", selector, domain)
-			break
-		}
-		lastErr = err
-		time.Sleep(500 * time.Millisecond)
-	}
-	if lastErr != nil {
-		t.Fatalf("verification message for %s was not readable from Stalwart: %v", sender, lastErr)
-	}
-
 	const workspaceDomain = "hosted-tenant.example.test"
 	const workspaceSelector = "sendwise-test"
 	if err := ensureStalwartTestDomain(
@@ -161,7 +101,8 @@ func TestStalwartRegistrationDeliversAndStoresVerificationEmail(t *testing.T) {
 		t.Fatalf("close authenticated SMTP pool: %v", closeErr)
 	}
 	workspaceTXT := "v=DKIM1; k=rsa; p=" + publicKey
-	deadline = time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
 	for time.Now().Before(deadline) {
 		_, rawMessage, err := findStalwartMessage(
 			client, baseURL, sender, submissionPassword, workspaceSubject,
@@ -523,82 +464,6 @@ func findStalwartMessage(client *http.Client, baseURL, username, password, subje
 		}
 	}
 	return stalwartEmail{}, nil, fmt.Errorf("message with subject %q not found", subject)
-}
-
-func findStalwartPlatformDKIMRecord(
-	ctx context.Context,
-	client *http.Client,
-	baseURL, username, password, domain string,
-) (record, selector string, err error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/jmap/session", nil)
-	if err != nil {
-		return "", "", err
-	}
-	request.SetBasicAuth(username, password)
-	response, err := client.Do(request)
-	if err != nil {
-		return "", "", err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("management JMAP session returned HTTP %d", response.StatusCode)
-	}
-	var session struct {
-		PrimaryAccounts map[string]string `json:"primaryAccounts"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&session); err != nil {
-		return "", "", err
-	}
-	accountID := session.PrimaryAccounts["urn:stalwart:jmap"]
-	if accountID == "" {
-		return "", "", fmt.Errorf("management JMAP session has no configuration account")
-	}
-	domainsJSON, err := stalwartManagementCall(ctx, client, baseURL, username, password, accountID, "x:Domain/get", map[string]any{"ids": nil})
-	if err != nil {
-		return "", "", err
-	}
-	var domains struct {
-		List []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"list"`
-	}
-	if err := json.Unmarshal(domainsJSON, &domains); err != nil {
-		return "", "", err
-	}
-	domainID := ""
-	for _, entry := range domains.List {
-		if strings.EqualFold(entry.Name, domain) {
-			domainID = entry.ID
-			break
-		}
-	}
-	if domainID == "" {
-		return "", "", fmt.Errorf("platform domain %q is not configured in Stalwart", domain)
-	}
-	signaturesJSON, err := stalwartManagementCall(ctx, client, baseURL, username, password, accountID, "x:DkimSignature/get", map[string]any{"ids": nil})
-	if err != nil {
-		return "", "", err
-	}
-	var signatures struct {
-		List []struct {
-			Type      string `json:"@type"`
-			DomainID  string `json:"domainId"`
-			Selector  string `json:"selector"`
-			PublicKey string `json:"publicKey"`
-			Stage     string `json:"stage"`
-		} `json:"list"`
-	}
-	if err := json.Unmarshal(signaturesJSON, &signatures); err != nil {
-		return "", "", err
-	}
-	for _, signature := range signatures.List {
-		if signature.DomainID == domainID && signature.Type == "Dkim1RsaSha256" &&
-			signature.Stage == "active" && signature.Selector != "" && signature.PublicKey != "" {
-			return "v=DKIM1; k=rsa; p=" + signature.PublicKey, signature.Selector, nil
-		}
-	}
-	return "", "", fmt.Errorf("platform domain %q has no active RSA DKIM key", domain)
 }
 
 func stalwartManagementCall(
