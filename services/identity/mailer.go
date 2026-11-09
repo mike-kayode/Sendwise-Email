@@ -40,7 +40,7 @@ type Mailer interface {
 
 // NewMailer selects the platform transactional transport. Production Identity
 // mail uses the dedicated platform relay configuration, never the campaign
-// SMTP settings; a configured Resend API is its fallback. Legacy SMTP settings
+// SMTP settings; a configured mail API is its fallback. Legacy SMTP settings
 // remain available to local development only.
 func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 	if logger == nil {
@@ -51,7 +51,7 @@ func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 		switch {
 		case cfg.PlatformSMTPAddr != "" && cfg.PlatformFromEmail != "":
 			provider = "smtp"
-		case cfg.PlatformResendAPIKey != "" && cfg.PlatformFromEmail != "":
+		case cfg.PlatformMailAPIKey != "" && cfg.PlatformFromEmail != "":
 			provider = "resend"
 		case cfg.Env != "production" && cfg.SMTPAddr != "" && cfg.SMTPFrom != "":
 			provider = "smtp"
@@ -75,11 +75,11 @@ func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 			addr: addr, host: host, username: username,
 			password: password, from: from, tlsMode: tlsMode,
 		}
-		if cfg.PlatformResendAPIKey != "" && cfg.PlatformFromEmail != "" {
+		if cfg.PlatformMailAPIKey != "" && cfg.PlatformFromEmail != "" {
 			return &platformMailer{
 				primary: primary,
 				fallback: &resendMailer{
-					apiKey: cfg.PlatformResendAPIKey, fromEmail: cfg.PlatformFromEmail,
+					apiKey: cfg.PlatformMailAPIKey, fromEmail: cfg.PlatformFromEmail,
 					client: &http.Client{Timeout: 10 * time.Second},
 				},
 				breaker: newMailerCircuitBreaker(5, time.Minute, 2*time.Minute),
@@ -89,7 +89,7 @@ func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 		return primary
 	case "resend":
 		return &resendMailer{
-			apiKey:    cfg.PlatformResendAPIKey,
+			apiKey:    cfg.PlatformMailAPIKey,
 			fromEmail: cfg.PlatformFromEmail,
 			client:    &http.Client{Timeout: 10 * time.Second},
 		}

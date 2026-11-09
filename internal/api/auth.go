@@ -47,6 +47,15 @@ type registerInput struct {
 	OrganizationName string `json:"organization_name"`
 }
 
+func (s *Server) legacyAuthEmailRoute(w http.ResponseWriter, _ *http.Request) {
+	httpx.Error(
+		w,
+		http.StatusGone,
+		"identity_service_required",
+		"Registration and password recovery are available through the Identity service.",
+	)
+}
+
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	var input registerInput
 	if err := httpx.Decode(w, r, &input); err != nil {
@@ -152,6 +161,8 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	verifyURL := fmt.Sprintf("%s/auth/verify?token=%s", s.cfg.AppBaseURL, tokenStr)
 	if err := sendVerificationEmail(s.cfg, email, input.Name, verifyURL); err != nil {
 		s.logger.Error("send verification email", "error", err)
+		httpx.Error(w, http.StatusBadGateway, "verification_email_failed", "The account was created, but the verification email could not be sent.")
+		return
 	}
 
 	httpx.JSON(w, http.StatusCreated, map[string]any{
@@ -452,6 +463,8 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	resetURL := fmt.Sprintf("%s/auth/reset-password?token=%s", s.cfg.AppBaseURL, tokenStr)
 	if err := sendPasswordResetEmail(s.cfg, email, name, resetURL); err != nil {
 		s.logger.Error("send password reset email", "error", err)
+		httpx.Error(w, http.StatusBadGateway, "password_reset_email_failed", "The reset request was created, but the email could not be sent.")
+		return
 	}
 
 	httpx.JSON(w, http.StatusOK, map[string]any{

@@ -30,7 +30,7 @@ is selected, readiness performs EHLO and authenticates without sending a
 message. SMTP response code/text and recipient domain are logged; passwords
 are never logged.
 
-Optional API failover is configured with `PLATFORM_RESEND_API_KEY` and
+Optional mail API failover is configured with `PLATFORM_MAIL_API_KEY` and
 `PLATFORM_FROM_EMAIL`. Campaign delivery never uses this fallback.
 
 ## Stalwart version and configuration API

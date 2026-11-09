@@ -35,13 +35,10 @@ jobs:
           fi
       - name: Enforce Stalwart-only campaign delivery
         run: |
-          # router_test.go only sets a fake platform fallback to prove the
-          # campaign path never consumes it.
           if git grep -n -i 'resend' -- \
             internal/campaigns internal/delivery internal/worker internal/api \
             'apps/web/app/(dashboard)' \
-            docs/DELIVERABILITY.md docs/EMAIL_DELIVERY_ARCHITECTURE.md \
-            ':(exclude)internal/delivery/router_test.go'; then
+            docs/DELIVERABILITY.md docs/EMAIL_DELIVERY_ARCHITECTURE.md; then
             echo "Campaign code, UI, and docs must not reference the platform fallback."
             exit 1
           fi
@@ -72,6 +69,7 @@ jobs:
           EOF
           SENDWISE_ENV_FILE="$tmp_env" ./scripts/deploy.sh validate
           docker compose --env-file "$tmp_env" -f docker-compose.yml -f docker-compose.microservices.yml up -d postgres
+          SENDWISE_ENV_FILE="$tmp_env" ./scripts/check-domain-duplicates.sh
           docker compose --env-file "$tmp_env" -f docker-compose.yml run --rm migrate
           SENDWISE_ENV_FILE="$tmp_env" ./scripts/check-domain-duplicates.sh
 

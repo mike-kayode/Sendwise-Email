@@ -39,7 +39,7 @@ type Config struct {
 	PlatformSMTPUsername          string
 	PlatformSMTPPassword          string
 	PlatformSMTPTLSMode           string
-	PlatformResendAPIKey          string
+	PlatformMailAPIKey            string
 }
 
 // LoadConfig reads Identity service configuration from environment variables.
@@ -73,7 +73,7 @@ func LoadConfig() (Config, error) {
 		PlatformSMTPUsername:          kit.Getenv("PLATFORM_SMTP_USERNAME", ""),
 		PlatformSMTPPassword:          kit.Getenv("PLATFORM_SMTP_PASSWORD", ""),
 		PlatformSMTPTLSMode:           strings.ToLower(strings.TrimSpace(kit.Getenv("PLATFORM_SMTP_TLS_MODE", defaultSMTPTLSMode(base.Env)))),
-		PlatformResendAPIKey:          kit.Getenv("PLATFORM_RESEND_API_KEY", ""),
+		PlatformMailAPIKey:            kit.Getenv("PLATFORM_MAIL_API_KEY", ""),
 	}
 
 	if cfg.JWTSecret == "" {
@@ -153,8 +153,8 @@ func mailSenderDegradation(cfg Config) string {
 	case "log":
 		return "mail_delivery_disabled"
 	case "resend":
-		if cfg.PlatformResendAPIKey == "" {
-			return "resend_api_key_missing"
+		if cfg.PlatformMailAPIKey == "" {
+			return "platform_mail_api_key_missing"
 		}
 	case "smtp":
 		if cfg.PlatformSMTPAddr == "" && (cfg.Env == "production" || cfg.Env == "staging") {
@@ -164,7 +164,7 @@ func mailSenderDegradation(cfg Config) string {
 			return "platform_smtp_not_configured"
 		}
 	case "", "auto":
-		if cfg.PlatformSMTPAddr == "" && cfg.PlatformResendAPIKey == "" &&
+		if cfg.PlatformSMTPAddr == "" && cfg.PlatformMailAPIKey == "" &&
 			(cfg.Env == "production" || cfg.Env == "staging" || cfg.SMTPAddr == "") {
 			return "platform_mail_transport_not_configured"
 		}

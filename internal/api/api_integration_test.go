@@ -92,6 +92,21 @@ func newIntegrationServer(t *testing.T) *Server {
 	return server
 }
 
+func TestLegacyRegistrationAndPasswordRecoveryRoutesAreDisabled(t *testing.T) {
+	server := newIntegrationServer(t)
+	for _, path := range []string{
+		"/api/v1/auth/register",
+		"/api/v1/auth/forgot-password",
+	} {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusGone {
+			t.Errorf("POST %s status = %d, want %d; body: %s", path, response.Code, http.StatusGone, response.Body)
+		}
+	}
+}
+
 func integrationToken(t *testing.T, orgID, role string) string {
 	t.Helper()
 	token, err := integrationTokens.IssueAccess("11111111-1111-4111-8111-111111111111", orgID, role)
@@ -263,7 +278,7 @@ func assertStatus(t *testing.T, w *httptest.ResponseRecorder, expected ...int) {
 	}
 }
 
-func registerIntegrationUser(t *testing.T, s *Server, email, password, name, organizationName string) authResponse {
+func seedIntegrationUser(t *testing.T, email, password, name, organizationName string) authResponse {
 	t.Helper()
 	parts := strings.SplitN(email, "@", 2)
 	if len(parts) != 2 {
@@ -272,51 +287,54 @@ func registerIntegrationUser(t *testing.T, s *Server, email, password, name, org
 	email = parts[0] + "-" + uuid.NewString() + "@" + parts[1]
 	organizationName += " " + uuid.NewString()
 
-	body, err := json.Marshal(registerInput{
-		Email: email, Password: password, Name: name, OrganizationName: organizationName,
-	})
+	passwordHash, err := auth.HashPassword(password)
 	if err != nil {
-		t.Fatalf("encode registration request: %v", err)
+		t.Fatalf("hash integration password: %v", err)
 	}
-	w := doRequest(t, s, http.MethodPost, "/api/v1/auth/register", string(body), "")
-	assertStatus(t, w, http.StatusCreated)
-	var registered struct {
-		Email string `json:"email"`
+	tx, err := integrationPool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin integration user transaction: %v", err)
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &registered); err != nil {
-		t.Fatalf("decode registration response: %v", err)
+	defer tx.Rollback(context.Background())
+
+	var userID, organizationID, organizationSlug string
+	if err := tx.QueryRow(context.Background(), `
+		INSERT INTO users (email, password_hash, name, status, email_verified_at)
+		VALUES ($1, $2, $3, 'active', now())
+		RETURNING id
+	`, email, passwordHash, name).Scan(&userID); err != nil {
+		t.Fatalf("seed integration user: %v", err)
 	}
-	if registered.Email != email {
-		t.Fatalf("registration email = %q, want %q", registered.Email, email)
+	if err := tx.QueryRow(context.Background(), `
+		INSERT INTO organizations (name, slug)
+		VALUES ($1, $2)
+		RETURNING id, slug
+	`, organizationName, slugify(organizationName)).Scan(&organizationID, &organizationSlug); err != nil {
+		t.Fatalf("seed integration organization: %v", err)
+	}
+	if _, err := tx.Exec(context.Background(), `
+		INSERT INTO organization_members (organization_id, user_id, role)
+		VALUES ($1, $2, 'owner')
+	`, organizationID, userID); err != nil {
+		t.Fatalf("seed integration organization membership: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit integration user seed: %v", err)
 	}
 
-	var verificationToken string
-	if err := integrationPool.QueryRow(context.Background(), `
-		SELECT token FROM verification_tokens
-		WHERE email = $1 AND purpose = 'account_verification'
-		ORDER BY created_at DESC
-		LIMIT 1
-	`, email).Scan(&verificationToken); err != nil {
-		t.Fatalf("load registration verification token: %v", err)
-	}
-	w = doRequest(t, s, http.MethodGet, "/api/v1/auth/verify?token="+verificationToken, "", "")
-	assertStatus(t, w, http.StatusOK)
-
-	body, err = json.Marshal(loginInput{Email: email, Password: password})
+	accessToken, err := integrationTokens.IssueAccess(userID, organizationID, auth.RoleOwner)
 	if err != nil {
-		t.Fatalf("encode login request: %v", err)
+		t.Fatalf("issue integration access token: %v", err)
 	}
-	w = doRequest(t, s, http.MethodPost, "/api/v1/auth/login", string(body), "")
-	assertStatus(t, w, http.StatusOK)
-	var authenticated authResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &authenticated); err != nil {
-		t.Fatalf("decode login response: %v", err)
+	return authResponse{
+		AccessToken: accessToken,
+		TokenType:   "Bearer",
+		ExpiresIn:   int(integrationCfg.AccessTokenTTL.Seconds()),
+		User:        userSummary{ID: userID, Name: name, Email: email},
+		Organization: organizationSummary{
+			ID: organizationID, Name: organizationName, Slug: organizationSlug, Role: auth.RoleOwner,
+		},
 	}
-	if authenticated.AccessToken == "" || authenticated.User.Email != email ||
-		authenticated.Organization.Name != organizationName || authenticated.Organization.Role != "owner" {
-		t.Fatalf("unexpected login response: %+v", authenticated)
-	}
-	return authenticated
 }
 
 func assertJSONBody(t *testing.T, w *httptest.ResponseRecorder, key string) string {
@@ -331,21 +349,32 @@ func assertJSONBody(t *testing.T, w *httptest.ResponseRecorder, key string) stri
 	}
 	return string(v)
 }
-func TestAuthRegisterLoginMeIntegration(t *testing.T) {
+func TestAuthLoginMeIntegration(t *testing.T) {
 	if integrationPool == nil {
 		t.Skip("no database available")
 	}
 	s := newIntegrationServer(t)
 
 	orgName := "Integration Test Org"
-	registered := registerIntegrationUser(
-		t, s, "integration@example.com", "integration-password", "Integration User", orgName,
+	seeded := seedIntegrationUser(
+		t, "integration@example.com", "integration-password", "Integration User", orgName,
 	)
-	if registered.User.Name != "Integration User" {
-		t.Fatalf("expected user name Integration User, got %s", registered.User.Name)
+	loginBody, err := json.Marshal(loginInput{Email: seeded.User.Email, Password: "integration-password"})
+	if err != nil {
+		t.Fatalf("encode login request: %v", err)
+	}
+	loginResponse := doRequest(t, s, http.MethodPost, "/api/v1/auth/login", string(loginBody), "")
+	assertStatus(t, loginResponse, http.StatusOK)
+	var authenticated authResponse
+	if err := json.Unmarshal(loginResponse.Body.Bytes(), &authenticated); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if authenticated.AccessToken == "" || authenticated.User.Email != seeded.User.Email ||
+		authenticated.Organization.Name != seeded.Organization.Name || authenticated.Organization.Role != auth.RoleOwner {
+		t.Fatalf("unexpected login response: %+v", authenticated)
 	}
 
-	w := doRequest(t, s, "GET", "/api/v1/auth/me", "", registered.AccessToken)
+	w := doRequest(t, s, "GET", "/api/v1/auth/me", "", authenticated.AccessToken)
 	assertStatus(t, w, http.StatusOK)
 	var meResp struct {
 		User         userSummary         `json:"user"`
@@ -354,7 +383,7 @@ func TestAuthRegisterLoginMeIntegration(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &meResp); err != nil {
 		t.Fatalf("me response invalid JSON: %v", err)
 	}
-	if meResp.Organization.ID != registered.Organization.ID {
+	if meResp.Organization.ID != authenticated.Organization.ID {
 		t.Fatalf("org ID mismatch")
 	}
 }
@@ -365,8 +394,8 @@ func TestContactsCRUDIntegration(t *testing.T) {
 	}
 	s := newIntegrationServer(t)
 
-	registered := registerIntegrationUser(
-		t, s, "contacts-owner@example.com", "contacts-password", "Contacts Owner", "Contacts Org",
+	registered := seedIntegrationUser(
+		t, "contacts-owner@example.com", "contacts-password", "Contacts Owner", "Contacts Org",
 	)
 	token := registered.AccessToken
 
@@ -419,8 +448,8 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 	}
 	s := newIntegrationServer(t)
 
-	registered := registerIntegrationUser(
-		t, s, "campaigns-owner@example.com", "campaigns-password", "Campaigns Owner", "Campaigns Org",
+	registered := seedIntegrationUser(
+		t, "campaigns-owner@example.com", "campaigns-password", "Campaigns Owner", "Campaigns Org",
 	)
 	token := registered.AccessToken
 	senderIdentityID, _ := seedVerifiedSender(t, registered.Organization.ID, "newsletter")
@@ -496,8 +525,8 @@ func TestSenderIdentityCRUDAndCampaignOwnershipIntegration(t *testing.T) {
 		t.Skip("no database available")
 	}
 	s := newIntegrationServer(t)
-	first := registerIntegrationUser(t, s, "sender-one-"+uuid.NewString()+"@example.test", "sender-password", "Sender One", "Sender Workspace One")
-	second := registerIntegrationUser(t, s, "sender-two-"+uuid.NewString()+"@example.test", "sender-password", "Sender Two", "Sender Workspace Two")
+	first := seedIntegrationUser(t, "sender-one-"+uuid.NewString()+"@example.test", "sender-password", "Sender One", "Sender Workspace One")
+	second := seedIntegrationUser(t, "sender-two-"+uuid.NewString()+"@example.test", "sender-password", "Sender Two", "Sender Workspace Two")
 	_, defaultEmail := seedVerifiedSender(t, first.Organization.ID, "newsletter")
 	domain := strings.SplitN(defaultEmail, "@", 2)[1]
 
@@ -581,8 +610,8 @@ func TestConflictedSendingDomainCannotValidateOrSendCampaign(t *testing.T) {
 		t.Skip("no database available")
 	}
 	s := newIntegrationServer(t)
-	registered := registerIntegrationUser(
-		t, s, "domain-conflict@example.com", "domain-conflict-password", "Conflict Owner", "Conflict Org",
+	registered := seedIntegrationUser(
+		t, "domain-conflict@example.com", "domain-conflict-password", "Conflict Owner", "Conflict Org",
 	)
 	s.campaigns = campaigns.NewService(integrationPool, nil, s.logger, 3, false)
 	domain := "owned-" + strings.ReplaceAll(uuid.NewString(), "-", "") + ".example"
@@ -644,8 +673,7 @@ func TestReputationThresholdPausesCampaignIntegration(t *testing.T) {
 	if integrationPool == nil {
 		t.Skip("no database available")
 	}
-	s := newIntegrationServer(t)
-	owner := registerIntegrationUser(t, s, "reputation-owner@example.com", "reputation-password", "Reputation Owner", "Reputation Org")
+	owner := seedIntegrationUser(t, "reputation-owner@example.com", "reputation-password", "Reputation Owner", "Reputation Org")
 	ctx := context.Background()
 	var campaignID, contactID string
 	if err := integrationPool.QueryRow(ctx, `
@@ -784,7 +812,7 @@ func TestStalwartFeedbackHardSoftComplaintIsolationAndIdempotency(t *testing.T) 
 	ctx := context.Background()
 	server := newIntegrationServer(t)
 	server.delivery.publisher = feedbackTestPublisher{}
-	owner := registerIntegrationUser(t, server, "feedback-owner-"+uuid.NewString()+"@example.test", "feedback-password", "Feedback Owner", "Feedback Workspace")
+	owner := seedIntegrationUser(t, "feedback-owner-"+uuid.NewString()+"@example.test", "feedback-password", "Feedback Owner", "Feedback Workspace")
 
 	makeFixture := func(email string) (string, string, string) {
 		t.Helper()
@@ -916,7 +944,7 @@ func TestStalwartFeedbackHardSoftComplaintIsolationAndIdempotency(t *testing.T) 
 		t.Fatalf("complaint suppression reason = %q, err=%v", reason, err)
 	}
 
-	other := registerIntegrationUser(t, server, "feedback-other-"+uuid.NewString()+"@example.test", "feedback-password", "Other Owner", "Other Workspace")
+	other := seedIntegrationUser(t, "feedback-other-"+uuid.NewString()+"@example.test", "feedback-password", "Other Owner", "Other Workspace")
 	forgedTokenAddress, err := delivery.NewVERPReturnPath(integrationCfg.JWTSecret, integrationCfg.BounceDomain, delivery.VERPClaims{
 		WorkspaceID: other.Organization.ID,
 		CampaignID:  hardCampaign,
@@ -1322,8 +1350,8 @@ func TestAnalyticsOverviewIntegration(t *testing.T) {
 	}
 	s := newIntegrationServer(t)
 
-	registered := registerIntegrationUser(
-		t, s, "analytics-owner@example.com", "analytics-password", "Analytics Owner", "Analytics Org",
+	registered := seedIntegrationUser(
+		t, "analytics-owner@example.com", "analytics-password", "Analytics Owner", "Analytics Org",
 	)
 	token := registered.AccessToken
 	organizationID := registered.Organization.ID
@@ -1469,8 +1497,8 @@ func TestAPIKeyLifecycleIntegration(t *testing.T) {
 		t.Skip("no database available")
 	}
 	s := newIntegrationServer(t)
-	registered := registerIntegrationUser(
-		t, s, "api-key-owner@example.test", "api-key-integration-password", "API Key Owner", "API Key Workspace",
+	registered := seedIntegrationUser(
+		t, "api-key-owner@example.test", "api-key-integration-password", "API Key Owner", "API Key Workspace",
 	)
 
 	w := doRequest(t, s, http.MethodPost, "/api/v1/api-keys", `{"name":"integration key"}`, registered.AccessToken)

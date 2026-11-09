@@ -70,12 +70,12 @@ func (f providerFunc) Send(ctx context.Context, message Message) (*Result, error
 	return f(ctx, message)
 }
 
-// TestCampaignsSendViaStalwartEvenWithPlatformResendConfigured is the Step 1
-// proof that campaign delivery cannot reach the platform Resend fallback: the
-// fallback environment variables are fully configured, yet a campaign message
+// TestCampaignsSendViaStalwartEvenWithPlatformMailAPIConfigured proves campaign
+// delivery cannot reach the platform mail API fallback: the fallback environment
+// variables are fully configured, yet a campaign message
 // still leaves only through the registered Stalwart provider.
-func TestCampaignsSendViaStalwartEvenWithPlatformResendConfigured(t *testing.T) {
-	t.Setenv("PLATFORM_RESEND_API_KEY", "re_fake_platform_key_for_test_only")
+func TestCampaignsSendViaStalwartEvenWithPlatformMailAPIConfigured(t *testing.T) {
+	t.Setenv("PLATFORM_MAIL_API_KEY", "test_platform_mail_api_key")
 	t.Setenv("PLATFORM_FROM_EMAIL", "platform@example.test")
 
 	var stalwartCalls int

@@ -52,6 +52,21 @@ func TestLoadConfigValid(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsGenericPlatformMailAPIKey(t *testing.T) {
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("SERVICE_TOKEN", "test-service-token")
+	t.Setenv("PLATFORM_MAIL_API_KEY", "test-platform-mail-api-key")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.PlatformMailAPIKey != "test-platform-mail-api-key" {
+		t.Fatalf("PlatformMailAPIKey = %q, want configured API key", cfg.PlatformMailAPIKey)
+	}
+}
+
 func TestLoadConfigAlwaysSecuresCookiesInProduction(t *testing.T) {
 	t.Setenv("JWT_SECRET", "test-secret")
 	t.Setenv("APP_ENV", "production")

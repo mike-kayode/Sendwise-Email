@@ -11,11 +11,11 @@ func TestTemplateLifecycleAndTenantIsolationIntegration(t *testing.T) {
 		t.Skip("no database available")
 	}
 	server := newIntegrationServer(t)
-	owner := registerIntegrationUser(
-		t, server, "template-owner@example.test", "template-owner-password", "Template Owner", "Template Workspace",
+	owner := seedIntegrationUser(
+		t, "template-owner@example.test", "template-owner-password", "Template Owner", "Template Workspace",
 	)
-	other := registerIntegrationUser(
-		t, server, "template-other@example.test", "template-other-password", "Other Owner", "Other Workspace",
+	other := seedIntegrationUser(
+		t, "template-other@example.test", "template-other-password", "Other Owner", "Other Workspace",
 	)
 
 	createdResponse := doRequest(t, server, http.MethodPost, "/api/v1/templates", `{

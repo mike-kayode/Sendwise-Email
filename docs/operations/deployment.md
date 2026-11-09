@@ -53,7 +53,7 @@ PLATFORM_SMTP_USERNAME=<relay user>
 PLATFORM_SMTP_PASSWORD=<relay password>
 PLATFORM_VERIFIED_SENDER_DOMAINS=example.com
 PLATFORM_FROM_EMAIL=noreply@example.com
-PLATFORM_RESEND_API_KEY=<optional API fallback>
+PLATFORM_MAIL_API_KEY=<optional API fallback>
 # Campaign delivery settings remain separate:
 SMTP_ADDR=stalwart:587
 SMTP_HOST=stalwart
@@ -97,6 +97,11 @@ make migrate          # apply DB migrations
 
 Docker Compose includes healthchecks for postgres and redis. NATS has no healthcheck yet. API/worker depend on `migrate`
 completing successfully before starting.
+
+Before applying migrations, `scripts/deploy.sh` checks for duplicate sending
+domains. The check is non-blocking on a fresh database where the
+`sending_domains` table does not exist, and exits before migrations if it finds
+duplicate ownership that would prevent the unique domain index from applying.
 
 ## Backups and restore
 - PostgreSQL: configure `pg_dump` to persistent/object storage and schedule it daily; point-in-time recovery via WAL archiving. No backup job is currently included in Compose.

@@ -71,14 +71,27 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 	ownerEmail := fmt.Sprintf("p5-owner-%d@example.com", time.Now().UnixNano())
 	contactEmail := fmt.Sprintf("p5-recipient-%d@example.com", time.Now().UnixNano())
 	campaignDomain := fmt.Sprintf("campaign-%d.example.test", time.Now().UnixNano())
-	regBody := fmt.Sprintf(`{"email":"%s","password":"p5-password","name":"P5 Owner","organization_name":"P5 Org"}`, ownerEmail)
-	regResp := doAPIRequest(t, server.Handler(), "POST", "/api/v1/auth/register", "", regBody)
-	if regResp.Code != http.StatusCreated {
-		t.Fatalf("register status = %d, want %d; body: %s", regResp.Code, http.StatusCreated, regResp.Body.String())
-	}
 	var userID, organizationID string
-	if err := pool.QueryRow(context.Background(), `SELECT u.id, om.organization_id FROM users u JOIN organization_members om ON om.user_id = u.id WHERE u.email = $1 LIMIT 1`, ownerEmail).Scan(&userID, &organizationID); err != nil {
-		t.Fatalf("lookup new user org membership: %v", err)
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO users (email, password_hash, name, status, email_verified_at)
+		VALUES ($1, 'integration-test-hash', 'P5 Owner', 'active', now())
+		RETURNING id
+	`, ownerEmail).Scan(&userID); err != nil {
+		t.Fatalf("seed integration user: %v", err)
+	}
+	var organizationSlug string
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO organizations (name, slug)
+		VALUES ('P5 Org', $1)
+		RETURNING id, slug
+	`, "p5-"+fmt.Sprint(time.Now().UnixNano())).Scan(&organizationID, &organizationSlug); err != nil {
+		t.Fatalf("seed integration organization: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO organization_members (organization_id, user_id, role)
+		VALUES ($1, $2, 'owner')
+	`, organizationID, userID); err != nil {
+		t.Fatalf("seed integration organization membership: %v", err)
 	}
 	publicKey, encryptedPrivateKey, err := delivery.GenerateDKIMKeyPair(cfg.DKIMEncryptionKey)
 	if err != nil {

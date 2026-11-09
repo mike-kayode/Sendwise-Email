@@ -17,8 +17,8 @@ func TestEmailAssetUploadAndPublicReadIntegration(t *testing.T) {
 		t.Skip("no database available")
 	}
 	server := newIntegrationServer(t)
-	user := registerIntegrationUser(
-		t, server, "email-asset-owner@example.test", "email-asset-owner-password", "Asset Owner", "Asset Workspace",
+	user := seedIntegrationUser(
+		t, "email-asset-owner@example.test", "email-asset-owner-password", "Asset Owner", "Asset Workspace",
 	)
 	var imageBytes bytes.Buffer
 	if err := png.Encode(&imageBytes, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {

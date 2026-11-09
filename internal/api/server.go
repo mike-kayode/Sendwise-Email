@@ -66,10 +66,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.Handle("GET /metrics", observability.MetricsHandler())
 
-	mux.HandleFunc("POST /api/v1/auth/register", s.register)
+	mux.HandleFunc("POST /api/v1/auth/register", s.legacyAuthEmailRoute)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("GET /api/v1/auth/verify", s.verifyAccount)
-	mux.HandleFunc("POST /api/v1/auth/forgot-password", s.forgotPassword)
+	mux.HandleFunc("POST /api/v1/auth/forgot-password", s.legacyAuthEmailRoute)
 	mux.HandleFunc("POST /api/v1/auth/reset-password", s.resetPassword)
 
 	mux.HandleFunc("POST /api/v1/public/subscribe", s.publicSubscribe)

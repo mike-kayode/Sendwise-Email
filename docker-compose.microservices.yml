@@ -145,7 +145,7 @@ services:
       PLATFORM_SMTP_TLS_MODE: ${PLATFORM_SMTP_TLS_MODE:-starttls}
       PLATFORM_SMTP_USERNAME: ${PLATFORM_SMTP_USERNAME:-}
       PLATFORM_SMTP_PASSWORD: ${PLATFORM_SMTP_PASSWORD:-}
-      PLATFORM_RESEND_API_KEY: ${PLATFORM_RESEND_API_KEY:-}
+      PLATFORM_MAIL_API_KEY: ${PLATFORM_MAIL_API_KEY:-}
       WORKSPACE_URL: http://workspace:8080
     extra_hosts:
       - "host.docker.internal:host-gateway"

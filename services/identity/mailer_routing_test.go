@@ -126,15 +126,15 @@ func TestNewMailerAttachesPlatformFallbackOnlyWhenBothSettingsExist(t *testing.T
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			mailer := NewMailer(Config{
-				MailProvider:         "smtp",
-				SMTPAddr:             "127.0.0.1:587",
-				SMTPHost:             "mail.example.test",
-				SMTPUsername:         "noreply@example.test",
-				SMTPPassword:         "test-password",
-				SMTPFrom:             "smtp@example.test",
-				SMTPTLSMode:          "starttls",
-				PlatformResendAPIKey: test.apiKey,
-				PlatformFromEmail:    test.fromAddress,
+				MailProvider:       "smtp",
+				SMTPAddr:           "127.0.0.1:587",
+				SMTPHost:           "mail.example.test",
+				SMTPUsername:       "noreply@example.test",
+				SMTPPassword:       "test-password",
+				SMTPFrom:           "smtp@example.test",
+				SMTPTLSMode:        "starttls",
+				PlatformMailAPIKey: test.apiKey,
+				PlatformFromEmail:  test.fromAddress,
 			}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			_, hasFallback := mailer.(*platformMailer)
 			if hasFallback != test.wantFallback {
