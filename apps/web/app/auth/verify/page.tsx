@@ -36,15 +36,15 @@ export default function VerifyEmailPage() {
     const token = params.get("token");
     if (!token) {
       setEmail(params.get("email") ?? "");
-      if (params.get("delivery") === "failed") {
-        setState("error");
-        setMessage("Your account was created, but the verification email could not be delivered. Check your address and request a new link.");
-      } else if (params.get("delivery") === "retrying") {
+      if (params.get("delivery") === "retrying") {
         setState("pending");
-        setMessage("The mail relay is temporarily unavailable and delivery is retrying. Request another link if this one does not arrive.");
+        setMessage("Your verification email is queued. If delivery fails, we'll keep retrying. You can also request another link below.");
+      } else if (params.get("delivery") === "queue_failed") {
+        setState("pending");
+        setMessage("Your account was created, but the verification email could not be queued. Please use the button below to request another link.");
       } else {
         setState("pending");
-        setMessage("Check your inbox for a verification link. If it does not arrive, you can request another one below.");
+        setMessage("Your verification email is queued. If delivery fails, we'll keep retrying. You can request another link below.");
       }
       return;
     }
@@ -98,13 +98,13 @@ export default function VerifyEmailPage() {
       setResendState("sent");
       toast({
         title: "Check your inbox",
-        description: "If that address needs verification, a new link will be sent. Try again if it does not arrive shortly.",
+        description: "If that address needs verification, a new link is queued. If delivery fails, we'll keep retrying.",
       });
     } catch (err: any) {
       setResendState("idle");
       toast({
-        title: "Could not send link",
-        description: err?.message ?? "Please try again in a moment.",
+        title: "Could not queue link",
+        description: err?.message ?? "Please try again in a moment. Delivery failures are retried automatically.",
         variant: "destructive",
       });
     }

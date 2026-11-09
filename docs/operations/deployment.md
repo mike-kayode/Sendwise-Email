@@ -44,6 +44,17 @@ NATS_URL=...
 JWT_SECRET=<long random>
 JWT_ISSUER=email-platform
 ACCESS_TOKEN_TTL=15m
+# Identity verification, password-reset, and invitation mail use a dedicated
+# relay; they never route through campaign SMTP or Stalwart.
+PLATFORM_SMTP_ADDR=smtp-relay.example.com:587
+PLATFORM_SMTP_HOST=smtp-relay.example.com
+PLATFORM_SMTP_TLS_MODE=starttls
+PLATFORM_SMTP_USERNAME=<relay user>
+PLATFORM_SMTP_PASSWORD=<relay password>
+PLATFORM_VERIFIED_SENDER_DOMAINS=example.com
+PLATFORM_FROM_EMAIL=noreply@example.com
+PLATFORM_RESEND_API_KEY=<optional API fallback>
+# Campaign delivery settings remain separate:
 SMTP_ADDR=stalwart:587
 SMTP_HOST=stalwart
 SMTP_USERNAME=<stalwart user>
@@ -78,7 +89,9 @@ make migrate          # apply DB migrations
 
 ## Health checks
 - `GET /healthz` — liveness
-- `GET /readyz` — readiness (database ping)
+- `GET /readyz` — database readiness plus `mail_status`; sender or relay
+  problems report `mail_status: degraded` without preventing account
+  registration or taking the database-ready service out of rotation.
 - `GET /metrics` — Prometheus
 - Worker metrics on `:9091/metrics`
 
@@ -98,3 +111,20 @@ completing successfully before starting.
 - Valid TLS certificates.
 - SPF/DKIM/DMARC for each sending domain.
 - Reputation monitoring; warm-up new IPs gradually.
+
+## Transactional mail smoke check
+
+After deploying Identity with its dedicated `PLATFORM_SMTP_*` settings and a
+verified sender domain, source the deployment environment and send a real
+message to an operator-controlled inbox:
+
+```sh
+set -a
+. ./.env
+set +a
+DEPLOY_SMOKE_MAIL_TO=ops@example.com ./scripts/smoke-mail.sh
+```
+
+The script sends directly through the platform SMTP relay and reports only
+successful SMTP handoff; check the recipient inbox separately to confirm
+delivery. Do not point Identity's platform relay settings at campaign Stalwart.

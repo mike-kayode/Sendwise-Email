@@ -83,6 +83,9 @@ func TestStalwartRegistrationDeliversAndStoresVerificationEmail(t *testing.T) {
 		cfg,
 		kit.NewTestLogger(),
 	)
+	retryCtx, stopRetries := context.WithCancel(context.Background())
+	defer stopRetries()
+	go handler.RunMailRetries(retryCtx)
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/auth/register", strings.NewReader(fmt.Sprintf(
 		`{"email":%q,"password":"correct horse battery staple","name":"Stalwart Test","organization_name":"Local Stalwart"}`,
@@ -93,8 +96,8 @@ func TestStalwartRegistrationDeliversAndStoresVerificationEmail(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("registration status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if strings.Contains(response.Body.String(), `"delivery_status":"retry_queued"`) {
-		t.Fatalf("registration queued a retry instead of delivering through Stalwart: %s", response.Body.String())
+	if !strings.Contains(response.Body.String(), `"delivery_status":"queued"`) {
+		t.Fatalf("registration did not queue verification mail: %s", response.Body.String())
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}

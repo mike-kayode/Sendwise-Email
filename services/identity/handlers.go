@@ -42,6 +42,7 @@ type Handler struct {
 	authLimiter        *kit.RateLimiter
 	dummyHash          string
 	resendEmailLimiter *kit.RateLimiter
+	resendIPLimiter    *kit.RateLimiter
 	mailRetries        chan mailRetryJob
 	// retryDelay between membership lookup attempts (overridden in tests).
 	retryDelay     time.Duration
@@ -88,6 +89,9 @@ func NewHandler(store Store, tokens *kit.Manager, workspace WorkspaceClient, mai
 	if mailer == nil {
 		mailer = NewLogMailer(logger)
 	}
+	if reason := mailSenderDegradation(cfg); reason != "" {
+		logger.Warn("transactional mail is degraded by sender configuration", "reason", reason)
+	}
 	// Precomputed hash so failed logins cost the same CPU as successful ones.
 	dummyHash, err := HashPassword("dummy-password-for-timing-equality")
 	if err != nil {
@@ -103,14 +107,15 @@ func NewHandler(store Store, tokens *kit.Manager, workspace WorkspaceClient, mai
 		authLimiter:        kit.NewRateLimiter(30, 10),
 		dummyHash:          dummyHash,
 		resendEmailLimiter: kit.NewRateLimiter(5, 2),
+		resendIPLimiter:    kit.NewRateLimiter(5, 2),
 		mailRetries:        make(chan mailRetryJob, 128),
 		retryDelay:         250 * time.Millisecond,
 		mailRetryDelay:     time.Second,
 	}
 }
 
-// RunMailRetries retries messages whose first synchronous delivery attempt
-// failed. The production PostgreSQL store provides durable, encrypted retries.
+// RunMailRetries sends queued transactional messages. The production PostgreSQL
+// store provides durable, encrypted retries.
 func (h *Handler) RunMailRetries(ctx context.Context) {
 	if store, ok := h.store.(durableMailRetryStore); ok {
 		h.runDurableMailRetries(ctx, store)
@@ -212,9 +217,9 @@ func (h *Handler) retryDurableMail(ctx context.Context, store durableMailRetrySt
 		"error", err,
 	)
 	if attempt >= 5 {
-		if completeErr := store.CompleteMailRetry(ctx, job.id, job.leaseToken); completeErr != nil {
-			h.logger.Error("remove exhausted transactional email retry",
-				"retry_id", job.id, "error", completeErr,
+		if updateErr := store.RescheduleMailRetry(ctx, job.id, job.leaseToken, attempt, time.Now(), err.Error()); updateErr != nil {
+			h.logger.Error("record exhausted transactional email retry",
+				"retry_id", job.id, "error", updateErr,
 			)
 		}
 		return
@@ -230,7 +235,7 @@ func (h *Handler) retryDurableMail(ctx context.Context, store durableMailRetrySt
 
 func (h *Handler) retryMail(ctx context.Context, job mailRetryJob) {
 	for attempt := job.attempts + 1; attempt <= 5; attempt++ {
-		delay := h.mailRetryDelay * time.Duration(1<<(attempt-2))
+		delay := h.mailRetryDelay * time.Duration(1<<(attempt-1))
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -255,6 +260,33 @@ func (h *Handler) retryMail(ctx context.Context, job mailRetryJob) {
 			"attempt", attempt,
 			"error", err,
 		)
+	}
+}
+
+func (h *Handler) queueMail(ctx context.Context, action string, message MailMessage) error {
+	if store, ok := h.store.(durableMailRetryStore); ok {
+		if h.cfg.MailOutboxEncryptionKey == "" {
+			return fmt.Errorf("queue transactional email: DKIM_ENCRYPTION_KEY is not configured")
+		}
+		payload, err := json.Marshal(message)
+		if err != nil {
+			return fmt.Errorf("marshal transactional email: %w", err)
+		}
+		encrypted, err := delivery.EncryptSecret(h.cfg.MailOutboxEncryptionKey, string(payload))
+		if err != nil {
+			return fmt.Errorf("encrypt transactional email: %w", err)
+		}
+		if err := store.EnqueueMailRetry(ctx, action, encrypted, 0, time.Now()); err != nil {
+			return fmt.Errorf("enqueue durable transactional email: %w", err)
+		}
+		return nil
+	}
+
+	select {
+	case h.mailRetries <- mailRetryJob{action: action, message: message}:
+		return nil
+	default:
+		return errors.New("transactional email queue is full")
 	}
 }
 
@@ -410,14 +442,25 @@ func (h *Handler) ready(w http.ResponseWriter, r *http.Request) {
 		kit.Error(w, http.StatusServiceUnavailable, "not_ready", "Identity database is not reachable.")
 		return
 	}
-	if probe, ok := h.mailer.(interface{ Probe(context.Context) error }); ok {
+	mailStatus := "ready"
+	mailReason := ""
+	if reason := mailSenderDegradation(h.cfg); reason != "" {
+		mailStatus, mailReason = "degraded", reason
+	} else if probe, ok := h.mailer.(interface{ Probe(context.Context) error }); ok {
 		if err := probe.Probe(ctx); err != nil {
 			h.logger.Error("SMTP readiness probe failed", "error", err)
-			kit.Error(w, http.StatusServiceUnavailable, "smtp_unavailable", "The configured SMTP relay is not ready. Check SMTP address, TLS mode, username, and password.")
-			return
+			mailStatus, mailReason = "degraded", "relay_probe_failed"
 		}
 	}
-	kit.JSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	if mailStatus == "degraded" {
+		kit.JSON(w, http.StatusOK, map[string]string{
+			"status":      "ready",
+			"mail_status": mailStatus,
+			"mail_reason": mailReason,
+		})
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]string{"status": "ready", "mail_status": mailStatus})
 }
 
 // --- request/response payloads -------------------------------------------
@@ -671,22 +714,15 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 
 	h.audit(r, &user.ID, "register", map[string]any{"organization_name": req.OrganizationName})
 	if err := h.sendVerificationEmail(r, user); err != nil {
-		if errors.Is(err, ErrMailRetryQueued) {
-			kit.JSON(w, http.StatusCreated, map[string]string{
-				"message":         "Account created. Verification email delivery is retrying; request another link if it does not arrive.",
-				"email":           user.Email,
-				"delivery_status": "retry_queued",
-			})
-			return
-		}
 		h.logger.Error("prepare verification email", "recipient_domain", mailRecipientDomain(user.Email), "error", err)
-		kit.Error(w, http.StatusServiceUnavailable, "verification_email_unavailable", "Your account was created, but the verification email could not be delivered. Check your email address and SMTP configuration, then request a new link.")
+		kit.Error(w, http.StatusServiceUnavailable, "verification_email_unavailable", "Your account was created, but the verification email could not be queued. Please request a new link.")
 		return
 	}
 
 	kit.JSON(w, http.StatusCreated, map[string]string{
-		"message": "Account created. Check your inbox to verify your email address.",
-		"email":   user.Email,
+		"message":         "Account created. Your verification email is queued; if delivery fails, we'll keep retrying.",
+		"email":           user.Email,
+		"delivery_status": "queued",
 	})
 }
 
@@ -709,7 +745,10 @@ func (h *Handler) sendVerificationEmail(r *http.Request, user *User) error {
 		Text: "Hi " + user.Name + ",\n\nVerify your email address by opening this link:\n\n" + link +
 			"\n\nIf you did not create an account, you can ignore this message.\n",
 	}
-	return h.deliverMail(ctx, "send verification email", msg)
+	if err := h.queueMail(ctx, "send verification email", msg); err != nil {
+		return fmt.Errorf("queue verification email: %w", err)
+	}
+	return nil
 }
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
@@ -1029,20 +1068,29 @@ func (h *Handler) resendVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := normalizeEmail(req.Email)
-	if !h.resendEmailLimiter.Allow(email) {
+	if !h.resendEmailLimiter.Allow(email) || !h.resendIPLimiter.Allow(kit.ClientKey(r)) {
 		w.Header().Set("Retry-After", "60")
-		kit.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many verification requests for this address. Please wait before trying again.")
+		kit.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many verification requests. Please wait before trying again.")
 		return
 	}
 	user, err := h.store.GetUserByEmail(r.Context(), email)
 	if err == nil && user.EmailVerifiedAt == nil {
 		if err := h.sendVerificationEmail(r, user); err != nil {
-			h.logMailFailure("resend verification email", user.Email, err)
+			h.logger.Error("queue resend verification email",
+				"recipient_domain", mailRecipientDomain(user.Email),
+				"error", err,
+			)
+			kit.Error(w, http.StatusServiceUnavailable, "verification_email_unavailable", "We couldn't queue the verification email. Please try again.")
+			return
 		}
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		h.logger.Error("lookup user for verification resend", "error", err)
+		kit.Error(w, http.StatusInternalServerError, "internal_error", "An unexpected error occurred.")
+		return
 	}
 	// Always the same response: do not reveal whether the address exists.
 	kit.JSON(w, http.StatusOK, map[string]string{
-		"message": "If that address needs verification, a new link will be sent. If it does not arrive shortly, try again.",
+		"message": "If that address needs verification, a new link is queued. If delivery fails, we'll keep retrying.",
 	})
 }
 

@@ -48,20 +48,15 @@ export default function RegisterPage() {
       });
       toast({
         title: "Account created",
-        description:
-          response.delivery_status === "retry_queued"
-            ? "Email delivery is retrying. You can request another link if it does not arrive."
-            : `A verification email has been sent to ${form.getValues("email")}. Please verify your email before signing in.`,
+        description: `A verification email is queued for ${response.email}. If delivery fails, we'll keep retrying.`,
       });
-      const delivery =
-        response.delivery_status === "retry_queued" ? "&delivery=retrying" : "";
       router.push(
-        `/auth/verify?email=${encodeURIComponent(form.getValues("email"))}${delivery}`,
+        `/auth/verify?email=${encodeURIComponent(response.email)}`,
       );
     } catch (err: any) {
       if (err?.code === "verification_email_unavailable") {
         router.push(
-          `/auth/verify?email=${encodeURIComponent(form.getValues("email"))}&delivery=failed`,
+          `/auth/verify?email=${encodeURIComponent(form.getValues("email"))}&delivery=queue_failed`,
         );
         return;
       }

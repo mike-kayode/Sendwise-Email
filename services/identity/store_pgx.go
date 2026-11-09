@@ -441,7 +441,9 @@ func (s *pgxStore) CompleteMailRetry(ctx context.Context, id, leaseToken string)
 func (s *pgxStore) RescheduleMailRetry(ctx context.Context, id, leaseToken string, attempts int, nextAttemptAt time.Time, lastError string) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE mail_delivery_outbox
-		SET attempts = $3, next_attempt_at = $4, last_error = $5,
+		SET attempts = $3,
+		    encrypted_message = CASE WHEN $3 >= 5 THEN ''::bytea ELSE encrypted_message END,
+		    next_attempt_at = $4, last_error = $5,
 		    lease_token = NULL, lease_expires_at = NULL
 		WHERE id = $1 AND lease_token = $2
 	`, id, leaseToken, attempts, nextAttemptAt, lastError)

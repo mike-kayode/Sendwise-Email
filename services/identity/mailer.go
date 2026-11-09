@@ -38,13 +38,10 @@ type Mailer interface {
 	Provider() string
 }
 
-// NewMailer selects a mail backend from configuration. Stalwart (SMTP) is
-// always the primary transactional transport for verification, password reset,
-// and invitation mail. The Resend fallback is attached only when both
-// PLATFORM_RESEND_API_KEY and PLATFORM_FROM_EMAIL are set; both are optional
-// and neither is ever used by campaign delivery. The "log" provider (and the
-// automatic choice when SMTP is not configured) prints messages instead of
-// sending them and is development-only.
+// NewMailer selects the platform transactional transport. Production Identity
+// mail uses the dedicated platform relay configuration, never the campaign
+// SMTP settings; a configured Resend API is its fallback. Legacy SMTP settings
+// remain available to local development only.
 func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 	if logger == nil {
 		logger = slog.Default()
@@ -52,7 +49,11 @@ func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 	provider := cfg.MailProvider
 	if provider == "auto" || provider == "" {
 		switch {
-		case cfg.SMTPAddr != "" && cfg.SMTPFrom != "":
+		case cfg.PlatformSMTPAddr != "" && cfg.PlatformFromEmail != "":
+			provider = "smtp"
+		case cfg.PlatformResendAPIKey != "" && cfg.PlatformFromEmail != "":
+			provider = "resend"
+		case cfg.Env != "production" && cfg.SMTPAddr != "" && cfg.SMTPFrom != "":
 			provider = "smtp"
 		default:
 			provider = "log"
@@ -60,13 +61,19 @@ func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 	}
 	switch provider {
 	case "smtp":
+		addr, host, username, password, tlsMode := cfg.PlatformSMTPAddr, cfg.PlatformSMTPHost,
+			cfg.PlatformSMTPUsername, cfg.PlatformSMTPPassword, cfg.PlatformSMTPTLSMode
 		from := cfg.PlatformFromEmail
-		if from == "" {
-			from = cfg.SMTPFrom
+		if cfg.Env != "production" && addr == "" {
+			addr, host, username, password, tlsMode = cfg.SMTPAddr, cfg.SMTPHost,
+				cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPTLSMode
+			if from == "" {
+				from = cfg.SMTPFrom
+			}
 		}
 		primary := &smtpMailer{
-			addr: cfg.SMTPAddr, host: cfg.SMTPHost, username: cfg.SMTPUsername,
-			password: cfg.SMTPPassword, from: from, tlsMode: cfg.SMTPTLSMode,
+			addr: addr, host: host, username: username,
+			password: password, from: from, tlsMode: tlsMode,
 		}
 		if cfg.PlatformResendAPIKey != "" && cfg.PlatformFromEmail != "" {
 			return &platformMailer{
@@ -80,6 +87,12 @@ func NewMailer(cfg Config, logger *slog.Logger) Mailer {
 			}
 		}
 		return primary
+	case "resend":
+		return &resendMailer{
+			apiKey:    cfg.PlatformResendAPIKey,
+			fromEmail: cfg.PlatformFromEmail,
+			client:    &http.Client{Timeout: 10 * time.Second},
+		}
 	default:
 		logger.Warn("mail provider is log: messages are printed, not delivered")
 		return NewLogMailer(logger)
@@ -105,7 +118,7 @@ func (m *platformMailer) Probe(ctx context.Context) error {
 
 func (m *platformMailer) Send(ctx context.Context, message MailMessage) error {
 	if !m.breaker.Allow() {
-		m.logFallback(message, "circuit_open", errors.New("Stalwart circuit is open"))
+		m.logFallback(message, "circuit_open", errors.New("primary SMTP circuit is open"))
 		return m.fallback.Send(ctx, message)
 	}
 	if err := m.primary.Send(ctx, message); err == nil {
@@ -124,11 +137,11 @@ func (m *platformMailer) Send(ctx context.Context, message MailMessage) error {
 func (m *platformMailer) logFallback(message MailMessage, reason string, err error) {
 	if m.logger != nil {
 		m.logger.Warn("platform email provider fallback",
-			"from", "stalwart", "to", "resend", "reason", reason,
+			"from", m.primary.Provider(), "to", m.fallback.Provider(), "reason", reason,
 			"recipient_domain", mailRecipientDomain(message.To), "error", err,
 		)
 	}
-	observability.ProviderFallbacks.WithLabelValues("platform", "stalwart", "resend", reason).Inc()
+	observability.ProviderFallbacks.WithLabelValues("platform", m.primary.Provider(), m.fallback.Provider(), reason).Inc()
 }
 
 func shouldFailoverMail(err error) bool {

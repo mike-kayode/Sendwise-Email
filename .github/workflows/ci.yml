@@ -35,8 +35,8 @@ jobs:
           fi
       - name: Enforce Stalwart-only campaign delivery
         run: |
-          # router_test.go is explicitly allowlisted: it sets the platform-mail
-          # fallback key to prove campaign sends still use only Stalwart.
+          # router_test.go only sets a fake platform fallback to prove the
+          # campaign path never consumes it.
           if git grep -n -i 'resend' -- \
             internal/campaigns internal/delivery internal/worker internal/api \
             'apps/web/app/(dashboard)' \
@@ -207,6 +207,13 @@ jobs:
           SMTP_USERNAME: ""
           SMTP_PASSWORD: ""
           SMTP_FROM: ci@sendwise.test
+          PLATFORM_SMTP_ADDR: mailpit:1025
+          PLATFORM_SMTP_HOST: mailpit
+          PLATFORM_SMTP_TLS_MODE: none
+          PLATFORM_SMTP_USERNAME: ""
+          PLATFORM_SMTP_PASSWORD: ""
+          PLATFORM_FROM_EMAIL: ci@sendwise.test
+          PLATFORM_VERIFIED_SENDER_DOMAINS: sendwise.test
           REQUIRE_VERIFIED_DOMAIN: "false"
           GATEWAY_AUTH_RATE_PER_MINUTE: "600"
           GATEWAY_AUTH_BURST: "100"
@@ -246,44 +253,17 @@ jobs:
           E2E_BASE_URL: http://localhost:3000
           E2E_API_ORIGIN: http://localhost:8084
           MAILPIT_API_URL: http://localhost:8025
+          E2E_COMPOSE_PROJECT: sendwise-e2e-stalwart
           DEPLOY_SMOKE_EMAIL: smoke@sendwise.test
           DEPLOY_SMOKE_PASSWORD: SmokeTest2026!
         run: npm --prefix apps/web run test:e2e -- --reporter=line
-      - name: Provision Stalwart for real relay recovery proof
+      - name: Run SMTP relay outage/recovery Playwright spec
         env:
-          STALWART_COMPOSE_PROJECT: sendwise-e2e-stalwart
-          STALWART_DOMAIN: sendwise.test
-          STALWART_HOSTNAME: mail.sendwise.test
-          STALWART_ADMIN_USERNAME: admin
-          STALWART_ADMIN_PASSWORD: ci-only-Stalwart-Admin-2026!
-          STALWART_SUBMIT_PASSWORD: ci-only-Stalwart-Submit-2026!
-        run: ./scripts/provision-stalwart.sh --local
-      - name: Route Identity through Stalwart for recovery proof
-        env:
-          APP_ENV: development
-          SERVICE_TOKEN: ci-only-service-token
-          WEBHOOK_SECRET: ci-only-webhook-secret
-          JWT_SECRET: ci-only-jwt-secret-do-not-use-in-production
-          SMTP_ADDR: stalwart:587
-          SMTP_HOST: mail.sendwise.test
-          SMTP_TLS_MODE: starttls
-          SMTP_USERNAME: noreply@sendwise.test
-          SMTP_PASSWORD: ci-only-Stalwart-Submit-2026!
-          SMTP_FROM: noreply@sendwise.test
-          MAIL_PROVIDER: smtp
-          PLATFORM_FROM_EMAIL: noreply@sendwise.test
-          STALWART_COMPOSE_PROJECT: sendwise-e2e-stalwart
-        run: docker compose --project-name sendwise-e2e-stalwart -f docker-compose.yml -f docker-compose.microservices.yml up -d --force-recreate identity
-      - name: Run real Stalwart outage/recovery Playwright spec
-        env:
-          RUN_STALWART_RECOVERY_E2E: "1"
-          STALWART_COMPOSE_PROJECT: sendwise-e2e-stalwart
-          STALWART_URL: http://127.0.0.1:8081
-          STALWART_DOMAIN: sendwise.test
-          STALWART_SUBMIT_USERNAME: noreply
-          STALWART_SUBMIT_PASSWORD: ci-only-Stalwart-Submit-2026!
+          RUN_MAILPIT_RECOVERY_E2E: "1"
+          E2E_COMPOSE_PROJECT: sendwise-e2e-stalwart
+          MAILPIT_API_URL: http://localhost:8025
           E2E_BASE_URL: http://localhost:3000
-        run: npm --prefix apps/web run test:e2e -- --grep "real Stalwart outage" --reporter=line
+        run: npm --prefix apps/web run test:e2e -- --grep "mail worker retries queued verification" --reporter=line
 
   docker-build:
     runs-on: ubuntu-latest

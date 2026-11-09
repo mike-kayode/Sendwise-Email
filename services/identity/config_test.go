@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/khayode/email-platform/internal/kit"
 )
 
 func TestLoadConfigRequiresJWTSecret(t *testing.T) {
@@ -99,27 +101,31 @@ func TestLoadProductionSMTPRequiresTLS(t *testing.T) {
 	t.Setenv("SMTP_PASSWORD", "smtp-secret")
 	t.Setenv("SMTP_FROM", "hello@example.test")
 	t.Setenv("SMTP_TLS_MODE", "none")
+	t.Setenv("PLATFORM_SMTP_ADDR", "relay.example.test:587")
+	t.Setenv("PLATFORM_SMTP_HOST", "relay.example.test")
+	t.Setenv("PLATFORM_SMTP_TLS_MODE", "none")
 	t.Setenv("DKIM_ENCRYPTION_KEY", "test-mail-outbox-key")
 
-	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SMTP_TLS_MODE") {
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "PLATFORM_SMTP_TLS_MODE") {
 		t.Fatalf("LoadConfig() error = %v, want production SMTP TLS failure", err)
 	}
 }
 
-func TestLoadProductionRequiresWorkingMailProvider(t *testing.T) {
+func TestLoadProductionAllowsRegistrationWithMailDegraded(t *testing.T) {
 	for key, value := range map[string]string{
 		"JWT_SECRET": "test-secret", "APP_ENV": "production", "SERVICE_TOKEN": "test-service-token",
+		"DKIM_ENCRYPTION_KEY": "test-mail-outbox-key",
 	} {
 		t.Setenv(key, value)
 	}
-	t.Setenv("MAIL_PROVIDER", "smtp")
-	t.Setenv("SMTP_ADDR", "")
-	t.Setenv("SMTP_HOST", "")
-	t.Setenv("SMTP_USERNAME", "")
-	t.Setenv("SMTP_PASSWORD", "")
-	t.Setenv("SMTP_FROM", "")
-	if _, err := LoadConfig(); err == nil {
-		t.Fatal("LoadConfig() accepted production SMTP without credentials")
+	t.Setenv("MAIL_PROVIDER", "auto")
+	t.Setenv("SMTP_FROM", "hello@example.test")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() should allow registration with degraded mail: %v", err)
+	}
+	if got := mailSenderDegradation(cfg); got != "sender_not_configured" {
+		t.Fatalf("mailSenderDegradation() = %q, want sender_not_configured", got)
 	}
 
 	t.Setenv("MAIL_PROVIDER", "resend")
@@ -151,6 +157,8 @@ func TestLoadProductionRejectsDevelopmentMailRelay(t *testing.T) {
 	t.Setenv("SMTP_PASSWORD", "smtp-secret")
 	t.Setenv("SMTP_FROM", "hello@example.test")
 	t.Setenv("DKIM_ENCRYPTION_KEY", "test-mail-outbox-key")
+	t.Setenv("SMTP_ADDR", "smtp.campaign.example.test:587")
+	t.Setenv("SMTP_HOST", "smtp.campaign.example.test")
 
 	for _, test := range []struct {
 		name     string
@@ -167,8 +175,8 @@ func TestLoadProductionRejectsDevelopmentMailRelay(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("MAIL_PROVIDER", test.provider)
-			t.Setenv("SMTP_ADDR", test.addr)
-			t.Setenv("SMTP_HOST", test.host)
+			t.Setenv("PLATFORM_SMTP_ADDR", test.addr)
+			t.Setenv("PLATFORM_SMTP_HOST", test.host)
 
 			_, err := LoadConfig()
 			if err == nil {
@@ -191,5 +199,23 @@ func TestLoadDevelopmentAllowsDevelopmentMailRelay(t *testing.T) {
 
 	if _, err := LoadConfig(); err != nil {
 		t.Fatalf("LoadConfig() rejected development Mailpit/log configuration: %v", err)
+	}
+}
+
+func TestMailSenderDegradationValidatesAllowlistedDomains(t *testing.T) {
+	cfg := Config{
+		BaseConfig:                    kit.BaseConfig{Env: "production"},
+		MailProvider:                  "auto",
+		SMTPFrom:                      "campaign@example.test",
+		PlatformFromEmail:             "platform@example.test",
+		PlatformVerifiedSenderDomains: "example.test",
+		PlatformSMTPAddr:              "smtp.example.test:587",
+	}
+	if got := mailSenderDegradation(cfg); got != "" {
+		t.Fatalf("valid mail config degradation = %q, want empty", got)
+	}
+	cfg.PlatformFromEmail = "platform@foreign.test"
+	if got := mailSenderDegradation(cfg); got != "sender_domain_not_allowlisted" {
+		t.Fatalf("foreign sender degradation = %q, want sender_domain_not_allowlisted", got)
 	}
 }

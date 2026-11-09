@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/khayode/email-platform/internal/kit"
 )
 
 type testMailer struct {
@@ -139,6 +141,31 @@ func TestNewMailerAttachesPlatformFallbackOnlyWhenBothSettingsExist(t *testing.T
 				t.Fatalf("fallback attached = %t, want %t", hasFallback, test.wantFallback)
 			}
 		})
+	}
+}
+
+func TestProductionIdentityMailerDoesNotUseCampaignSMTP(t *testing.T) {
+	mailer := NewMailer(Config{
+		BaseConfig:           kit.BaseConfig{Env: "production"},
+		MailProvider:         "smtp",
+		SMTPAddr:             "stalwart:587",
+		SMTPHost:             "stalwart",
+		SMTPUsername:         "campaign-user",
+		SMTPPassword:         "campaign-password",
+		SMTPFrom:             "campaign@example.test",
+		PlatformSMTPAddr:     "smtp-relay.example.test:587",
+		PlatformSMTPHost:     "smtp-relay.example.test",
+		PlatformSMTPUsername: "platform-user",
+		PlatformSMTPPassword: "platform-password",
+		PlatformSMTPTLSMode:  "starttls",
+		PlatformFromEmail:    "noreply@example.test",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	platformMailer, ok := mailer.(*smtpMailer)
+	if !ok {
+		t.Fatalf("mailer type = %T, want *smtpMailer", mailer)
+	}
+	if platformMailer.addr != "smtp-relay.example.test:587" || platformMailer.from != "noreply@example.test" {
+		t.Fatalf("production identity SMTP config = addr %q, from %q", platformMailer.addr, platformMailer.from)
 	}
 }
 

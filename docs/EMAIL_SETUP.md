@@ -1,33 +1,37 @@
 # Transactional Email Setup
 
-Identity uses Stalwart over SMTP for transactional email. `log` is for
-development only. Mailpit is useful for local UI tests, but a message accepted
-by Mailpit is not proof of delivery by Stalwart or an external provider.
+Identity uses a dedicated platform SMTP relay for transactional email.
+Production Identity does not use campaign SMTP or Stalwart; `log` is for
+development only. Mailpit is useful for local UI tests, but acceptance by
+Mailpit is not proof of delivery by an external provider.
 
 ## SMTP settings
 
-Configure these values for Identity:
+Configure these values for Identity, independently of campaign SMTP:
 
 ```dotenv
 MAIL_PROVIDER=smtp
-SMTP_ADDR=stalwart:587
-SMTP_HOST=mail.example.com
-SMTP_TLS_MODE=starttls
-SMTP_USERNAME=noreply@example.com
-SMTP_PASSWORD=<secret>
-SMTP_FROM=noreply@example.com
+PLATFORM_SMTP_ADDR=smtp-relay.example.com:587
+PLATFORM_SMTP_HOST=smtp-relay.example.com
+PLATFORM_SMTP_TLS_MODE=starttls
+PLATFORM_SMTP_USERNAME=<relay user>
+PLATFORM_SMTP_PASSWORD=<secret>
+PLATFORM_VERIFIED_SENDER_DOMAINS=example.com
+PLATFORM_FROM_EMAIL=noreply@example.com
+SMTP_FROM=hello@example.com
 ```
 
-`SMTP_TLS_MODE` is `none`, `starttls`, or `tls`. `starttls` is the recommended
+`PLATFORM_SMTP_TLS_MODE` is `none`, `starttls`, or `tls`. `starttls` is the recommended
 mode on port 587; `tls` is for implicit TLS, commonly port 465. Production
-Identity rejects `none` when SMTP is the selected provider. With SMTP selected,
-`GET /readyz` performs EHLO and authenticates without sending a message. The
-SMTP error response code/text and recipient domain are logged; passwords are
-never logged.
+Identity does not fall back to `SMTP_ADDR`/Stalwart. Sender addresses must use
+a domain in `PLATFORM_VERIFIED_SENDER_DOMAINS`; missing or invalid values are
+logged at startup and appear as `mail_status: degraded` on `/readyz`. When SMTP
+is selected, readiness performs EHLO and authenticates without sending a
+message. SMTP response code/text and recipient domain are logged; passwords
+are never logged.
 
-Optional platform-mail failover is configured only with both
-`PLATFORM_RESEND_API_KEY` and `PLATFORM_FROM_EMAIL`. When either is unset,
-Identity uses Stalwart only. Campaign delivery never uses this fallback.
+Optional API failover is configured with `PLATFORM_RESEND_API_KEY` and
+`PLATFORM_FROM_EMAIL`. Campaign delivery never uses this fallback.
 
 ## Stalwart version and configuration API
 
@@ -180,12 +184,14 @@ The API uses `STALWART_MANAGEMENT_URL`, `STALWART_ADMIN_USERNAME`, and
 the private service address `http://stalwart:8080`; a host-run API uses
 `http://127.0.0.1:8081`. The admin API remains unpublished outside loopback.
 
-The local Stalwart integration test registers through Identity, probes
+An isolated local Stalwart integration test registers through Identity, probes
 EHLO/STARTTLS/AUTH, reads the verification message from the real Stalwart
 mailbox over JMAP, and verifies the platform DKIM signature against the active
 DNS TXT value returned by the management API. The pinned local certificate is
-test-only; production SMTP verifies the configured server hostname against
-system certificate roots.
+test-only. It exercises an explicitly injected SMTP transport only; production
+Identity uses the separate `PLATFORM_SMTP_*` relay settings above and never
+uses campaign Stalwart. Production SMTP verifies the configured server hostname
+against system certificate roots.
 
 ## Bounce and complaint collection
 

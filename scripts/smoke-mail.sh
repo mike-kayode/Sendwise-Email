@@ -6,48 +6,55 @@ fail() {
   exit 1
 }
 
-[ "$#" -eq 1 ] || fail "usage: scripts/smoke-mail.sh <recipient>"
-recipient="$1"
+[ "$#" -le 1 ] || fail "usage: DEPLOY_SMOKE_MAIL_TO=<recipient> scripts/smoke-mail.sh [recipient]"
+recipient="${1:-${DEPLOY_SMOKE_MAIL_TO:-}}"
+[ -n "$recipient" ] || fail "set DEPLOY_SMOKE_MAIL_TO or pass a recipient"
+[ -n "${PLATFORM_SMTP_ADDR:-}" ] || fail "PLATFORM_SMTP_ADDR is required"
+[ -n "${PLATFORM_FROM_EMAIL:-}" ] || fail "PLATFORM_FROM_EMAIL is required"
+case "$recipient$PLATFORM_FROM_EMAIL" in
+  *$'\r'*|*$'\n'*) fail "email addresses cannot contain line breaks" ;;
+esac
 command -v curl >/dev/null 2>&1 || fail "curl is required"
-command -v jq >/dev/null 2>&1 || fail "jq is required"
-command -v openssl >/dev/null 2>&1 || fail "openssl is required"
 
-identity_url="${IDENTITY_SMOKE_URL:-http://127.0.0.1:8082}"
-case "$identity_url" in
-  http://localhost:*|http://127.0.0.1:*) ;;
-  *) fail "IDENTITY_SMOKE_URL must point to a local Identity listener" ;;
+tls_mode="${PLATFORM_SMTP_TLS_MODE:-starttls}"
+case "$tls_mode" in
+  starttls)
+    protocol="smtp"
+    ;;
+  tls)
+    protocol="smtps"
+    ;;
+  none)
+    [ "${APP_ENV:-development}" != "production" ] || fail "TLS is required in production"
+    protocol="smtp"
+    ;;
+  *) fail "PLATFORM_SMTP_TLS_MODE must be none, starttls, or tls" ;;
 esac
 
-password="Smoke-$(openssl rand -hex 24)"
-stamp="$(date +%s)-${RANDOM}"
-payload="$(mktemp "${TMPDIR:-/tmp}/sendwise-mail-smoke.XXXXXX")"
-response="$(mktemp "${TMPDIR:-/tmp}/sendwise-mail-response.XXXXXX")"
-trap 'rm -f -- "$payload" "$response"' EXIT
+message="$(mktemp "${TMPDIR:-/tmp}/sendwise-mail-smoke.XXXXXX")"
+trap 'rm -f -- "$message"' EXIT
+printf 'From: %s\r\nTo: %s\r\nSubject: Sendwise deployment mail smoke test\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nSendwise transactional SMTP handoff check.\r\n' \
+  "$PLATFORM_FROM_EMAIL" "$recipient" >"$message"
 
-jq -n \
-  --arg email "$recipient" \
-  --arg password "$password" \
-  --arg name "Sendwise Mail Smoke" \
-  --arg organization_name "Sendwise Mail Smoke $stamp" \
-  '{email:$email,password:$password,name:$name,organization_name:$organization_name}' >"$payload"
-
-if ! status="$(curl -sS --connect-timeout 5 --max-time 20 \
-  -o "$response" -w '%{http_code}' \
-  -H 'Content-Type: application/json' \
-  --data-binary @"$payload" \
-  "${identity_url%/}/auth/register")"; then
-  fail "could not reach the local Identity registration endpoint at $identity_url"
+curl_args=(
+  --silent --show-error
+  --connect-timeout 5 --max-time 30
+  --url "$protocol://$PLATFORM_SMTP_ADDR"
+  --mail-from "$PLATFORM_FROM_EMAIL"
+  --mail-rcpt "$recipient"
+  --upload-file "$message"
+)
+if [ -n "${PLATFORM_SMTP_USERNAME:-}" ]; then
+  [ -n "${PLATFORM_SMTP_PASSWORD:-}" ] || fail "PLATFORM_SMTP_PASSWORD is required with PLATFORM_SMTP_USERNAME"
+  curl_args+=(--user "$PLATFORM_SMTP_USERNAME:$PLATFORM_SMTP_PASSWORD")
+fi
+if [ "$tls_mode" = starttls ]; then
+  curl_args+=(--ssl-reqd)
 fi
 
-if [ "$status" != "201" ]; then
-  message="$(jq -r '.error.message // .message // "no error detail returned"' "$response" 2>/dev/null || true)"
-  fail "Identity registration failed (HTTP $status): $message"
+if ! curl "${curl_args[@]}"; then
+  fail "SMTP relay did not accept a message for $recipient"
 fi
 
-delivery_status="$(jq -r '.delivery_status // "accepted"' "$response")"
-if [ "$delivery_status" != "accepted" ]; then
-  fail "Identity created the account but verification delivery is $delivery_status; check Identity SMTP logs"
-fi
-
-echo "SMTP smoke passed: the configured relay accepted a verification email for $recipient."
+echo "SMTP smoke passed: the platform relay accepted a message for $recipient."
 echo "This confirms SMTP handoff only; it does not prove inbox delivery."

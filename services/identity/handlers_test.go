@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -469,7 +471,7 @@ func errorOf(t *testing.T, rec *httptest.ResponseRecorder) (code, message string
 
 // --- tests -----------------------------------------------------------------
 
-func TestRegisterCreatesAccountAndSendsVerification(t *testing.T) {
+func TestRegisterCreatesAccountAndQueuesVerification(t *testing.T) {
 	handler, store, _, mailer := newTestHandler(t)
 
 	rec := doJSON(t, handler.Routes(), http.MethodPost, "/auth/register", `{
@@ -483,8 +485,9 @@ func TestRegisterCreatesAccountAndSendsVerification(t *testing.T) {
 	}
 
 	var resp struct {
-		Message string `json:"message"`
-		Email   string `json:"email"`
+		Message        string `json:"message"`
+		Email          string `json:"email"`
+		DeliveryStatus string `json:"delivery_status"`
 	}
 	decodeBody(t, rec, &resp)
 	if resp.Email != "ada@example.com" {
@@ -492,6 +495,9 @@ func TestRegisterCreatesAccountAndSendsVerification(t *testing.T) {
 	}
 	if resp.Message == "" {
 		t.Fatal("expected a message")
+	}
+	if resp.DeliveryStatus != "queued" {
+		t.Fatalf("delivery_status = %q, want queued", resp.DeliveryStatus)
 	}
 
 	if len(store.registrations) != 1 {
@@ -501,12 +507,16 @@ func TestRegisterCreatesAccountAndSendsVerification(t *testing.T) {
 		t.Fatalf("organization_name = %q", store.registrations[0].organizationName)
 	}
 
-	sent := mailer.Sent()
-	if len(sent) != 1 {
-		t.Fatalf("sent mails = %d, want 1", len(sent))
+	if sent := mailer.Sent(); len(sent) != 0 {
+		t.Fatalf("registration synchronously sent %d messages; want none", len(sent))
 	}
-	if !strings.Contains(sent[0].Text, "/auth/verify?token=") {
-		t.Fatalf("verification mail missing link: %q", sent[0].Text)
+	select {
+	case job := <-handler.mailRetries:
+		if !strings.Contains(job.message.Text, "/auth/verify?token=") {
+			t.Fatalf("queued verification mail missing link: %q", job.message.Text)
+		}
+	default:
+		t.Fatal("registration did not queue a verification message")
 	}
 }
 
@@ -523,11 +533,19 @@ func TestRegisterQueuesVerificationRetryWhenDeliveryFails(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"delivery_status":"retry_queued"`) {
-		t.Fatalf("response does not report queued retry: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), `"delivery_status":"queued"`) {
+		t.Fatalf("response does not report queued mail: %s", rec.Body.String())
 	}
 	if _, err := store.GetUserByEmail(context.Background(), "delivery@example.com"); err != nil {
 		t.Fatalf("account should remain available for resend: %v", err)
+	}
+	select {
+	case job := <-handler.mailRetries:
+		if job.message.To != "delivery@example.com" {
+			t.Fatalf("queued recipient = %q", job.message.To)
+		}
+	default:
+		t.Fatal("verification message was not queued")
 	}
 }
 
@@ -563,7 +581,7 @@ func TestRegisterRetriesVerificationDelivery(t *testing.T) {
 	mailer.mu.Lock()
 	defer mailer.mu.Unlock()
 	if mailer.attempts != 3 {
-		t.Fatalf("mailer attempts = %d, want 3 (initial plus two retries)", mailer.attempts)
+		t.Fatalf("mailer attempts = %d, want 3 attempts total", mailer.attempts)
 	}
 }
 
@@ -925,7 +943,7 @@ func TestMeReturnsUserAndOrganization(t *testing.T) {
 }
 
 func TestVerifyEmail(t *testing.T) {
-	handler, store, workspace, mailer := newTestHandler(t)
+	handler, store, workspace, _ := newTestHandler(t)
 	user := seedVerifiedUser(t, handler, store, workspace, "fresh@example.com")
 	// Make the user unverified again for this test.
 	store.mu.Lock()
@@ -938,13 +956,14 @@ func TestVerifyEmail(t *testing.T) {
 		t.Fatalf("resend status = %d", rec.Code)
 	}
 
-	sent := mailer.Sent()
-	if len(sent) == 0 {
-		t.Fatal("expected verification mail")
+	var queued mailRetryJob
+	select {
+	case queued = <-handler.mailRetries:
+	case <-time.After(time.Second):
+		t.Fatal("expected verification mail in the queue")
 	}
-
 	// Extract token from the recorded message.
-	link := extractQueryParam(t, sent[len(sent)-1].Text, "token")
+	link := extractQueryParam(t, queued.message.Text, "token")
 
 	// Seed the token directly to avoid parsing HTML mail.
 	tokenHash := HashToken(link)
@@ -969,7 +988,11 @@ func TestVerifyEmail(t *testing.T) {
 func TestResendVerificationRateLimitsByEmail(t *testing.T) {
 	handler, _, _, _ := newTestHandler(t)
 	for attempt := 1; attempt <= 3; attempt++ {
-		rec := doJSON(t, handler.Routes(), http.MethodPost, "/auth/resend-verification", `{"email":"limited@example.com"}`)
+		request := httptest.NewRequest(http.MethodPost, "/auth/resend-verification", strings.NewReader(`{"email":"limited@example.com"}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = "192.0.2." + strconv.Itoa(attempt) + ":1234"
+		rec := httptest.NewRecorder()
+		handler.Routes().ServeHTTP(rec, request)
 		if attempt < 3 && rec.Code != http.StatusOK {
 			t.Fatalf("attempt %d status = %d, want 200", attempt, rec.Code)
 		}
@@ -984,6 +1007,24 @@ func TestResendVerificationRateLimitsByEmail(t *testing.T) {
 	}
 }
 
+func TestResendVerificationRateLimitsByIP(t *testing.T) {
+	handler, _, _, _ := newTestHandler(t)
+	for attempt := 1; attempt <= 3; attempt++ {
+		request := httptest.NewRequest(http.MethodPost, "/auth/resend-verification",
+			strings.NewReader(fmt.Sprintf(`{"email":"limited-%d@example.com"}`, attempt)))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = "192.0.2.1:1234"
+		rec := httptest.NewRecorder()
+		handler.Routes().ServeHTTP(rec, request)
+		if attempt < 3 && rec.Code != http.StatusOK {
+			t.Fatalf("attempt %d status = %d, want 200", attempt, rec.Code)
+		}
+		if attempt == 3 && rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt %d status = %d, want 429; body = %s", attempt, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestVerifyRejectsInvalidToken(t *testing.T) {
 	handler, _, _, _ := newTestHandler(t)
 	rec := doJSON(t, handler.Routes(), http.MethodPost, "/auth/verify", `{"token":"bogus"}`)
@@ -992,6 +1033,38 @@ func TestVerifyRejectsInvalidToken(t *testing.T) {
 	}
 	if code, _ := errorOf(t, rec); code != "invalid_token" {
 		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestVerifyExpiredAndUsedTokensReturnHelpfulMessage(t *testing.T) {
+	handler, store, _, _ := newTestHandler(t)
+	for _, test := range []struct {
+		name      string
+		expiresAt time.Time
+		used      bool
+	}{
+		{name: "expired", expiresAt: time.Now().Add(-time.Hour)},
+		{name: "already used", expiresAt: time.Now().Add(time.Hour), used: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			token := "verification-" + strings.ReplaceAll(test.name, " ", "-")
+			hash := HashToken(token)
+			if err := store.CreateVerificationToken(context.Background(), fakeUUID(10), "person@example.test", hash, "account_verification", test.expiresAt); err != nil {
+				t.Fatalf("create token: %v", err)
+			}
+			if test.used {
+				store.mu.Lock()
+				store.tokens[hash].used = true
+				store.mu.Unlock()
+			}
+			rec := doJSON(t, handler.Routes(), http.MethodPost, "/auth/verify", `{"token":"`+token+`"}`)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "invalid or has expired") {
+				t.Fatalf("response is not helpful: %s", rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -1123,16 +1196,26 @@ func (m smtpProbeMailer) Send(context.Context, MailMessage) error {
 }
 func (m smtpProbeMailer) Probe(context.Context) error { return m.err }
 
-func TestReadyFailsWhenSMTPProbeFails(t *testing.T) {
+func TestReadyReportsSMTPProbeFailureAsDegraded(t *testing.T) {
 	handler, _, _, _ := newTestHandler(t)
+	handler.cfg = Config{
+		BaseConfig:                    kit.BaseConfig{Env: "development"},
+		SMTPFrom:                      "sender@example.test",
+		PlatformFromEmail:             "sender@example.test",
+		PlatformVerifiedSenderDomains: "example.test",
+		PlatformSMTPAddr:              "127.0.0.1:1025",
+		MailProvider:                  "smtp",
+	}
 	handler.mailer = smtpProbeMailer{err: errors.New("SMTP AUTH returned 535")}
 
 	rec := doJSON(t, handler.Routes(), http.MethodGet, "/readyz", "")
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503; body = %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
-	if code, _ := errorOf(t, rec); code != "smtp_unavailable" {
-		t.Fatalf("error code = %q, want smtp_unavailable", code)
+	var response map[string]string
+	decodeBody(t, rec, &response)
+	if response["mail_status"] != "degraded" || response["mail_reason"] != "relay_probe_failed" {
+		t.Fatalf("mail readiness = %+v, want relay probe degraded", response)
 	}
 }
 
