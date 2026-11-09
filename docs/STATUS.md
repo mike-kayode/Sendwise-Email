@@ -1954,6 +1954,23 @@ serial_before_ms=3728.8 parallel_after_ms=482.5
 @172.64.53.7 (authoritative): SPF/MX/DMARC NOERROR; mail DKIM NXDOMAIN; Sendwise ownership TXT NXDOMAIN
 ```
 
+The CI 100k throughput fixture now seeds a real encrypted DKIM key and checks
+the warm-up reservation row for the generated sender domain. It passed locally
+against the SMTP discard sink:
+
+```
+$ RUN_BULK_THROUGHPUT=1 TEST_DATABASE_URL=<isolated local PostgreSQL URL> go test -timeout 45m ./internal/worker -run '^TestBulkCampaignSMTPThroughput100k$' -count=1 -v
+=== RUN   TestBulkCampaignSMTPThroughput100k
+bulk-sink: recipients=100000 elapsed=13m10.31s sends_per_second=126.53 peak_heap_bytes=34965712 heap_after_bytes=13931464 queue_depth_peak=100000 failures=0 warmup_reserved=100000
+--- PASS: TestBulkCampaignSMTPThroughput100k (804.95s)
+PASS
+ok  	github.com/khayode/email-platform/internal/worker 806.114s
+```
+
+This is the application's local SMTP sink benchmark, not the requested
+100,000-recipient run through Stalwart with an external-MX sink, nor a Stalwart
+CPU/memory/queue-depth benchmark.
+
 Still not done / not verified:
 
 - The local Stalwart test proves authenticated submission, JMAP receipt, and

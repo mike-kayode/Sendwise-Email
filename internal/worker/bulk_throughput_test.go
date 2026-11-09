@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -15,13 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khayode/email-platform/internal/auth"
 	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/config"
-	"github.com/khayode/email-platform/internal/db"
 	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/observability"
+	"github.com/khayode/email-platform/internal/testutil"
 )
 
 const bulkRecipientCount = 100000
@@ -43,20 +41,8 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 	if os.Getenv("RUN_BULK_THROUGHPUT") != "1" {
 		t.Skip("set RUN_BULK_THROUGHPUT=1 to run the 100,000-recipient sink proof")
 	}
-	databaseURL := os.Getenv("TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Fatal("TEST_DATABASE_URL is required for the 100,000-recipient proof")
-	}
-
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatalf("connect test database: %v", err)
-	}
-	defer pool.Close()
-	if err := db.Migrate(ctx, databaseURL, filepath.Join("..", "..", "migrations")); err != nil {
-		t.Fatalf("migrate test database: %v", err)
-	}
+	pool := testutil.NewPostgres(t)
 
 	var organizationID, campaignID, sendingDomain string
 	if err := pool.QueryRow(ctx, `
@@ -78,11 +64,20 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 	`, organizationID, bulkRecipientCount); err != nil {
 		t.Fatalf("seed throughput contacts: %v", err)
 	}
+	const dkimEncryptionKey = "bulk-throughput-test-encryption-key"
+	dkimPublicKey, dkimPrivateKey, err := delivery.GenerateDKIMKeyPair(dkimEncryptionKey)
+	if err != nil {
+		t.Fatalf("generate throughput DKIM key: %v", err)
+	}
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO sending_domains (organization_id, domain, status, dkim_selector, verification_status)
-		VALUES ($1, 'bulk-' || replace(gen_random_uuid()::text, '-', '') || '.example.test', 'verified', 'mail', 'verified')
+		INSERT INTO sending_domains (
+			organization_id, domain, status, dkim_selector, dkim_public_key,
+			dkim_private_key, verification_status
+		)
+		VALUES ($1, 'bulk-' || replace(gen_random_uuid()::text, '-', '') || '.example.test',
+		        'verified', 'mail', $2, $3, 'verified')
 		RETURNING domain
-	`, organizationID).Scan(&sendingDomain); err != nil {
+	`, organizationID, dkimPublicKey, dkimPrivateKey).Scan(&sendingDomain); err != nil {
 		t.Fatalf("seed throughput sending domain: %v", err)
 	}
 	var senderIdentityID string
@@ -164,7 +159,7 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 		SMTPHost:               "localhost",
 		SMTPPoolSize:           parallelWorkers,
 		BounceDomain:           "bounces.example.test",
-		DKIMEncryptionKey:      "bulk-throughput-test-encryption-key",
+		DKIMEncryptionKey:      dkimEncryptionKey,
 	}
 	smtpPool := delivery.NewSMTPPool(cfg.SMTPAddr, cfg.SMTPHost, "", "", true, cfg.SMTPPoolSize)
 	defer smtpPool.Close()
@@ -233,8 +228,8 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 	if err := pool.QueryRow(ctx, `
 		SELECT reserved_count
 		FROM sending_domain_daily_stats
-		WHERE organization_id = $1 AND domain = 'bulk.example' AND sending_day = CURRENT_DATE
-	`, organizationID).Scan(&warmupReserved); err != nil {
+		WHERE organization_id = $1 AND domain = $2 AND sending_day = CURRENT_DATE
+	`, organizationID, sendingDomain).Scan(&warmupReserved); err != nil {
 		t.Fatalf("load warm-up usage: %v", err)
 	}
 	if warmupReserved != bulkRecipientCount {
