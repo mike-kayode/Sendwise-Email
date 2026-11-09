@@ -261,6 +261,8 @@ jobs:
           E2E_COMPOSE_PROJECT: sendwise-e2e-stalwart
           MAILPIT_API_URL: http://localhost:8025
           E2E_BASE_URL: http://localhost:3000
+          SERVICE_TOKEN: ci-only-service-token
+          WEBHOOK_SECRET: ci-only-webhook-secret
         run: npm --prefix apps/web run test:e2e -- --grep "mail worker retries queued verification" --reporter=line
 
   docker-build:
