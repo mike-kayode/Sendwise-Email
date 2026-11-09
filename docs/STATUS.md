@@ -178,7 +178,14 @@ provider-specific references in campaign code.
 - Real non-HTTPS clipboard behavior; its browser test was skipped.
 - Redistribution rights and user-provided Figma exports/images for any bundled
   artwork.
-- A green GitHub Actions run for the pushed Part 2 commit. GitHub Actions is the
-  release gate; this local report does not claim that result.
+- The first GitHub Actions run for Part 2 failed in `deploy-validate` because
+  the pre-migration check ran before PostgreSQL was ready. The workflow now
+  waits for PostgreSQL health; the follow-up run must be checked before release.
+  The failure output was:
+
+  ```text
+  psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory
+  ##[error]Process completed with exit code 2.
+  ```
 - Any unrelated legacy module not demonstrated by the commands above. Prior
   status claims outside this report are not treated as current evidence.

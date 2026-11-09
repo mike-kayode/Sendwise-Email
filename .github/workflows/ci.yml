@@ -68,7 +68,7 @@ jobs:
           DKIM_ENCRYPTION_KEY=ci-only-dkim-key
           EOF
           SENDWISE_ENV_FILE="$tmp_env" ./scripts/deploy.sh validate
-          docker compose --env-file "$tmp_env" -f docker-compose.yml -f docker-compose.microservices.yml up -d postgres
+          docker compose --env-file "$tmp_env" -f docker-compose.yml -f docker-compose.microservices.yml up -d --wait --wait-timeout 60 postgres
           SENDWISE_ENV_FILE="$tmp_env" ./scripts/check-domain-duplicates.sh
           docker compose --env-file "$tmp_env" -f docker-compose.yml run --rm migrate
           SENDWISE_ENV_FILE="$tmp_env" ./scripts/check-domain-duplicates.sh
