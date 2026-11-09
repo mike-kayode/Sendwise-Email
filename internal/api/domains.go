@@ -177,6 +177,10 @@ func (s *Server) verifyDomainByProvider(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) verifyStalwartDomain(w http.ResponseWriter, r *http.Request, d *sendingDomain) {
+	if d.OwnerConflict {
+		httpx.Error(w, http.StatusConflict, "domain_owner_conflict", "Domain already owned by another workspace.")
+		return
+	}
 	spf, dkim, dmarc, verification := s.checkDomainDNS(
 		r.Context(), d.Domain, d.DKIMSelector, d.DKIMPublicKey, d.VerificationToken,
 	)
@@ -187,6 +191,17 @@ func (s *Server) verifyStalwartDomain(w http.ResponseWriter, r *http.Request, d 
 	case hasDomainDNSResult("verified", spf, dkim, dmarc, verification) ||
 		hasDomainDNSResult("mismatched", spf, dkim, dmarc, verification):
 		status = "misconfigured"
+	}
+	if status == "verified" {
+		if s.stalwartDomainHoster == nil {
+			httpx.Error(w, http.StatusServiceUnavailable, "stalwart_unavailable", "Stalwart domain hosting is not configured.")
+			return
+		}
+		if err := s.stalwartDomainHoster.EnsureDomain(r.Context(), d.Domain); err != nil {
+			s.logger.Error("host verified sending domain in Stalwart", "domain", d.Domain, "error", err)
+			httpx.Error(w, http.StatusServiceUnavailable, "stalwart_unavailable", "Stalwart could not host the verified sending domain.")
+			return
+		}
 	}
 
 	updated, err := scanDomain(s.pool.QueryRow(r.Context(), `

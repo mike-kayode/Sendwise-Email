@@ -69,6 +69,8 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 
 	ownerEmail := fmt.Sprintf("p5-owner-%d@example.com", time.Now().UnixNano())
 	contactEmail := fmt.Sprintf("p5-recipient-%d@example.com", time.Now().UnixNano())
+	campaignDomain := fmt.Sprintf("campaign-%d.example.test", time.Now().UnixNano())
+	campaignSender := "hello@" + campaignDomain
 	regBody := fmt.Sprintf(`{"email":"%s","password":"p5-password","name":"P5 Owner","organization_name":"P5 Org"}`, ownerEmail)
 	regResp := doAPIRequest(t, server.Handler(), "POST", "/api/v1/auth/register", "", regBody)
 	if regResp.Code != http.StatusCreated {
@@ -84,8 +86,8 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 	}
 	if _, err := pool.Exec(context.Background(), `
 		INSERT INTO sending_domains (organization_id, domain, status, dkim_selector, dkim_public_key, dkim_private_key)
-		VALUES ($1, 'example.com', 'verified', 'campaign-test', $2, $3)
-	`, organizationID, publicKey, encryptedPrivateKey); err != nil {
+		VALUES ($1, $2, 'verified', 'campaign-test', $3, $4)
+	`, organizationID, campaignDomain, publicKey, encryptedPrivateKey); err != nil {
 		t.Fatalf("create verified sending domain: %v", err)
 	}
 	accessToken, err := tokens.IssueAccess(userID, organizationID, "owner")
@@ -132,8 +134,8 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 
 	content := `{"version":1,"blocks":[{"type":"heading","content":"Hi {{first_name}}","align":"left"},{"type":"paragraph","content":"This is a live proof message with unsubscribe: {{unsubscribe_url}}","align":"left"}]}`
 	subjectToken := fmt.Sprintf("p5-%d", time.Now().UnixNano())
-	campaignBody := fmt.Sprintf(`{"name":"P5 delivery proof","subject":"%s {{first_name}}","preview_text":"P5 proof","sender_name":"Sendwise","sender_email":"hello@example.com","sender_postal_address":"1 Example Street, Example City","list_id":"%s","template_id":"%s","content":%s}`,
-		subjectToken, list.ID, template.ID, content)
+	campaignBody := fmt.Sprintf(`{"name":"P5 delivery proof","subject":"%s {{first_name}}","preview_text":"P5 proof","sender_name":"Sendwise","sender_email":"%s","sender_postal_address":"1 Example Street, Example City","list_id":"%s","template_id":"%s","content":%s}`,
+		subjectToken, campaignSender, list.ID, template.ID, content)
 	campaignResp := doAPIRequest(t, server.Handler(), "POST", "/api/v1/campaigns", accessToken, campaignBody)
 	if campaignResp.Code != http.StatusCreated {
 		t.Fatalf("campaign create status = %d, want %d; body: %s", campaignResp.Code, http.StatusCreated, campaignResp.Body.String())
@@ -189,7 +191,8 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 	}
 	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(rawMessage), &dkim.VerifyOptions{
 		LookupTXT: func(name string) ([]string, error) {
-			if name != "campaign-test._domainkey.example.com" {
+			expectedName := "campaign-test._domainkey." + campaignDomain
+			if name != expectedName {
 				return nil, fmt.Errorf("unexpected dkim lookup name %q", name)
 			}
 			return []string{"v=DKIM1; k=rsa; p=" + publicKey}, nil
@@ -205,7 +208,7 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 		t.Fatalf("delivered message dkim verification failed: %v", verifications[0].Err)
 	}
 	t.Logf("verified DKIM signature on Mailpit message %s against %s._domainkey.%s",
-		received.ID, "campaign-test", "example.com")
+		received.ID, "campaign-test", campaignDomain)
 }
 
 func TestSuppressedAddressIsNeverSentIntegration(t *testing.T) {

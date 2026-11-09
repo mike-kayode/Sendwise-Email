@@ -80,7 +80,11 @@ func TestMain(m *testing.M) {
 func newIntegrationServer(t *testing.T) *Server {
 	t.Helper()
 	logger := observability.NewLogger("test", "api")
-	return New(integrationCfg, integrationPool, integrationTokens, nil, auth.NewAPIKeyService(integrationPool, logger), nil, logger)
+	server := New(integrationCfg, integrationPool, integrationTokens, nil, auth.NewAPIKeyService(integrationPool, logger), nil, logger)
+	server.stalwartDomainHoster = stalwartDomainProvisionFunc(func(context.Context, string) error {
+		return nil
+	})
+	return server
 }
 
 func integrationToken(t *testing.T, orgID, role string) string {
@@ -652,6 +656,11 @@ func TestDomainsIntegration(t *testing.T) {
 		t.Skip("no database available")
 	}
 	s := newIntegrationServer(t)
+	var hostedDomains []string
+	s.stalwartDomainHoster = stalwartDomainProvisionFunc(func(_ context.Context, domain string) error {
+		hostedDomains = append(hostedDomains, domain)
+		return nil
+	})
 
 	suffix := time.Now().Format("20060102150405")
 	var orgID string
@@ -876,6 +885,9 @@ func TestDomainsIntegration(t *testing.T) {
 	if verifiedResp.DNSRecords[3].Status != "verified" {
 		t.Fatalf("verification TXT record status = %q, want verified", verifiedResp.DNSRecords[3].Status)
 	}
+	if len(hostedDomains) != 1 || hostedDomains[0] != created.Domain {
+		t.Fatalf("Stalwart hosted domains = %v, want [%s]", hostedDomains, created.Domain)
+	}
 
 	// Cross-tenant isolation: another organization cannot verify this domain.
 	var orgID2 string
@@ -891,6 +903,108 @@ func TestDomainsIntegration(t *testing.T) {
 	assertStatus(t, w, http.StatusNotFound)
 	w = doRequest(t, s, "GET", "/api/v1/domains/"+domainID+"/dns-records", "", token2)
 	assertStatus(t, w, http.StatusNotFound)
+}
+
+func TestStalwartDomainVerificationHostsTenantDomain(t *testing.T) {
+	if os.Getenv("RUN_STALWART_INTEGRATION") != "1" {
+		t.Skip("set RUN_STALWART_INTEGRATION=1 to run against the local Stalwart container")
+	}
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	managementURL := os.Getenv("STALWART_URL")
+	adminUsername := os.Getenv("STALWART_ADMIN_USERNAME")
+	adminPassword := os.Getenv("STALWART_ADMIN_PASSWORD")
+	if managementURL == "" || adminUsername == "" || adminPassword == "" {
+		t.Fatal("STALWART_URL, STALWART_ADMIN_USERNAME, and STALWART_ADMIN_PASSWORD are required")
+	}
+
+	server := newIntegrationServer(t)
+	server.cfg.StalwartManagementURL = managementURL
+	server.cfg.StalwartAdminUsername = adminUsername
+	server.cfg.StalwartAdminPassword = adminPassword
+	server.stalwartDomainHoster = stalwartDomainProvisionFunc(func(ctx context.Context, domain string) error {
+		return ensureStalwartDomain(ctx, server.cfg, domain)
+	})
+	domain := "tenant-" + strings.ReplaceAll(uuid.NewString(), "-", "") + ".example.test"
+	var organizationID string
+	if err := integrationPool.QueryRow(context.Background(), `
+		INSERT INTO organizations (name, slug)
+		VALUES ($1, 'stalwart-domain-' || gen_random_uuid()::text)
+		RETURNING id
+	`, "Stalwart tenant domain").Scan(&organizationID); err != nil {
+		t.Fatalf("create tenant organization: %v", err)
+	}
+	token := integrationToken(t, organizationID, "owner")
+
+	response := doRequest(t, server, http.MethodPost, "/api/v1/domains", `{"domain":"`+domain+`"}`, token)
+	assertStatus(t, response, http.StatusCreated)
+	var created sendingDomain
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created tenant domain: %v", err)
+	}
+	var verificationToken string
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT verification_token FROM sending_domains WHERE id = $1 AND organization_id = $2
+	`, created.ID, organizationID).Scan(&verificationToken); err != nil {
+		t.Fatalf("load tenant verification token: %v", err)
+	}
+	server.dnsResolver = &fakeDNSResolver{records: map[string][]string{
+		domain: {"v=spf1 mx ~all"},
+		created.DKIMSelector + "._domainkey." + domain: {dkimRecordValue(created.DKIMPublicKey)},
+		"_dmarc." + domain:                 {"v=DMARC1; p=quarantine"},
+		"_sendwise-verification." + domain: {"v=sendwise-verification " + verificationToken},
+	}}
+	response = doRequest(t, server, http.MethodPost, "/api/v1/domains/"+created.ID+"/verify", "", token)
+	assertStatus(t, response, http.StatusOK)
+	var verified struct {
+		Domain sendingDomain `json:"domain"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &verified); err != nil {
+		t.Fatalf("decode verified tenant domain: %v", err)
+	}
+	if verified.Domain.Status != "verified" || !verified.Domain.StalwartAuthenticated {
+		t.Fatalf("domain verification did not record successful Stalwart hosting: %+v", verified.Domain)
+	}
+
+	admin := stalwartAdminClient{
+		baseURL: managementURL, username: adminUsername, password: adminPassword, client: http.DefaultClient,
+	}
+	session, err := admin.request(context.Background(), http.MethodGet, "/jmap/session", nil)
+	if err != nil {
+		t.Fatalf("load Stalwart management session: %v", err)
+	}
+	var sessionData struct {
+		PrimaryAccounts map[string]string `json:"primaryAccounts"`
+	}
+	if err := json.Unmarshal(session, &sessionData); err != nil {
+		t.Fatalf("decode Stalwart management session: %v", err)
+	}
+	domainsJSON, err := admin.call(context.Background(), sessionData.PrimaryAccounts["urn:stalwart:jmap"], "x:Domain/get", map[string]any{"ids": nil})
+	if err != nil {
+		t.Fatalf("read Stalwart domains: %v", err)
+	}
+	var domains struct {
+		List []struct {
+			Name           string         `json:"name"`
+			DKIMManagement map[string]any `json:"dkimManagement"`
+		} `json:"list"`
+	}
+	if err := json.Unmarshal(domainsJSON, &domains); err != nil {
+		t.Fatalf("decode Stalwart domains: %v", err)
+	}
+	for _, hosted := range domains.List {
+		if strings.EqualFold(hosted.Name, domain) {
+			if hosted.DKIMManagement["@type"] != "Manual" {
+				t.Fatalf("Stalwart DKIM management = %v, want Manual for app-only signing", hosted.DKIMManagement)
+			}
+			if err := admin.EnsureDomain(context.Background(), domain); err != nil {
+				t.Fatalf("re-enforce app-managed DKIM for existing Stalwart domain: %v", err)
+			}
+			return
+		}
+	}
+	t.Fatalf("verified tenant domain %q is not hosted in Stalwart", domain)
 }
 
 func mustDomainID(t *testing.T, orgID, domain string) string {

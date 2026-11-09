@@ -222,6 +222,14 @@ func TestLoadAppliesProductionRulesToStaging(t *testing.T) {
 	}
 }
 
+func TestLoadProductionRequiresStalwartManagementCredentials(t *testing.T) {
+	values := productionConfig()
+	delete(values, "STALWART_ADMIN_PASSWORD")
+	if _, err := load(configLookup(values)); err == nil {
+		t.Fatal("load accepted production config without Stalwart management credentials")
+	}
+}
+
 func productionConfig() map[string]string {
 	return map[string]string{
 		"APP_ENV":                 "production",
@@ -234,6 +242,9 @@ func productionConfig() map[string]string {
 		"SERVICE_TOKEN":           "service-token",
 		"REQUIRE_VERIFIED_DOMAIN": "true",
 		"WEBHOOK_SECRET":          strings.Repeat("b", 32),
+		"STALWART_ADMIN_USERNAME": "admin",
+		"STALWART_ADMIN_PASSWORD": "stalwart-admin-test-password",
+		"STALWART_DOMAIN":         "sendwise.test",
 	}
 }
 

@@ -52,15 +52,28 @@ services:
     restart: unless-stopped
 
   stalwart:
-    image: stalwartlabs/stalwart:latest
+    image: stalwartlabs/stalwart@sha256:73c684a84c24f5b4206ec266a8deb8986fe44a9f623997e07f084388d943c8bd
     hostname: mail.localhost
+    environment:
+      STALWART_RECOVERY_ADMIN: ${STALWART_RECOVERY_ADMIN:-}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "openssl s_client -starttls smtp -connect 127.0.0.1:587 -servername localhost -brief </dev/null 2>&1 | grep -q 'Ciphersuite:' && openssl s_client -connect 127.0.0.1:465 -servername localhost -brief </dev/null 2>&1 | grep -q 'Ciphersuite:'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     ports:
-      - "127.0.0.1:25:25"
-      - "127.0.0.1:465:465"
-      - "127.0.0.1:587:587"
-      - "127.0.0.1:8081:8080"
+      - "${STALWART_BIND_ADDRESS:-127.0.0.1}:${STALWART_PORT_25:-25}:25"
+      - "${STALWART_BIND_ADDRESS:-127.0.0.1}:${STALWART_PORT_465:-465}:465"
+      - "${STALWART_BIND_ADDRESS:-127.0.0.1}:${STALWART_PORT_587:-587}:587"
+      - "127.0.0.1:${STALWART_ADMIN_PORT:-8081}:8080"
     volumes:
       - stalwart-data:/opt/stalwart
+      - ${STALWART_CERTS_DIR:-./secrets/stalwart/certs}:/etc/stalwart/certs:ro
     restart: unless-stopped
 
   minio:

@@ -122,11 +122,12 @@ jobs:
           STALWART_ADMIN_PASSWORD: ci-only-Stalwart-Admin-2026!
           STALWART_SUBMIT_USERNAME: noreply
           STALWART_SUBMIT_PASSWORD: ci-only-Stalwart-Submit-2026!
-        run: ./scripts/provision-stalwart.sh
+        run: ./scripts/provision-stalwart.sh --local
       - name: Go test
         env:
           DATABASE_URL: postgres://email:email@localhost:5432/email?sslmode=disable
           TEST_DATABASE_URL: postgres://email:email@localhost:5432/email?sslmode=disable
+          RUN_BULK_THROUGHPUT: "1"
           REDIS_URL: redis://localhost:6379/0
           NATS_URL: nats://localhost:4222
           JWT_SECRET: test-secret-do-not-use-in-production
@@ -138,10 +139,13 @@ jobs:
           STALWART_URL: http://127.0.0.1:8081
           STALWART_DOMAIN: sendwise.test
           STALWART_HOSTNAME: mail.sendwise.test
+          STALWART_ADMIN_USERNAME: admin
+          STALWART_ADMIN_PASSWORD: ci-only-Stalwart-Admin-2026!
           STALWART_SUBMIT_USERNAME: noreply
           STALWART_SUBMIT_PASSWORD: ci-only-Stalwart-Submit-2026!
           STALWART_SMTP_ADDR: 127.0.0.1:587
           STALWART_SMTP_HOST: localhost
+          STALWART_SMTP_IMPLICIT_ADDR: 127.0.0.1:465
         run: go test ./...
 
   test-web:
@@ -200,7 +204,7 @@ jobs:
           REQUIRE_VERIFIED_DOMAIN: "false"
           GATEWAY_AUTH_RATE_PER_MINUTE: "600"
           GATEWAY_AUTH_BURST: "100"
-        run: docker compose -f docker-compose.yml -f docker-compose.microservices.yml up -d postgres redis nats mailpit migrate identity-db-migrate workspace-db-migrate identity workspace gateway api worker web
+        run: docker compose --project-name sendwise-e2e-stalwart -f docker-compose.yml -f docker-compose.microservices.yml up -d postgres redis nats mailpit migrate identity-db-migrate workspace-db-migrate identity workspace gateway api worker web
       - name: Seed E2E account
         env:
           APP_ENV: development
@@ -239,6 +243,41 @@ jobs:
           DEPLOY_SMOKE_EMAIL: smoke@sendwise.test
           DEPLOY_SMOKE_PASSWORD: SmokeTest2026!
         run: npm --prefix apps/web run test:e2e -- --reporter=line
+      - name: Provision Stalwart for real relay recovery proof
+        env:
+          STALWART_COMPOSE_PROJECT: sendwise-e2e-stalwart
+          STALWART_DOMAIN: sendwise.test
+          STALWART_HOSTNAME: mail.sendwise.test
+          STALWART_ADMIN_USERNAME: admin
+          STALWART_ADMIN_PASSWORD: ci-only-Stalwart-Admin-2026!
+          STALWART_SUBMIT_PASSWORD: ci-only-Stalwart-Submit-2026!
+        run: ./scripts/provision-stalwart.sh --local
+      - name: Route Identity through Stalwart for recovery proof
+        env:
+          APP_ENV: development
+          SERVICE_TOKEN: ci-only-service-token
+          WEBHOOK_SECRET: ci-only-webhook-secret
+          JWT_SECRET: ci-only-jwt-secret-do-not-use-in-production
+          SMTP_ADDR: stalwart:587
+          SMTP_HOST: mail.sendwise.test
+          SMTP_TLS_MODE: starttls
+          SMTP_USERNAME: noreply@sendwise.test
+          SMTP_PASSWORD: ci-only-Stalwart-Submit-2026!
+          SMTP_FROM: noreply@sendwise.test
+          MAIL_PROVIDER: smtp
+          PLATFORM_FROM_EMAIL: noreply@sendwise.test
+          STALWART_COMPOSE_PROJECT: sendwise-e2e-stalwart
+        run: docker compose --project-name sendwise-e2e-stalwart -f docker-compose.yml -f docker-compose.microservices.yml up -d --force-recreate identity
+      - name: Run real Stalwart outage/recovery Playwright spec
+        env:
+          RUN_STALWART_RECOVERY_E2E: "1"
+          STALWART_COMPOSE_PROJECT: sendwise-e2e-stalwart
+          STALWART_URL: http://127.0.0.1:8081
+          STALWART_DOMAIN: sendwise.test
+          STALWART_SUBMIT_USERNAME: noreply
+          STALWART_SUBMIT_PASSWORD: ci-only-Stalwart-Submit-2026!
+          E2E_BASE_URL: http://localhost:3000
+        run: npm --prefix apps/web run test:e2e -- --grep "real Stalwart outage" --reporter=line
 
   docker-build:
     runs-on: ubuntu-latest

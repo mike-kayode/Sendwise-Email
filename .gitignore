@@ -27,6 +27,7 @@ tmp/
 
 # Deploy backups (contain full database dumps — never commit)
 backups/
+secrets/stalwart/certs/
 
 # stray/local artifacts
 email.csv

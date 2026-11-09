@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/mail"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -34,6 +35,9 @@ type Config struct {
 	SMTPUsername           string
 	SMTPPassword           string
 	SMTPFrom               string
+	StalwartManagementURL  string
+	StalwartAdminUsername  string
+	StalwartAdminPassword  string
 	DKIMSelector           string
 	DKIMEncryptionKey      string
 	SPFInclude             string
@@ -161,6 +165,9 @@ func load(lookup func(string) string) (Config, error) {
 		SMTPUsername:           getenv(lookup, "SMTP_USERNAME", ""),
 		SMTPPassword:           getenv(lookup, "SMTP_PASSWORD", ""),
 		SMTPFrom:               getenv(lookup, "SMTP_FROM", "newsletter@example.com"),
+		StalwartManagementURL:  strings.TrimRight(getenv(lookup, "STALWART_MANAGEMENT_URL", "http://127.0.0.1:8081"), "/"),
+		StalwartAdminUsername:  getenv(lookup, "STALWART_ADMIN_USERNAME", ""),
+		StalwartAdminPassword:  getenv(lookup, "STALWART_ADMIN_PASSWORD", ""),
 		DKIMSelector:           getenv(lookup, "DKIM_SELECTOR", "mail"),
 		DKIMEncryptionKey:      getenv(lookup, "DKIM_ENCRYPTION_KEY", ""),
 		SPFInclude:             strings.TrimSpace(getenv(lookup, "SPF_INCLUDE", "")),
@@ -219,6 +226,12 @@ func load(lookup func(string) string) (Config, error) {
 		}
 		if cfg.SMTPUsername == "" || cfg.SMTPPassword == "" {
 			return cfg, fmt.Errorf("SMTP_USERNAME and SMTP_PASSWORD are required in staging and production")
+		}
+		if cfg.StalwartAdminUsername == "" || cfg.StalwartAdminPassword == "" {
+			return cfg, fmt.Errorf("STALWART_ADMIN_USERNAME and STALWART_ADMIN_PASSWORD are required in staging and production")
+		}
+		if err := validateStalwartManagementURL(cfg.StalwartManagementURL); err != nil {
+			return cfg, err
 		}
 		if cfg.WebhookSecret == "" {
 			return cfg, fmt.Errorf("WEBHOOK_SECRET is required in staging and production")
@@ -281,6 +294,15 @@ func getenv(lookup func(string) string, key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func validateStalwartManagementURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("STALWART_MANAGEMENT_URL must be an HTTP(S) URL without credentials, query, or fragment")
+	}
+	return nil
 }
 
 func getenvBool(lookup func(string) string, key string, fallback bool) (bool, error) {

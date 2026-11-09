@@ -26,6 +26,7 @@ type Server struct {
 	apiKeys                *auth.Service
 	delivery               *DeliveryHandler
 	dnsResolver            DNSResolver
+	stalwartDomainHoster   stalwartDomainHoster
 	logger                 *slog.Logger
 	formConfirmationSender func(context.Context, string, string, string) error
 }
@@ -49,6 +50,9 @@ func New(
 		dnsResolver: newDNSResolver(cfg.DNSResolverAddr, cfg.DNSResolverTimeout),
 		logger:      logger,
 	}
+	server.stalwartDomainHoster = stalwartDomainProvisionFunc(func(ctx context.Context, domain string) error {
+		return ensureStalwartDomain(ctx, cfg, domain)
+	})
 	server.formConfirmationSender = func(ctx context.Context, to, formName, confirmURL string) error {
 		return sendFormConfirmationEmail(ctx, cfg, to, formName, confirmURL)
 	}

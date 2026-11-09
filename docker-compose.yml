@@ -51,13 +51,24 @@ services:
     hostname: mail.localhost
     environment:
       STALWART_RECOVERY_ADMIN: ${STALWART_RECOVERY_ADMIN:-}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "openssl s_client -starttls smtp -connect 127.0.0.1:587 -servername localhost -brief </dev/null 2>&1 | grep -q 'Ciphersuite:' && openssl s_client -connect 127.0.0.1:465 -servername localhost -brief </dev/null 2>&1 | grep -q 'Ciphersuite:'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     ports:
-      - "127.0.0.1:25:25"
-      - "127.0.0.1:465:465"
-      - "127.0.0.1:587:587"
-      - "127.0.0.1:8081:8080"
+      - "${STALWART_BIND_ADDRESS:-127.0.0.1}:${STALWART_PORT_25:-25}:25"
+      - "${STALWART_BIND_ADDRESS:-127.0.0.1}:${STALWART_PORT_465:-465}:465"
+      - "${STALWART_BIND_ADDRESS:-127.0.0.1}:${STALWART_PORT_587:-587}:587"
+      - "127.0.0.1:${STALWART_ADMIN_PORT:-8081}:8080"
     volumes:
       - stalwart-data:/opt/stalwart
+      - ${STALWART_CERTS_DIR:-./secrets/stalwart/certs}:/etc/stalwart/certs:ro
     restart: unless-stopped
 
   minio:
@@ -122,6 +133,9 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-newsletter@example.com}
+      STALWART_MANAGEMENT_URL: ${STALWART_MANAGEMENT_URL:-http://stalwart:8080}
+      STALWART_ADMIN_USERNAME: ${STALWART_ADMIN_USERNAME:-}
+      STALWART_ADMIN_PASSWORD: ${STALWART_ADMIN_PASSWORD:-}
       MAIL_PROVIDER: ${MAIL_PROVIDER:-auto}
       DKIM_ENCRYPTION_KEY: ${DKIM_ENCRYPTION_KEY:-}
       SPF_INCLUDE: ${SPF_INCLUDE:-}
