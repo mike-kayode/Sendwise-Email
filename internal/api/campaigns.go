@@ -17,7 +17,7 @@ import (
 )
 
 const campaignColumns = `
-	id, organization_id, name, subject, preview_text, sender_name, sender_email,
+	id, organization_id, name, subject, preview_text, sender_name, sender_email, sender_identity_id,
 	COALESCE(reply_to, ''), list_id, segment_id, template_id, content, status,
 	recipient_count, track_opens, track_clicks, scheduled_at, started_at,
 	completed_at, paused_at, COALESCE(sender_postal_address, ''), created_at, updated_at
@@ -31,6 +31,7 @@ type campaign struct {
 	PreviewText         string          `json:"preview_text"`
 	SenderName          string          `json:"sender_name"`
 	SenderEmail         string          `json:"sender_email"`
+	SenderIdentityID    *string         `json:"sender_identity_id"`
 	ReplyTo             string          `json:"reply_to"`
 	SenderPostalAddress string          `json:"sender_postal_address"`
 	ListID              *string         `json:"list_id"`
@@ -61,7 +62,7 @@ func scanCampaign(row pgx.Row) (*campaign, error) {
 	var content []byte
 	if err := row.Scan(
 		&c.ID, &c.OrganizationID, &c.Name, &c.Subject, &c.PreviewText,
-		&c.SenderName, &c.SenderEmail, &c.ReplyTo, &c.ListID, &c.SegmentID,
+		&c.SenderName, &c.SenderEmail, &c.SenderIdentityID, &c.ReplyTo, &c.ListID, &c.SegmentID,
 		&c.TemplateID, &content, &c.Status, &c.RecipientCount,
 		&c.TrackOpens, &c.TrackClicks, &c.ScheduledAt, &c.StartedAt,
 		&c.CompletedAt, &c.PausedAt, &c.SenderPostalAddress, &c.CreatedAt, &c.UpdatedAt,
@@ -146,6 +147,7 @@ type campaignInput struct {
 	PreviewText         string          `json:"preview_text"`
 	SenderName          string          `json:"sender_name"`
 	SenderEmail         string          `json:"sender_email"`
+	SenderIdentityID    string          `json:"sender_identity_id"`
 	SenderPostalAddress string          `json:"sender_postal_address"`
 	ReplyTo             string          `json:"reply_to"`
 	ListID              string          `json:"list_id"`
@@ -168,6 +170,25 @@ func (s *Server) createCampaign(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "missing_name", "Campaign name is required.")
 		return
 	}
+	if input.TemplateID != "" {
+		var templateSenderIdentityID *string
+		err := s.pool.QueryRow(r.Context(), `
+			SELECT sender_identity_id FROM templates
+			WHERE id = $1 AND organization_id = $2
+		`, input.TemplateID, s.organizationID(r)).Scan(&templateSenderIdentityID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			httpx.Error(w, http.StatusNotFound, "template_not_found", "The selected template could not be found.")
+			return
+		}
+		if err != nil {
+			s.logger.Error("check campaign template", "error", err)
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not check the selected template.")
+			return
+		}
+		if input.SenderIdentityID == "" && templateSenderIdentityID != nil {
+			input.SenderIdentityID = *templateSenderIdentityID
+		}
+	}
 	if input.SenderEmail != "" {
 		normalized, err := delivery.NormalizeSenderAddress(input.SenderEmail)
 		if err != nil {
@@ -176,6 +197,18 @@ func (s *Server) createCampaign(w http.ResponseWriter, r *http.Request) {
 		}
 		input.SenderEmail = normalized
 	}
+	var senderIdentityID any
+	if input.SenderIdentityID != "" {
+		identity, err := s.loadVerifiedSenderIdentity(r.Context(), input.SenderIdentityID, s.organizationID(r))
+		if err != nil {
+			s.writeSenderIdentityLookupError(w, err)
+			return
+		}
+		input.SenderEmail = identity.Email
+		input.SenderName = identity.DisplayName
+		input.ReplyTo = identity.ReplyTo
+		senderIdentityID = identity.ID
+	}
 	if len(input.Content) == 0 {
 		input.Content = json.RawMessage(`{"version":1,"blocks":[]}`)
 	}
@@ -183,39 +216,21 @@ func (s *Server) createCampaign(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid_content", "Campaign content must be valid JSON.")
 		return
 	}
-	if input.TemplateID != "" {
-		var templateExists bool
-		if err := s.pool.QueryRow(r.Context(), `
-			SELECT EXISTS (
-				SELECT 1 FROM templates
-				WHERE id = $1 AND organization_id = $2
-			)
-		`, input.TemplateID, s.organizationID(r)).Scan(&templateExists); err != nil {
-			s.logger.Error("check campaign template", "error", err)
-			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not check the selected template.")
-			return
-		}
-		if !templateExists {
-			httpx.Error(w, http.StatusNotFound, "template_not_found", "The selected template could not be found.")
-			return
-		}
-	}
-
 	c, err := scanCampaign(s.pool.QueryRow(r.Context(), `
 		INSERT INTO campaigns (
 			organization_id, created_by, name, subject, preview_text,
-			sender_name, sender_email, sender_postal_address, reply_to, list_id, segment_id,
+			sender_name, sender_email, sender_identity_id, sender_postal_address, reply_to, list_id, segment_id,
 			template_id, content, track_opens, track_clicks, scheduled_at
 		)
 		VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10::uuid, $11::uuid,
-			$12::uuid, $13::jsonb, COALESCE($14, true), COALESCE($15, true), $16
+			$1, $2, $3, $4, $5, $6, $7, $8::uuid, $9, $10, $11::uuid, $12::uuid,
+			$13::uuid, $14::jsonb, COALESCE($15, true), COALESCE($16, true), $17
 		)
 		RETURNING `+campaignColumns,
 		s.organizationID(r), s.claims(r).Subject, input.Name,
 		strings.TrimSpace(input.Subject), strings.TrimSpace(input.PreviewText),
 		strings.TrimSpace(input.SenderName), strings.TrimSpace(input.SenderEmail),
-		strings.TrimSpace(input.SenderPostalAddress), nullIfEmpty(input.ReplyTo),
+		senderIdentityID, strings.TrimSpace(input.SenderPostalAddress), nullIfEmpty(input.ReplyTo),
 		nullIfEmpty(input.ListID), nullIfEmpty(input.SegmentID), nullIfEmpty(input.TemplateID),
 		[]byte(input.Content), input.TrackOpens, input.TrackClicks, input.ScheduledAt,
 	))
@@ -277,6 +292,7 @@ type campaignUpdateInput struct {
 	PreviewText         *string         `json:"preview_text"`
 	SenderName          *string         `json:"sender_name"`
 	SenderEmail         *string         `json:"sender_email"`
+	SenderIdentityID    *string         `json:"sender_identity_id"`
 	SenderPostalAddress *string         `json:"sender_postal_address"`
 	ReplyTo             *string         `json:"reply_to"`
 	ListID              *string         `json:"list_id"`
@@ -302,6 +318,17 @@ func (s *Server) updateCampaign(w http.ResponseWriter, r *http.Request) {
 		}
 		input.SenderEmail = &normalized
 	}
+	if input.SenderIdentityID != nil && strings.TrimSpace(*input.SenderIdentityID) != "" {
+		identity, err := s.loadVerifiedSenderIdentity(r.Context(), strings.TrimSpace(*input.SenderIdentityID), s.organizationID(r))
+		if err != nil {
+			s.writeSenderIdentityLookupError(w, err)
+			return
+		}
+		input.SenderIdentityID = &identity.ID
+		input.SenderEmail = &identity.Email
+		input.SenderName = &identity.DisplayName
+		input.ReplyTo = &identity.ReplyTo
+	}
 	if input.Name != nil && strings.TrimSpace(*input.Name) == "" {
 		httpx.Error(w, http.StatusBadRequest, "missing_name", "Campaign name is required.")
 		return
@@ -323,21 +350,22 @@ func (s *Server) updateCampaign(w http.ResponseWriter, r *http.Request) {
 		    preview_text = COALESCE($5, preview_text),
 		    sender_name = COALESCE($6, sender_name),
 		    sender_email = COALESCE($7, sender_email),
-		    sender_postal_address = COALESCE($8, sender_postal_address),
-		    reply_to = COALESCE($9, reply_to),
-		    list_id = COALESCE($10::uuid, list_id),
-		    segment_id = COALESCE($11::uuid, segment_id),
-		    template_id = COALESCE($12::uuid, template_id),
-		    content = COALESCE($13::jsonb, content),
-		    track_opens = COALESCE($14, track_opens),
-		    track_clicks = COALESCE($15, track_clicks),
-		    scheduled_at = COALESCE($16, scheduled_at),
+		    sender_identity_id = COALESCE($8::uuid, sender_identity_id),
+		    sender_postal_address = COALESCE($9, sender_postal_address),
+		    reply_to = COALESCE($10, reply_to),
+		    list_id = COALESCE($11::uuid, list_id),
+		    segment_id = COALESCE($12::uuid, segment_id),
+		    template_id = COALESCE($13::uuid, template_id),
+		    content = COALESCE($14::jsonb, content),
+		    track_opens = COALESCE($15, track_opens),
+		    track_clicks = COALESCE($16, track_clicks),
+		    scheduled_at = COALESCE($17, scheduled_at),
 		    updated_at = now()
 		WHERE id = $1 AND organization_id = $2
 		RETURNING `+campaignColumns,
 		r.PathValue("id"), s.organizationID(r),
 		input.Name, input.Subject, input.PreviewText, input.SenderName, input.SenderEmail,
-		input.SenderPostalAddress, input.ReplyTo, input.ListID, input.SegmentID,
+		input.SenderIdentityID, input.SenderPostalAddress, input.ReplyTo, input.ListID, input.SegmentID,
 		input.TemplateID, content, input.TrackOpens, input.TrackClicks, input.ScheduledAt,
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -406,15 +434,20 @@ func (s *Server) validateCampaign(w http.ResponseWriter, r *http.Request) {
 		add("subject", "error", "Subject line is required.")
 	}
 
-	if strings.TrimSpace(c.SenderEmail) != "" && strings.Contains(c.SenderEmail, "@") && strings.TrimSpace(c.SenderName) != "" {
-		add("sender", "pass", "Sender identity is set.")
+	if _, err := s.validateCampaignSender(r.Context(), s.organizationID(r), c); err == nil {
+		add("sender", "pass", "The From address is a verified sender identity owned by this workspace.")
+		add("sender_profile", "pass", "The sender profile is complete and will be included in the compliance footer.")
 	} else {
-		add("sender", "error", "Sender name and sender email are required.")
-	}
-	if strings.TrimSpace(c.SenderPostalAddress) != "" {
-		add("postal_address", "pass", "Sender postal address is included in the message footer.")
-	} else {
-		add("postal_address", "error", "Add the sender's postal address before sending.")
+		switch {
+		case errors.Is(err, errSenderIdentityMissing), errors.Is(err, errSenderIdentityMismatch):
+			add("sender", "error", err.Error())
+		case errors.Is(err, errSenderProfileIncomplete):
+			add("sender_profile", "error", err.Error())
+		case errors.Is(err, errSenderDomainUnverified), errors.Is(err, errSenderDomainConflict), errors.Is(err, errSenderDomainMissing):
+			add("sender", "error", err.Error())
+		default:
+			add("sender", "error", "Could not verify the sender identity and profile.")
+		}
 	}
 
 	var design delivery.Design
@@ -523,8 +556,8 @@ func (s *Server) scheduleCampaign(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load the campaign.")
 		return
 	}
-	if strings.TrimSpace(c.SenderPostalAddress) == "" {
-		httpx.Error(w, http.StatusBadRequest, "postal_address_required", "Add the sender's postal address before scheduling.")
+	if _, err := s.validateCampaignSender(r.Context(), s.organizationID(r), c); err != nil {
+		s.writeSenderIdentityLookupError(w, err)
 		return
 	}
 
@@ -561,6 +594,10 @@ func (s *Server) sendCampaign(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load the campaign.")
 		return
 	}
+	if _, err := s.validateCampaignSender(r.Context(), orgID, c); err != nil {
+		s.writeSenderIdentityLookupError(w, err)
+		return
+	}
 
 	switch c.Status {
 	case "draft", "ready", "scheduled":
@@ -571,11 +608,6 @@ func (s *Server) sendCampaign(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusConflict, "campaign_not_sendable", "The campaign is not in a sendable state.")
 		return
 	}
-	if strings.TrimSpace(c.SenderPostalAddress) == "" {
-		httpx.Error(w, http.StatusBadRequest, "postal_address_required", "Add the sender's postal address before sending.")
-		return
-	}
-
 	remainingToday, err := s.warmupRemainingToday(r.Context(), orgID, c.SenderEmail)
 	if err != nil {
 		s.logger.Error("calculate campaign warm-up plan", "error", err)
@@ -785,6 +817,10 @@ func (s *Server) writeQueueError(w http.ResponseWriter, err error) {
 		httpx.Error(w, http.StatusBadRequest, "sending_domain_conflict", "Domain already owned by another workspace.")
 	case errors.Is(err, campaigns.ErrPostalAddress):
 		httpx.Error(w, http.StatusBadRequest, "postal_address_required", "Add the sender's postal address before sending.")
+	case errors.Is(err, campaigns.ErrSenderIdentity):
+		httpx.Error(w, http.StatusBadRequest, "sender_identity_required", "Choose a verified sender identity owned by this workspace.")
+	case errors.Is(err, campaigns.ErrSenderProfile):
+		httpx.Error(w, http.StatusBadRequest, "sender_profile_incomplete", "Complete the sender profile before sending campaigns.")
 	case errors.Is(err, campaigns.ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "campaign_not_found", "The campaign could not be found.")
 	case errors.Is(err, campaigns.ErrSegmentNotFound), errors.Is(err, campaigns.ErrInvalidSegment):

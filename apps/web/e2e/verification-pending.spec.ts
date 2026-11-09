@@ -27,7 +27,7 @@ test("queued verification delivery offers a resend action", async ({ page }) => 
   await page.goto("/register");
   await page.getByPlaceholder("Your name").fill("Retry User");
   await page.getByPlaceholder("you@example.com").fill(email);
-  await page.getByPlaceholder("Acme Studio").fill("Retry Workspace");
+  await page.getByPlaceholder("Workspace name").fill("Retry Workspace");
   await page.getByPlaceholder("••••••••••").fill("a-strong-password");
   await page.getByRole("button", { name: "Create workspace" }).click();
 

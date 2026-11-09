@@ -71,9 +71,13 @@ jobs:
           DKIM_ENCRYPTION_KEY=ci-only-dkim-key
           EOF
           SENDWISE_ENV_FILE="$tmp_env" ./scripts/deploy.sh validate
+          docker compose --env-file "$tmp_env" -f docker-compose.yml -f docker-compose.microservices.yml up -d postgres
+          docker compose --env-file "$tmp_env" -f docker-compose.yml run --rm migrate
+          SENDWISE_ENV_FILE="$tmp_env" ./scripts/check-domain-duplicates.sh
 
   test-go:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:16-alpine
@@ -146,7 +150,7 @@ jobs:
           STALWART_SMTP_ADDR: 127.0.0.1:587
           STALWART_SMTP_HOST: localhost
           STALWART_SMTP_IMPLICIT_ADDR: 127.0.0.1:465
-        run: go test ./...
+        run: go test -p 1 -timeout 45m ./...
 
   test-web:
     runs-on: ubuntu-latest
@@ -172,6 +176,8 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     needs: [lint, test-go, test-web]
+    env:
+      E2E_COMPOSE_PROJECT: sendwise-e2e-stalwart
     steps:
       - uses: actions/checkout@v4
       - name: Set up Node

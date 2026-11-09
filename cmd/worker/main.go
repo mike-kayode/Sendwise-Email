@@ -64,13 +64,16 @@ func main() {
 	}()
 
 	tokens := auth.NewManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL)
-	var transport delivery.Provider = delivery.NewSMTPTransport(
+	smtpPool := delivery.NewSMTPPool(
 		cfg.SMTPAddr,
 		cfg.SMTPHost,
 		cfg.SMTPUsername,
 		cfg.SMTPPassword,
 		cfg.Env == "development" || cfg.Env == "test",
+		cfg.SMTPPoolSize,
 	)
+	defer smtpPool.Close()
+	var transport delivery.Provider = smtpPool
 	transport = delivery.NewCampaignRouter(transport, logger)
 	campaignService := campaigns.NewService(pool, bus, logger, cfg.MaxDeliveryAttempts, cfg.RequireVerifiedDomain)
 

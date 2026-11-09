@@ -8,8 +8,8 @@ import { ArrowLeft, Check, Info } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input, Select, Textarea } from "@/components/ui/input";
-import { apiFetch, type Campaign, type SendingDomain } from "@/lib/auth";
+import { Input, Select } from "@/components/ui/input";
+import { apiFetch, type Campaign, type SenderIdentity } from "@/lib/auth";
 import { cn, formatNumber } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
 
@@ -26,6 +26,7 @@ type EmailTemplate = {
   id: string;
   name: string;
   design: unknown;
+  sender_identity_id?: string;
 };
 
 const steps = [
@@ -42,10 +43,7 @@ export default function NewCampaignPage() {
   const [name, setName] = useState("");
   const [subject, setSubject] = useState("");
   const [previewText, setPreviewText] = useState("");
-  const [senderName, setSenderName] = useState("");
-  const [senderEmail, setSenderEmail] = useState("");
-  const [senderPostalAddress, setSenderPostalAddress] = useState("");
-  const [notes, setNotes] = useState("");
+  const [senderIdentityID, setSenderIdentityID] = useState("");
   const [listId, setSelectedListId] = useState<string | null>(null); // null → default to first list; "" → all contacts
   const [delivery, setDelivery] = useState<"draft" | "schedule">("draft");
   const [scheduledAt, setScheduledAt] = useState("");
@@ -73,27 +71,32 @@ export default function NewCampaignPage() {
       return res.data ?? [];
     },
   });
-  const domainsQuery = useQuery({
-    queryKey: ["domains"],
+  const identitiesQuery = useQuery({
+    queryKey: ["sender-identities"],
     queryFn: async () => {
-      const res = await apiFetch<{ data: SendingDomain[] | null }>("/domains");
+      const res = await apiFetch<{ data: SenderIdentity[] | null }>("/sender-identities");
       return res.data ?? [];
     },
   });
+  const senderProfileQuery = useQuery({
+    queryKey: ["sender-profile"],
+    queryFn: () => apiFetch<{ complete: boolean }>("/sender-profile"),
+  });
 
   const lists = listsQuery.data ?? [];
-  const domains = domainsQuery.data ?? [];
-  const verifiedDomains = domains.filter((d) => d.status === "verified");
+  const identities = identitiesQuery.data ?? [];
   const effectiveListId = listId === null ? (lists[0]?.id ?? "") : listId;
-
-  // Default the sender to the first verified domain once domains load.
-  const senderEmailValue =
-    senderEmail ||
-    (verifiedDomains[0] ? `hello@${verifiedDomains[0].domain}` : domains[0] ? `hello@${domains[0].domain}` : "");
+  const selectedSenderIdentityID =
+    senderIdentityID ||
+    templateQuery.data?.sender_identity_id ||
+    identities.find((identity) => identity.is_default)?.id ||
+    "";
 
   const canSubmit =
     name.trim().length > 0 &&
     !submitting &&
+    Boolean(selectedSenderIdentityID) &&
+    Boolean(senderProfileQuery.data?.complete) &&
     (!templateID || Boolean(templateQuery.data));
   const canSchedule =
     delivery === "schedule" && scheduledAt !== "" && new Date(scheduledAt).getTime() > Date.now();
@@ -103,15 +106,12 @@ export default function NewCampaignPage() {
       name: name.trim(),
       subject: subject.trim(),
       preview_text: previewText.trim(),
-      sender_name: senderName.trim() || "Sendwise",
-      sender_email: senderEmailValue.trim(),
-      sender_postal_address: senderPostalAddress.trim(),
+      sender_identity_id: selectedSenderIdentityID,
     };
     if (templateID && templateQuery.data) {
       body.template_id = templateID;
       body.content = templateQuery.data.design;
     }
-    if (notes.trim()) body.reply_to = notes.trim();
     if (effectiveListId) body.list_id = effectiveListId;
     return apiFetch<Campaign>("/campaigns", { method: "POST", body: JSON.stringify(body) });
   };
@@ -240,77 +240,38 @@ export default function NewCampaignPage() {
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label htmlFor="sender-name" className="mb-1.5 block text-sm font-medium text-slate-700">
-                  Sender name
+                <label htmlFor="sender-identity" className="mb-1.5 block text-sm font-medium text-slate-700">
+                  From identity
                 </label>
-                <Input
-                  id="sender-name"
-                  placeholder="e.g. Acme Studio"
-                  value={senderName}
-                  onChange={(e) => setSenderName(e.target.value)}
-                />
-              </div>
-              <div>
-                <label htmlFor="sender-email" className="mb-1.5 block text-sm font-medium text-slate-700">
-                  Sender email
-                </label>
-                {domains.length > 0 ? (
-                  <Select
-                    id="sender-email"
-                    value={senderEmailValue}
-                    onChange={(e) => setSenderEmail(e.target.value)}
-                  >
-                    {domains.map((domain) => (
-                      <option key={domain.id} value={`hello@${domain.domain}`}>
-                        hello@{domain.domain}
-                        {domain.status === "verified" ? "" : " (unverified)"}
-                      </option>
-                    ))}
-                  </Select>
-                ) : (
-                  <Input
-                    id="sender-email"
-                    type="email"
-                    placeholder="hello@yourdomain.com"
-                    value={senderEmail}
-                    onChange={(e) => setSenderEmail(e.target.value)}
-                  />
-                )}
-                {domains.length === 0 ? (
-                  <Link href="/domains" className="mt-1 block text-xs font-medium text-indigo-600 hover:text-indigo-500">
-                    Add a sending domain first
+                <Select
+                  id="sender-identity"
+                  value={selectedSenderIdentityID}
+                  onChange={(event) => setSenderIdentityID(event.target.value)}
+                  disabled={identitiesQuery.isLoading || identities.length === 0}
+                >
+                  <option value="">Choose a verified sender</option>
+                  {identities.filter((identity) => identity.verified).map((identity) => (
+                    <option key={identity.id} value={identity.id}>
+                      {identity.display_name} &lt;{identity.email}&gt;{identity.is_default ? " — default" : ""}
+                    </option>
+                  ))}
+                </Select>
+                {identities.length === 0 ? (
+                  <Link href="/settings#sending" className="mt-1 block text-xs font-medium text-indigo-600 hover:text-indigo-500">
+                    Create a sender identity in Settings
                   </Link>
-                ) : verifiedDomains.length === 0 ? (
-                  <Link href="/domains" className="mt-1 block text-xs font-medium text-amber-600 hover:text-amber-500">
-                    No verified domains yet — verify before sending
+                ) : null}
+                {!senderProfileQuery.data?.complete ? (
+                  <Link href="/settings#sender-profile" className="mt-2 block text-xs font-medium text-amber-700 hover:text-amber-800">
+                    Complete the sender profile in Settings before continuing
                   </Link>
                 ) : null}
               </div>
             </div>
             <div>
-              <label htmlFor="sender-postal-address" className="mb-1.5 block text-sm font-medium text-slate-700">
-                Sender postal address
-              </label>
-              <Textarea
-                id="sender-postal-address"
-                placeholder="Your organization&apos;s postal address"
-                value={senderPostalAddress}
-                onChange={(e) => setSenderPostalAddress(e.target.value)}
-                rows={3}
-              />
-              <p className="mt-1 text-xs text-slate-500">Included in every campaign footer for compliance.</p>
-            </div>
-            <div>
-              <label htmlFor="reply-to" className="mb-1.5 block text-sm font-medium text-slate-700">
-                Reply-to <span className="font-normal text-slate-400">(optional)</span>
-              </label>
-              <Input
-                id="reply-to"
-                type="email"
-                placeholder="replies@yourdomain.com"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-              />
+              <p className="text-xs text-slate-500">
+                Postal address, support contact, and unsubscribe details are added from your sender profile.
+              </p>
             </div>
           </CardContent>
         </Card>

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="64" viewBox="0 0 240 64">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#4f46e5"/>
+  <path d="m17 23 15 11 15-11v20H17z" fill="none" stroke="#fff" stroke-linejoin="round" stroke-width="4"/>
+  <text x="76" y="41" fill="#0f172a" font-family="Arial,sans-serif" font-size="24" font-weight="700">Newsletter</text>
+</svg>

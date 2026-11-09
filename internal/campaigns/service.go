@@ -24,6 +24,8 @@ var (
 	ErrDomainConflict   = errors.New("sending domain is owned by another workspace")
 	ErrInvalidSender    = errors.New("campaign sender email is invalid")
 	ErrPostalAddress    = errors.New("campaign sender postal address is required")
+	ErrSenderIdentity   = errors.New("campaign From address is not a verified workspace sender identity")
+	ErrSenderProfile    = errors.New("sender profile is incomplete")
 )
 
 type Publisher interface {
@@ -149,21 +151,52 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 
 	var status string
 	var listID, segmentID *string
-	var senderEmail, senderPostalAddress string
+	var senderEmail string
+	var senderIdentityID *string
 	err = tx.QueryRow(ctx, `
-		SELECT status, list_id, segment_id, sender_email, COALESCE(sender_postal_address, '')
+		SELECT status, list_id, segment_id, sender_email, sender_identity_id
 		FROM campaigns
 		WHERE id = $1 AND organization_id = $2
 		FOR UPDATE
-	`, campaignID, organizationID).Scan(&status, &listID, &segmentID, &senderEmail, &senderPostalAddress)
+	`, campaignID, organizationID).Scan(&status, &listID, &segmentID, &senderEmail, &senderIdentityID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, ErrNotFound
 	}
 	if err != nil {
 		return 0, fmt.Errorf("load campaign: %w", err)
 	}
-	if strings.TrimSpace(senderPostalAddress) == "" {
-		return 0, ErrPostalAddress
+	var senderIdentityValid bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM sender_identities si
+			JOIN sending_domains sd
+			  ON sd.organization_id = si.organization_id AND lower(sd.domain) = lower(si.domain)
+			WHERE si.id = $1 AND si.organization_id = $2
+			  AND lower(si.local_part || '@' || si.domain) = lower($3)
+			  AND sd.status = 'verified' AND NOT sd.owner_conflict
+		)
+	`, senderIdentityID, organizationID, senderEmail).Scan(&senderIdentityValid); err != nil {
+		return 0, fmt.Errorf("check campaign sender identity: %w", err)
+	}
+	if !senderIdentityValid {
+		return 0, ErrSenderIdentity
+	}
+	var senderProfileComplete bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM sender_profiles
+			WHERE organization_id = $1
+			  AND btrim(company_name) <> '' AND btrim(street_address) <> ''
+			  AND btrim(city) <> '' AND btrim(postal_code) <> ''
+			  AND btrim(country) <> '' AND btrim(website) <> ''
+			  AND btrim(support_email) <> ''
+		)
+	`, organizationID).Scan(&senderProfileComplete); err != nil {
+		return 0, fmt.Errorf("check sender profile: %w", err)
+	}
+	if !senderProfileComplete {
+		return 0, ErrSenderProfile
 	}
 	switch status {
 	case "processing", "sending", "paused", "scheduled":

@@ -311,6 +311,15 @@ run_backfill() {
   log "Backfill applied"
 }
 
+run_domain_duplicate_check() {
+  log "Checking duplicate sending-domain ownership before migrations..."
+  if [ "$USE_ENV_LOCAL" -eq 1 ]; then
+    "$ROOT/scripts/check-domain-duplicates.sh"
+  else
+    SENDWISE_ENV_FILE="$ENV_FILE" "$ROOT/scripts/check-domain-duplicates.sh"
+  fi
+}
+
 start_stack() {
   log "Starting infrastructure (postgres, redis, nats, stalwart)..."
   "${COMPOSE[@]}" up -d --no-deps postgres redis nats stalwart
@@ -434,6 +443,7 @@ case "$COMMAND" in
     DEPLOY_IN_PROGRESS=1
     trap 'on_exit $?' EXIT
     take_backup
+    run_domain_duplicate_check
     build_images
     run_migrations
     run_backfill

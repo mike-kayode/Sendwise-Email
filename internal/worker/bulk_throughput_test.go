@@ -58,7 +58,7 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 		t.Fatalf("migrate test database: %v", err)
 	}
 
-	var organizationID, campaignID string
+	var organizationID, campaignID, sendingDomain string
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO organizations (name, slug)
 		VALUES ('100k SMTP sink proof', 'bulk-sink-' || gen_random_uuid()::text)
@@ -79,18 +79,43 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 		t.Fatalf("seed throughput contacts: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `
+		INSERT INTO sending_domains (organization_id, domain, status, dkim_selector, verification_status)
+		VALUES ($1, 'bulk-' || replace(gen_random_uuid()::text, '-', '') || '.example.test', 'verified', 'mail', 'verified')
+		RETURNING domain
+	`, organizationID).Scan(&sendingDomain); err != nil {
+		t.Fatalf("seed throughput sending domain: %v", err)
+	}
+	var senderIdentityID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO sender_identities (
+			organization_id, domain, local_part, display_name, is_default
+		) VALUES ($1, $2, 'hello', 'Sendwise Bulk Test', true)
+		RETURNING id
+	`, organizationID, sendingDomain).Scan(&senderIdentityID); err != nil {
+		t.Fatalf("seed throughput sender identity: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sender_profiles (
+			organization_id, company_name, street_address, city, postal_code,
+			country, website, support_email, social_links
+		) VALUES ($1, 'Sendwise Bulk Test', '1 Example Street', 'Example City',
+		          '10000', 'Example Country', 'https://example.test', 'support@example.test', '[]'::jsonb)
+	`, organizationID); err != nil {
+		t.Fatalf("seed throughput sender profile: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
 		INSERT INTO campaigns (
-			organization_id, name, subject, sender_name, sender_email,
+			organization_id, name, subject, sender_name, sender_email, sender_identity_id,
 			sender_postal_address, content, status
 		)
 		VALUES (
 			$1, '100k SMTP sink campaign', 'Sink throughput proof',
-			'Sendwise', 'hello@bulk.example', '1 Example Street, Example City',
+			'Sendwise Bulk Test', $2, $3, '',
 			'{"version":1,"blocks":[{"type":"paragraph","content":"Throughput proof"}]}'::jsonb,
 			'processing'
 		)
 		RETURNING id
-	`, organizationID).Scan(&campaignID); err != nil {
+	`, organizationID, "hello@"+sendingDomain, senderIdentityID).Scan(&campaignID); err != nil {
 		t.Fatalf("create throughput campaign: %v", err)
 	}
 
@@ -120,6 +145,7 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 	var queuedHeap runtime.MemStats
 	runtime.ReadMemStats(&queuedHeap)
 
+	const parallelWorkers = 32
 	cfg := config.Config{
 		APIBaseURL:             "http://localhost:8080",
 		TrackingBaseURL:        "http://localhost:8080",
@@ -136,12 +162,15 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 		DomainConcurrencyLimit: 100,
 		SMTPAddr:               sinkAddress,
 		SMTPHost:               "localhost",
+		SMTPPoolSize:           parallelWorkers,
+		BounceDomain:           "bounces.example.test",
 		DKIMEncryptionKey:      "bulk-throughput-test-encryption-key",
 	}
-	worker := New(cfg, pool, nil, delivery.NewSMTPTransport(cfg.SMTPAddr, cfg.SMTPHost, "", "", true),
+	smtpPool := delivery.NewSMTPPool(cfg.SMTPAddr, cfg.SMTPHost, "", "", true, cfg.SMTPPoolSize)
+	defer smtpPool.Close()
+	worker := New(cfg, pool, nil, smtpPool,
 		auth.NewManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.AccessTokenTTL), campaignService, logger)
 
-	const parallelWorkers = 32
 	var completed, failures atomic.Int64
 	var peakHeap atomic.Uint64
 	peakHeap.Store(queuedHeap.HeapAlloc)
@@ -187,6 +216,10 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 	close(stopSampling)
 	sampler.Wait()
 	elapsed := time.Since(started)
+	if err := smtpPool.Close(); err != nil {
+		t.Fatalf("close SMTP pool: %v", err)
+	}
+	closeSink()
 
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
@@ -231,9 +264,7 @@ func startDiscardSMTPServer() (func(), string, *atomic.Int64, error) {
 			connections.Add(1)
 			go func() {
 				defer connections.Done()
-				if serveDiscardSMTP(conn) == nil {
-					accepted.Add(1)
-				}
+				_ = serveDiscardSMTP(conn, &accepted)
 			}()
 		}
 	}()
@@ -245,7 +276,7 @@ func startDiscardSMTPServer() (func(), string, *atomic.Int64, error) {
 	return closeServer, listener.Addr().String(), &accepted, nil
 }
 
-func serveDiscardSMTP(conn net.Conn) error {
+func serveDiscardSMTP(conn net.Conn, accepted *atomic.Int64) error {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
@@ -294,6 +325,11 @@ func serveDiscardSMTP(conn net.Conn) error {
 				}
 			}
 			if err := respond("250 2.0.0 discarded"); err != nil {
+				return err
+			}
+			accepted.Add(1)
+		case strings.HasPrefix(strings.ToUpper(command), "RSET"):
+			if err := respond("250 2.0.0 reset"); err != nil {
 				return err
 			}
 		case strings.HasPrefix(strings.ToUpper(command), "QUIT"):

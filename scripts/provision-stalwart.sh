@@ -111,6 +111,17 @@ write_auth() {
   chmod 600 "$auth_file"
 }
 
+certificate_covers_hostname() {
+  local certificate_text="$1" hostname="$2" candidate suffix
+  if grep -F "DNS:$hostname" <<<"$certificate_text" | grep -Eq '([,[:space:]]|$)'; then
+    return 0
+  fi
+  [[ "$hostname" == *.* ]] || return 1
+  suffix="${hostname#*.}"
+  candidate="DNS:*.$suffix"
+  grep -F "$candidate" <<<"$certificate_text" | grep -Eq '([,[:space:]]|$)'
+}
+
 compose() {
   if [[ -n "${STALWART_COMPOSE_PROJECT:-}" ]]; then
     docker compose --project-name "$STALWART_COMPOSE_PROJECT" "$@"
@@ -239,24 +250,8 @@ if [[ -z "$domain_id" ]]; then
     '.list[]? | select(.name == $domain) | .id' <<<"$domain_response" | head -n 1)"
 fi
 [[ -n "$domain_id" ]] || fail "Stalwart did not return the configured mail domain"
-other_domain_ids=()
-while IFS= read -r other_domain_id; do
-  other_domain_ids+=("$other_domain_id")
-done < <(jq -r --arg domain "$STALWART_DOMAIN" '.list[]? | select(.name != $domain) | .id' <<<"$domain_response")
-if ((${#other_domain_ids[@]} > 0)); then
-  other_ids_json="$(printf '%s\n' "${other_domain_ids[@]}" | jq -R . | jq -s .)"
-  request "x:Domain/set" "$(jq -cn --argjson ids "$other_ids_json" '{delete:$ids}')"
-fi
 request "x:DkimSignature/get" '{"ids":null}'
 dkim_response="$(method_result "x:DkimSignature/get")"
-stale_dkim_ids=()
-while IFS= read -r stale_id; do
-  stale_dkim_ids+=("$stale_id")
-done < <(jq -r '.list[]? | .id' <<<"$dkim_response")
-if ((${#stale_dkim_ids[@]} > 0)); then
-  stale_ids_json="$(printf '%s\n' "${stale_dkim_ids[@]}" | jq -R . | jq -s .)"
-  request "x:DkimSignature/set" "$(jq -cn --argjson ids "$stale_ids_json" '{delete:$ids}')"
-fi
 request "x:Domain/set" "$(jq -cn --arg id "$domain_id" '{
   update:{($id):{
     certificateManagement:{"@type":"Manual"},
@@ -338,8 +333,9 @@ configure_listener "sendwise-submission" "587" false
 configure_listener "sendwise-implicit" "465" true
 
 if [[ "$mode" == "live" ]]; then
-  openssl x509 -in "$STALWART_CERTS_DIR/fullchain.pem" -noout -text 2>/dev/null |
-    grep -Fqi "DNS:$STALWART_HOSTNAME" ||
+  certificate_text="$(openssl x509 -in "$STALWART_CERTS_DIR/fullchain.pem" -noout -text 2>/dev/null)" ||
+    fail "could not read mounted TLS certificate"
+  certificate_covers_hostname "$certificate_text" "$STALWART_HOSTNAME" ||
     fail "mounted TLS certificate does not cover STALWART_HOSTNAME"
   openssl x509 -in "$STALWART_CERTS_DIR/fullchain.pem" -noout -checkend 0 >/dev/null 2>&1 ||
     fail "mounted TLS certificate is expired"

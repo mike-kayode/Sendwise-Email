@@ -86,7 +86,11 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 		}
 	}
 
-	envelopeFrom, err := parseEnvelopeAddress(msg.From)
+	envelopeSender := msg.EnvelopeFrom
+	if envelopeSender == "" {
+		envelopeSender = msg.From
+	}
+	envelopeFrom, err := parseEnvelopeAddress(envelopeSender)
 	if err != nil {
 		return nil, classifySMTP(fmt.Errorf("smtp mail from: invalid sender address: %w", err))
 	}

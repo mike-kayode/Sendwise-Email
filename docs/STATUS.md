@@ -1580,99 +1580,391 @@ passed on Task 5 implementation SHA
 E2E job, succeeded. The follow-up status-only commit does not change the tested
 application code and is also checked by CI.
 
-## Workspace delivery routing — Not done
+## Stalwart-only delivery
 
-The provider-routing work has earlier commits for the provider core, workspace
-settings/domain onboarding, campaign routing, and platform-mail failover. The
-current local changes add signed Resend webhook ingestion and shared
-per-account request scheduling. This section records only checks run locally;
-it is not a completion claim for the full routing task.
+### Step 1 — Remove Resend from campaign delivery: Done
 
-Local proof for webhook verification, event mapping/isolation, shared limiter
-priority, and the platform fake-Resend path:
+GitHub Actions run [42520735832](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42520735832)
+passed on SHA `55b1ec4f932b5a60e1b7b2033a8e2649eb8cc4c8` for the campaign
+removal commit.
+
+### Step 2 — Conflict-safe domain ownership: Done
+
+GitHub Actions run [42522488996](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42522488996)
+passed on SHA `505110fe7e424525f0ea26c392093293ff9bf619`.
+
+### Step 3 — Production Stalwart: Not done
+
+Local-container proof only:
 
 ```
-$ gofmt -l cmd internal services shared
+$ RUN_STALWART_INTEGRATION=1 TEST_DATABASE_URL=<local Postgres> go test ./services/identity -run '^TestStalwartRegistrationDeliversAndStoresVerificationEmail$' -count=1 -v
+=== RUN   TestStalwartRegistrationDeliversAndStoresVerificationEmail
+    stalwart_integration_test.go:115: verified Stalwart verification email against the active v1-rsa-20261108._domainkey.sendwise.test TXT value
+    stalwart_integration_test.go:169: verified one app DKIM signature for authenticated submission from hosted domain hosted-tenant.example.test
+--- PASS: TestStalwartRegistrationDeliversAndStoresVerificationEmail (1.73s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity	2.689s
+```
+
+No production host, DNS, external inbox, or production mail data was accessed.
+The local pass does not prove production provisioning or delivery.
+
+### Step 4 — Bounce and complaint processing: Not done
+
+The local parser and Postgres API integration cover signed VERP lookup,
+hard/soft DSN and ARF classification, suppression, isolation, and idempotency.
+`docs/EMAIL_SETUP.md` records that no Stalwart event subscription or bounce
+mailbox poller currently feeds the endpoint. Automatic downstream feedback is
+therefore unproven and must not be treated as operational.
+
+### Step 5 — Stalwart throughput: Not done
+
+The pooled worker was measured against a local discard SMTP sink. This is not
+the required real-Stalwart-to-local-MX run and does not prove inbox placement.
+Raw output:
+
+```
+$ RUN_BULK_THROUGHPUT=1 go test ./internal/worker -run '^TestBulkCampaignSMTPThroughput100k$' -count=1 -timeout 25m -v
+=== RUN   TestBulkCampaignSMTPThroughput100k
+bulk-sink: recipients=100000 elapsed=23m41.297s sends_per_second=70.36 peak_heap_bytes=33024632 heap_after_bytes=8821144 queue_depth_peak=100000 failures=0 warmup_reserved=100000
+--- PASS: TestBulkCampaignSMTPThroughput100k (1435.91s)
+PASS
+ok  	github.com/khayode/email-platform/internal/worker	1436.392s
+```
+
+The reported queue depth is the worker's local test queue, not Stalwart's
+outbound queue. No Stalwart CPU/memory, retry, or remote-MX measurements were
+collected. No inbox-placement claim is made.
+
+### Step 6 — Deploy hygiene: Not done pending CI
+
+The local deploy validation and duplicate report produced:
+
+```
+$ SENDWISE_ENV_FILE=<sample .env> ./scripts/deploy.sh validate
+Deploy validation checks passed
+$ ./scripts/check-domain-duplicates.sh
+Duplicate sending domains (domain, organization_id, status):
+No duplicate sending domains found.
+```
+
+The deploy script now checks duplicates before migrations; CI runs the
+validation against a sample environment and the E2E domains test uses the
+isolated Compose project. These changes are not complete until a green Actions
+run exists for their commit. The latest remote run at the time of this update
+is [42568783213](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42568783213),
+which failed the E2E job on the previous SHA because the domains test used the
+wrong Compose project. The local fix has not yet been pushed or tested by
+Actions. A local Playwright attempt against the already-running stack also
+failed during registration (`500`, `internal_error`); that stack is not the
+isolated CI Compose project, so this is not passing E2E proof:
+
+```
+$ E2E_BASE_URL=http://localhost:3000 E2E_API_ORIGIN=http://localhost:8084 MAILPIT_API_URL=http://localhost:8025 E2E_COMPOSE_PROJECT=email-platform npx playwright test e2e/domains.spec.ts --reporter=line
+Running 1 test using 1 worker
+1 failed
+  Error: {"error":{"code":"internal_error","message":"An unexpected error occurred."}}
+  Expected: 201
+  Received: 500
+```
+
+## DNS UX, sender identities, templates, and compliance: Not done
+
+The current directive is not complete. Local Go and web checks passed, but no
+Playwright proof was produced for this directive, the requested before/after
+DNS timing was not measured, and the local web server was unavailable. The
+checks below do not substitute for the missing browser proof.
+
+Raw local validation output:
+
+```
+$ gofmt -l cmd internal services shared && git diff --check
 (no output)
-$ go vet ./...
-(no output)
-$ TEST_DATABASE_URL=****** TEST_REDIS_URL=****** MIGRATIONS_DIR=../../migrations go test ./... -count=1
+
+$ TEST_DATABASE_URL=postgres://email:email@localhost:5432/email_test?sslmode=disable go vet ./...
+(no output; command exited 0)
+
+$ TEST_DATABASE_URL=postgres://email:email@localhost:5432/email_test?sslmode=disable go test ./... -count=1
 ?   	github.com/khayode/email-platform/cmd/api	[no test files]
 ?   	github.com/khayode/email-platform/cmd/backfill	[no test files]
 ?   	github.com/khayode/email-platform/cmd/migrate	[no test files]
 ?   	github.com/khayode/email-platform/cmd/worker	[no test files]
-ok  	github.com/khayode/email-platform/internal/api	8.416s
-ok  	github.com/khayode/email-platform/internal/auth	1.114s
-ok  	github.com/khayode/email-platform/internal/automations	2.552s
-ok  	github.com/khayode/email-platform/internal/backfill	9.323s
-ok  	github.com/khayode/email-platform/internal/campaigns	0.552s
-ok  	github.com/khayode/email-platform/internal/config	0.461s
-ok  	github.com/khayode/email-platform/internal/contacts	0.375s
-ok  	github.com/khayode/email-platform/internal/db	0.315s
-ok  	github.com/khayode/email-platform/internal/delivery	1.498s
+ok  	github.com/khayode/email-platform/internal/api	47.112s
+ok  	github.com/khayode/email-platform/internal/auth	4.438s
+ok  	github.com/khayode/email-platform/internal/automations	1.401s
+ok  	github.com/khayode/email-platform/internal/backfill	51.571s
+ok  	github.com/khayode/email-platform/internal/campaigns	0.573s
+ok  	github.com/khayode/email-platform/internal/config	0.494s
+ok  	github.com/khayode/email-platform/internal/contacts	0.465s
+ok  	github.com/khayode/email-platform/internal/db	1.189s
+ok  	github.com/khayode/email-platform/internal/delivery	1.994s
 ?   	github.com/khayode/email-platform/internal/httpx	[no test files]
-ok  	github.com/khayode/email-platform/internal/kit	0.273s
+ok  	github.com/khayode/email-platform/internal/kit	0.565s
 ?   	github.com/khayode/email-platform/internal/messaging	[no test files]
 ?   	github.com/khayode/email-platform/internal/observability	[no test files]
-ok  	github.com/khayode/email-platform/internal/outbox	1.731s
-ok  	github.com/khayode/email-platform/internal/projections	0.239s
+ok  	github.com/khayode/email-platform/internal/outbox	11.432s
+ok  	github.com/khayode/email-platform/internal/projections	0.551s
 ?   	github.com/khayode/email-platform/internal/session	[no test files]
 ?   	github.com/khayode/email-platform/internal/testutil	[no test files]
-ok  	github.com/khayode/email-platform/internal/worker	5.160s
-ok  	github.com/khayode/email-platform/services/gateway	0.264s
+ok  	github.com/khayode/email-platform/internal/worker	40.074s
+ok  	github.com/khayode/email-platform/services/gateway	0.676s
 ?   	github.com/khayode/email-platform/services/gateway/cmd/gateway	[no test files]
-ok  	github.com/khayode/email-platform/services/identity	2.605s
-ok  	github.com/khayode/email-platform/services/identity/cmd/devseed	0.287s
+ok  	github.com/khayode/email-platform/services/identity	32.281s
+ok  	github.com/khayode/email-platform/services/identity/cmd/devseed	0.822s
 ?   	github.com/khayode/email-platform/services/identity/cmd/identity	[no test files]
-ok  	github.com/khayode/email-platform/services/workspace	0.281s
+ok  	github.com/khayode/email-platform/services/workspace	0.641s
 ?   	github.com/khayode/email-platform/services/workspace/cmd/workspace	[no test files]
-ok  	github.com/khayode/email-platform/shared/contracts/events	0.219s
-$ docker compose -f docker-compose.yml -f docker-compose.microservices.yml config -q
+ok  	github.com/khayode/email-platform/shared/contracts/events	0.388s
+
+$ cd apps/web && npm run typecheck && npm run lint && npm test && npm run build
+> @email-platform/web@0.1.0 typecheck
+> tsc --noEmit
+
+> @email-platform/web@0.1.0 lint
+> tsc --noEmit
+
+ℹ tests 10
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+✓ Compiled successfully in 2.7s
+✓ Generating static pages using 7 workers (26/26) in 2.5s
+
+$ curl --silent --show-error --max-time 3 -o /dev/null -w 'web=%{http_code}\n' http://localhost:3000/
+curl: (7) Failed to connect to localhost port 3000 after 2 ms: Couldn't connect to server
+web=000
+```
+
+Not done:
+
+- The Playwright scenarios for DNS copy/check, sender ownership, mode switching,
+  reorder/color changes, HTML import, and sender-profile enforcement have not
+  been run. No E2E pass is claimed.
+- Uploaded image storage is not implemented; only bundled neutral template
+  assets are available. Remote image URLs are rejected by the delivery
+  renderer.
+- DNS before/after timing and real-Stalwart sender-account behavior remain
+  unverified.
+
+### DNS and Stalwart continuation — 2026-11-09
+
+The DNS checker was corrected to discover the closest authoritative zone
+(including delegated subdomains), query its nameservers directly, and share
+that discovery across the record checks in one verification request. The
+provisioner no longer deletes unrelated hosted domains or Stalwart DKIM
+signatures. Local code checks pass; no mutating provisioning was run against
+Stalwart and no production system was accessed.
+
+Raw verification output:
+
+```
+$ TEST_DATABASE_URL=postgres://email:email@localhost:5432/email_test?sslmode=disable go vet ./internal/api
+(no output; command exited 0)
+$ TEST_DATABASE_URL=postgres://email:email@localhost:5432/email_test?sslmode=disable go test ./internal/api -run 'TestLookupDNSRecord|TestAuthoritativeZoneCandidates|TestDomainDNS|TestCheckDomainDNS|TestDomainsIntegration' -count=1
+ok  	github.com/khayode/email-platform/internal/api	0.705s
+
+$ bash -n scripts/provision-stalwart.sh
+(no output; command exited 0)
+$ STALWART_DOMAIN=sendwise.test STALWART_ADMIN_PASSWORD='<redacted local test value>' STALWART_SUBMIT_PASSWORD='<redacted local test value>' ./scripts/provision-stalwart.sh --local --dry-run
+DRY RUN: mode=local Stalwart URL=http://127.0.0.1:8081
+Would set hostname=mail.sendwise.test, platform domain=sendwise.test, and submission account=noreply@sendwise.test.
+Would configure authenticated STARTTLS on 587, implicit TLS on 465, a 10-thread outbound queue, and 5 delivery attempts.
+Would provision the local Compose Stalwart service.
+DNS to publish after provisioning:
+  sendwise.test MX 10 mail.sendwise.test.
+  mail.sendwise.test A <SERVER_PUBLIC_IP>
+  sendwise.test TXT "v=spf1 mx -all"
+  <ACTIVE_SELECTOR>._domainkey.sendwise.test TXT <DKIM_RECORD_FROM_PROVISION_OUTPUT>
+  _dmarc.sendwise.test TXT "v=DMARC1; p=none; rua=mailto:dmarc@sendwise.test"
+  Request PTR: <SERVER_PUBLIC_IP> -> mail.sendwise.test.
+Smoke: swaks --server mail.sendwise.test --port 587 --tls --auth LOGIN --auth-user noreply@sendwise.test --auth-password "$STALWART_SUBMIT_PASSWORD" --from noreply@sendwise.test --to <TEST_RECIPIENT>
+
+$ docker inspect --format '{{json .State.Health}}' email-platform-stalwart-1 | jq -r '"status=" + .Status, (.Log[-1] | "last_exit=" + (.ExitCode|tostring) + " output=" + (.Output|gsub("\n";" ")))'
+status=healthy
+last_exit=0 output=
+
+$ dig +time=2 +tries=1 +norecurse @108.162.192.162 TXT example.com +noall +answer +stats
+example.com.		300	IN	TXT	"_k2n1y4vw3qtb4skdx9e7dxt97qrmmq9"
+example.com.		300	IN	TXT	"v=spf1 -all"
+;; Query time: 144 msec
+```
+
+The `dig` request is only a network-path smoke test against `example.com`;
+144 ms is not a before/after measurement of Sendwise domain verification.
+Real Stalwart provisioning, authenticated SMTP acceptance, and external mail
+delivery remain unverified in this continuation.
+
+## DNS UX, sender identities, templates, and compliance — Partly done (2026-11-09)
+
+Implemented locally:
+
+- DNS rows copy the exact full name/value, show a copied confirmation, support
+  full/relative-name display, per-resolver status/value, and last-check times.
+  The page offers Check now and polls at 15 seconds for 10 minutes, then every
+  60 seconds. DNS checks run in parallel across Cloudflare, Google, and
+  authoritative nameservers. DMARC and MX are advisory; ownership, SPF, and
+  DKIM gate verification.
+- Sender identities are workspace-scoped, editable, and selectable for
+  templates/campaigns. Campaign server validation rejects a missing, foreign,
+  mismatched, unverified, or conflicted sender. The browser journey creates a
+  second address and sends the campaign from it.
+- The editor supports plain/HTML mode, lossy-switch confirmation, editable
+  nested columns, drag/keyboard reorder, theme controls, preview, autosave,
+  undo/redo, and import of rows, text, buttons, images, spacers, social links,
+  and custom HTML. Cloudfront/AWS image URLs and Flowi branding are normalized
+  during import.
+- PNG/JPEG/GIF uploads are stored in workspace-associated Postgres records and
+  served from Sendwise public asset URLs. The renderer emits only bundled or
+  Sendwise-hosted images. Template test messages use the configured SMTP relay
+  and app-managed DKIM key.
+- The sender profile blocks campaign editor access and server-side sending
+  until complete. Campaign delivery appends the postal address and
+  unsubscribe link and includes one-click unsubscribe headers.
+- Eight editable, neutral gallery templates are available. The worker Compose
+  environment includes both Stalwart admin variables. No legacy sample-brand
+  footer remains in application content.
+
+Proof output (all local; the browser stack uses Mailpit, not Stalwart):
+
+```
+$ gofmt -l cmd internal services shared
 (no output)
-```
+$ git diff --check
+(no output)
+$ TEST_DATABASE_URL=<isolated local Postgres URL> go vet ./...
+(no output; exit 0)
+$ TEST_DATABASE_URL=<isolated local Postgres URL> go test ./... -count=1
+?   	github.com/khayode/email-platform/cmd/api	[no test files]
+?   	github.com/khayode/email-platform/cmd/backfill	[no test files]
+?   	github.com/khayode/email-platform/cmd/migrate	[no test files]
+?   	github.com/khayode/email-platform/cmd/worker	[no test files]
+ok  	github.com/khayode/email-platform/internal/api	21.067s
+ok  	github.com/khayode/email-platform/internal/auth	2.036s
+ok  	github.com/khayode/email-platform/internal/automations	1.924s
+ok  	github.com/khayode/email-platform/internal/backfill	23.332s
+ok  	github.com/khayode/email-platform/internal/campaigns	0.427s
+ok  	github.com/khayode/email-platform/internal/config	0.378s
+ok  	github.com/khayode/email-platform/internal/contacts	0.360s
+ok  	github.com/khayode/email-platform/internal/db	0.596s
+ok  	github.com/khayode/email-platform/internal/delivery	1.396s
+?   	github.com/khayode/email-platform/internal/httpx	[no test files]
+ok  	github.com/khayode/email-platform/internal/kit	0.573s
+?   	github.com/khayode/email-platform/internal/messaging	[no test files]
+?   	github.com/khayode/email-platform/internal/observability	[no test files]
+ok  	github.com/khayode/email-platform/internal/outbox	5.350s
+ok  	github.com/khayode/email-platform/internal/projections	0.583s
+?   	github.com/khayode/email-platform/internal/session	[no test files]
+?   	github.com/khayode/email-platform/internal/testutil	[no test files]
+ok  	github.com/khayode/email-platform/internal/worker	14.661s
+ok  	github.com/khayode/email-platform/services/gateway	0.465s
+?   	github.com/khayode/email-platform/services/gateway/cmd/gateway	[no test files]
+ok  	github.com/khayode/email-platform/services/identity	9.234s
+ok  	github.com/khayode/email-platform/services/identity/cmd/devseed	0.452s
+?   	github.com/khayode/email-platform/services/identity/cmd/identity	[no test files]
+ok  	github.com/khayode/email-platform/services/workspace	0.428s
+?   	github.com/khayode/email-platform/services/workspace/cmd/workspace	[no test files]
+ok  	github.com/khayode/email-platform/shared/contracts/events	0.312s
 
-The successful full suite ran against the clean local scratch Postgres database
-`sendwise_delivery_routing_test_clean`. A first full-suite attempt against the
-reused database failed because an earlier integration run had left a sending
-domain that collided with the test's globally unique domain index; no source
-change was made for that stale test data. The fake webhook tests cover valid, invalid,
-and stale signatures; replay deduplication; `email.sent`, `delivered`,
-`delivery_delayed`, `bounced` (hard and soft), `complained`, `opened`, `clicked`,
-and `failed`; suppression behavior; and a cross-workspace job-isolation case.
-The Redis-backed limiter test uses two independent clients and confirms
-platform mail gets the next shared per-key request slot ahead of queued
-campaign work. The platform fallback test uses an `httptest` fake only. Local
-Postgres integration also checks the 24-hour rolling pause thresholds at
-exactly 2% and above 2% bounces, and below/above 0.05% complaints.
+$ cd apps/web && npm run typecheck && npm run lint && npm test && npm run build
+TYPECHECK=0
+LINT=0
+ℹ tests 10
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+✓ Compiled successfully in 1114ms
+✓ Generating static pages using 7 workers (26/26) in 256ms
+BUILD=0
 
-The existing application-level 100,000-recipient SMTP discard-sink benchmark
-was run separately; the full Go suite above does not enable that opt-in test:
+$ E2E_BASE_URL=http://localhost:3000 E2E_API_ORIGIN=http://localhost:8084 MAILPIT_API_URL=http://localhost:8025 E2E_COMPOSE_PROJECT=email-platform npm run test:e2e -- e2e/domains.spec.ts e2e/template-delivery.spec.ts --reporter=line
+Running 2 tests using 1 worker
+[1/2] [chromium] › e2e/domains.spec.ts:105:1 › sending domains load from the real API without browser errors
+[2/2] [chromium] › e2e/template-delivery.spec.ts:85:1 › register, import an audience, edit a template, send, and verify campaign reports
+2 passed (1.5m)
 
-```
-$ RUN_BULK_THROUGHPUT=1 TEST_DATABASE_URL=****** go test ./internal/worker -run '^TestBulkCampaignSMTPThroughput100k$' -count=1 -v
-=== RUN   TestBulkCampaignSMTPThroughput100k
-bulk-sink: recipients=100000 elapsed=9m16.346s sends_per_second=179.74 peak_heap_bytes=33619928 heap_after_bytes=13831752 queue_depth_peak=100000 failures=0 warmup_reserved=100000
---- PASS: TestBulkCampaignSMTPThroughput100k (563.73s)
+The domains browser test also disables `navigator.clipboard` and verifies that
+the fallback copies the exact full-length DKIM value through the selected
+textarea.
+
+$ docker compose ... run --rm migrate && docker compose ... run --rm migrate
+{"time":"2026-11-09T16:47:27.603868134Z","level":"INFO","msg":"migrations applied","service":"migrate","env":"development","directory":"/app/migrations"}
+{"time":"2026-11-09T16:47:31.671514969Z","level":"INFO","msg":"migrations applied","service":"migrate","env":"development","directory":"/app/migrations"}
+
+$ TEST_DATABASE_URL=<isolated local Postgres URL> go test ./internal/api -run '^TestDomainDNSParallelLatencyComparedWithSequentialLookups$' -count=1 -v
+=== RUN   TestDomainDNSParallelLatencyComparedWithSequentialLookups
+    domains_test.go:61: simulated DNS check latency: sequential_before=163ms parallel_after=41ms
+--- PASS: TestDomainDNSParallelLatencyComparedWithSequentialLookups (0.20s)
 PASS
-ok  	github.com/khayode/email-platform/internal/worker	564.393s
+ok  	github.com/khayode/email-platform/internal/api	1.067s
+
+$ rg -n 'Acme[[:space:]]Studio' .
+(no output; exit 1)
 ```
 
-This sink result proves only the application path against a local SMTP test
-server. It does not prove Resend throughput, injected Resend 429/5xx recovery,
-or inbox placement.
+### Additional verification — 2026-11-09
 
-Still **Not done / not verified**:
+The insecure clipboard fallback was exercised from an actual non-secure
+`http://<LAN_IP>:3000` browser origin (the local web server was bound to the
+LAN interface temporarily). The browser reported `isSecureContext=false` and
+no Clipboard API; the real fallback copied the complete DKIM value.
 
-- No full Playwright routing journey has run.
-- No 100,000-recipient fake-Resend throughput run with injected 429/5xx or
-  corresponding performance report exists.
-- The requested fixed Resend warm-up ramp (200 through 100,000/day, advancing
-  only after a day below 2% bounces) is not implemented.
-- Campaign pause thresholds have only local synthetic-event coverage; no
-  production-like sending or deliverability claim is made.
-- A UI/API workflow to authenticate the same domain with both Stalwart and
-  Resend is incomplete; optional campaign fallback must remain unused until
-  both provider-auth flags are independently verified.
-- No green GitHub Actions result exists yet for the current routing SHA; the
-  task remains **Not done** until CI finishes and the remaining routing
-  requirements are addressed.
+```
+$ E2E_BASE_URL=http://<LAN_IP>:3000 E2E_INSECURE_ORIGIN=http://<LAN_IP>:3000 npm run test:e2e -- e2e/clipboard-insecure-origin.spec.ts --reporter=line
+Running 1 test using 1 worker
+[1/1] [chromium] › e2e/clipboard-insecure-origin.spec.ts:5:1 › DNS copy fallback works from a real insecure HTTP origin
+1 passed (2.4s)
+```
+
+The real-container integration test was run against a separate, temporary
+Stalwart v1.0.3 Compose project and an isolated PostgreSQL schema. It provisioned
+the mail domain and submission account, registered through Identity, received
+the verification message over JMAP, verified it against Stalwart's active DKIM
+record, then submitted a message from a hosted tenant domain and verified
+exactly one app-managed DKIM signature.
+
+```
+$ ./scripts/provision-stalwart.sh --local
+Stalwart v1.0.3 provisioned: domain=sendwise-proof.test submission=noreply@sendwise-proof.test; 587 STARTTLS; 465 implicit TLS
+$ RUN_STALWART_INTEGRATION=1 STALWART_SMTP_ADDR=127.0.0.1:8587 STALWART_SMTP_IMPLICIT_ADDR=127.0.0.1:8465 STALWART_SMTP_HOST=localhost go test ./services/identity -run '^TestStalwartRegistrationDeliversAndStoresVerificationEmail$' -count=1 -v
+=== RUN   TestStalwartRegistrationDeliversAndStoresVerificationEmail
+    stalwart_integration_test.go:115: verified Stalwart verification email against the active DKIM TXT value
+    stalwart_integration_test.go:172: verified one app DKIM signature for authenticated submission from hosted domain hosted-tenant.example.test
+--- PASS: TestStalwartRegistrationDeliversAndStoresVerificationEmail (0.99s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity 1.381s
+```
+
+Read-only DNS checks were measured against `pipsleague.com`, using Cloudflare,
+Google, and both authoritative nameserver IPs. The serial and concurrent runs
+queried the same 20 record/source combinations (apex TXT and MX, `mail` DKIM,
+DMARC, and Sendwise ownership TXT). These are DNS lookup batch timings, not a
+claim that the application's domain-verification flow completed:
+
+```
+Read-only live DNS batch for pipsleague.com: 20 lookups
+serial_before_ms=3728.8 parallel_after_ms=482.5
+@1.1.1.1: SPF/MX/DMARC NOERROR; mail DKIM NXDOMAIN; Sendwise ownership TXT NXDOMAIN
+@8.8.8.8: SPF/MX/DMARC NOERROR; mail DKIM NXDOMAIN; Sendwise ownership TXT NXDOMAIN
+@172.64.52.164 (authoritative): SPF/MX/DMARC NOERROR; mail DKIM NXDOMAIN; Sendwise ownership TXT NXDOMAIN
+@172.64.53.7 (authoritative): SPF/MX/DMARC NOERROR; mail DKIM NXDOMAIN; Sendwise ownership TXT NXDOMAIN
+```
+
+Still not done / not verified:
+
+- The local Stalwart test proves authenticated submission, JMAP receipt, and
+  DKIM correctness only in the isolated local container. No production service
+  or external inbox was accessed. The browser template-send flow still uses
+  Mailpit.
+- Public DNS for `pipsleague.com` currently lacks the Sendwise ownership TXT
+  and `mail` DKIM records on all four queried sources. The matching
+  workspace-generated record values must be published by the domain operator;
+  no DNS changes were made. Public answers also include an old third-party
+  domain-verification TXT record; it was not removed.
+- The supplied Beefree artwork was not bundled because redistribution rights
+  were not confirmed. The requested Figma export/images are still unavailable.
+- No production deployment or production data access occurred.

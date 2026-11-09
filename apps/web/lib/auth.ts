@@ -189,6 +189,7 @@ export type Campaign = {
   preview_text?: string;
   sender_name: string;
   sender_email: string;
+  sender_identity_id?: string;
   sender_postal_address?: string;
   alerts?: { type: string; message: string; created_at: string }[];
   reply_to?: string;
@@ -206,6 +207,17 @@ export type Campaign = {
   paused_at?: string;
   created_at: string;
   updated_at: string;
+};
+
+export type SenderIdentity = {
+  id: string;
+  domain: string;
+  local_part: string;
+  email: string;
+  display_name: string;
+  reply_to: string;
+  is_default: boolean;
+  verified: boolean;
 };
 
 export type Json = Record<string, unknown> | null;
@@ -245,8 +257,17 @@ export type DomainDNSRecord = {
   type: string;
   name: string;
   value: string;
+  ttl: string;
   purpose: string;
   status: string;
+  found_value?: string;
+  last_checked?: string;
+  resolvers?: Array<{
+    resolver: string;
+    status: string;
+    found_value?: string;
+    error?: string;
+  }>;
 };
 
 export type CampaignReport = {

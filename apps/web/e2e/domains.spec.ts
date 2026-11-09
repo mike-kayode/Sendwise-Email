@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { expect, test, type APIRequestContext } from "@playwright/test";
 
 const MAILPIT_API = process.env.MAILPIT_API_URL ?? "http://localhost:8025";
+const API_ORIGIN = process.env.E2E_API_ORIGIN ?? "http://localhost:8084";
 
 async function findVerificationLink(
   request: APIRequestContext,
@@ -42,6 +43,8 @@ function runLocalSQL(sql: string): void {
   ];
   const args = [
     "compose",
+    "--project-name",
+    process.env.E2E_COMPOSE_PROJECT ?? "sendwise-e2e-stalwart",
     ...composeFiles.flatMap((file) => ["-f", file]),
     "exec",
     "-T",
@@ -57,13 +60,14 @@ function seedDomains(organizationID: string, stamp: number): void {
   if (!/^[0-9a-f-]{36}$/i.test(organizationID)) {
     throw new Error("The login token did not contain a valid organization ID");
   }
+  const longDKIMPublicKey = "A".repeat(344);
   runLocalSQL(`
     INSERT INTO sending_domains (
       organization_id, domain, status, dkim_selector, dkim_public_key,
       spf_status, dkim_status, dmarc_status, verification_status,
       last_checked_at, verified_at
     ) VALUES
-      ('${organizationID}', 'pending-${stamp}.example.test', 'pending', 'mail', NULL,
+      ('${organizationID}', 'pending-${stamp}.example.test', 'pending', 'mail', '${longDKIMPublicKey}',
        'pending', 'missing', 'pending', 'pending', NULL, NULL),
       ('${organizationID}', 'verified-${stamp}.example.test', 'verified', 'mail', '',
        'verified', 'verified', 'verified', 'verified', now(), now())
@@ -122,7 +126,7 @@ test("sending domains load from the real API without browser errors", async ({
   await page.goto("/register");
   await page.getByPlaceholder("Your name").fill("Domain Page Test");
   await page.getByPlaceholder("you@example.com").fill(email);
-  await page.getByPlaceholder("Acme Studio").fill(`Domain Page ${stamp}`);
+  await page.getByPlaceholder("Workspace name").fill(`Domain Page ${stamp}`);
   await page.getByPlaceholder("••••••••••").fill(password);
   const registrationResponse = page.waitForResponse(
     (response) => new URL(response.url()).pathname.endsWith("/auth/register"),
@@ -172,6 +176,108 @@ test("sending domains load from the real API without browser errors", async ({
     path: testInfo.outputPath("domains-one-unverified-one-verified.png"),
     fullPage: true,
   });
+
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: "http://localhost:3000",
+  });
+  const domainResponse = await request.get(`${API_ORIGIN}/api/v1/domains`, {
+    headers: { Authorization: ["Bearer", accessToken].join(" ") },
+  });
+  const domainList = (await domainResponse.json()) as {
+    data: Array<{ id: string; domain: string }>;
+  };
+  const pendingDomain = domainList.data.find((item) => item.domain === `pending-${stamp}.example.test`);
+  expect(pendingDomain?.id).toBeTruthy();
+  const dnsResponse = await request.get(
+    `${API_ORIGIN}/api/v1/domains/${pendingDomain!.id}/dns-records`,
+    { headers: { Authorization: ["Bearer", accessToken].join(" ") } },
+  );
+  const dnsRecords = (await dnsResponse.json()) as {
+    dns_records: Array<{ name: string; value: string; type: string; ttl: number; purpose: string }>;
+  };
+  const copyRecord = dnsRecords.dns_records.find((record) =>
+    record.name.includes("._domainkey") && record.value.length > 300,
+  );
+  expect(copyRecord).toBeTruthy();
+  await page.getByRole("button", { name: "Show full names" }).click();
+  const copyRow = page
+    .getByRole("row")
+    .filter({ hasText: copyRecord!.name })
+    .filter({ hasText: copyRecord!.value });
+  const copyName = copyRow.getByRole("button", { name: `Copy DNS name ${copyRecord!.name}` });
+  const copyValue = copyRow.getByRole("button", { name: `Copy DNS value ${copyRecord!.name}` });
+  await copyName.click();
+  await expect(page.getByText("Copied", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(copyRecord!.name);
+  await copyValue.click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(copyRecord!.value);
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    const windowWithCapture = window as Window & { copiedFallbackText?: string };
+    document.execCommand = (command) => {
+      if (command !== "copy" || !(document.activeElement instanceof HTMLTextAreaElement)) {
+        return false;
+      }
+      const textarea = document.activeElement;
+      windowWithCapture.copiedFallbackText = textarea.value;
+      return textarea.selectionStart === 0 && textarea.selectionEnd === textarea.value.length;
+    };
+  });
+  await copyValue.click();
+  await expect(page.getByText("Copied", { exact: true }).first()).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => (window as Window & { copiedFallbackText?: string }).copiedFallbackText,
+    ),
+  ).toBe(copyRecord!.value);
+  await expect(page.getByText(copyRecord!.name, { exact: true }).first()).toBeVisible();
+  await page.getByRole("button", { name: "Show relative names" }).click();
+  await expect(page.getByText("@", { exact: true }).first()).toBeVisible();
+
+  const fakeDNSRecords = dnsRecords.dns_records.map((record, index) => ({
+    ...record,
+    status: index === 1 ? "wrong_value" : index === 2 ? "missing" : "found",
+    found_value: index === 2 ? "" : index === 1 ? "v=spf1 -all" : record.value,
+    last_checked: new Date().toISOString(),
+    resolvers: [{
+      resolver: "fake DNS resolver",
+      status: index === 1 ? "wrong_value" : index === 2 ? "missing" : "found",
+      found_value: index === 2 ? "" : index === 1 ? "v=spf1 -all" : record.value,
+    }],
+  }));
+  await page.route("**/api/v1/domains/*/dns-records", async (route) => {
+    if (!route.request().url().includes(pendingDomain!.id)) {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ dns_records: fakeDNSRecords }),
+    });
+  });
+  await page.route(`**/api/v1/domains/${pendingDomain!.id}/verify`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        domain: { id: pendingDomain!.id, domain: pendingDomain!.domain, status: "misconfigured" },
+        dns_records: fakeDNSRecords,
+      }),
+    });
+  });
+  const verifyResponse = page.waitForResponse((response) =>
+    response.url().includes(`/api/v1/domains/${pendingDomain!.id}/verify`) &&
+    response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "Check now" }).first().click();
+  expect((await verifyResponse).status()).toBe(200);
+  await expect(page.getByText("DNS check complete", { exact: true })).toBeVisible();
+  await page.getByText("Resolver results", { exact: true }).first().click();
+  await expect(page.getByText("fake DNS resolver", { exact: false }).first()).toBeVisible();
+  await expect(page.getByText("wrong value", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Found: v=spf1 -all", { exact: true })).toBeVisible();
+  await page.unrouteAll();
 
   seedMisconfiguredDomain(claims.org!, stamp);
   await page.reload();

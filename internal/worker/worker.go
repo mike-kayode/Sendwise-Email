@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"log/slog"
@@ -64,6 +65,16 @@ type jobRow struct {
 	TrackClicks         bool
 	Organization        string
 	SenderPostalAddress string
+	SenderCompany       string
+	SenderStreet        string
+	SenderCity          string
+	SenderRegion        string
+	SenderPostalCode    string
+	SenderCountry       string
+	SenderWebsite       string
+	SenderSupportEmail  string
+	SenderFooterText    string
+	SenderSocialLinks   []byte
 	WarmupReservedOn    *time.Time
 	CreatedAt           time.Time
 }
@@ -221,6 +232,29 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		return 0, w.failJob(ctx, row, fmt.Errorf("sending domain %q is already owned by another workspace", domainOf(row.SenderEmail)))
 	}
 
+	var authorizedSender bool
+	if err := w.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM campaigns cp
+			JOIN sender_identities si
+			  ON si.id = cp.sender_identity_id AND si.organization_id = cp.organization_id
+			JOIN sending_domains sd
+			  ON sd.organization_id = si.organization_id AND lower(sd.domain) = lower(si.domain)
+			WHERE cp.id = $1 AND cp.organization_id = $2
+			  AND lower(si.local_part || '@' || si.domain) = lower(cp.sender_email)
+			  AND sd.status = 'verified' AND NOT sd.owner_conflict
+		)
+	`, row.CampaignID, row.OrganizationID).Scan(&authorizedSender); err != nil {
+		return 0, fmt.Errorf("check campaign sender identity: %w", err)
+	}
+	if !authorizedSender {
+		return 0, w.failJob(ctx, row, errors.New("campaign From address is not a verified sender identity owned by this workspace"))
+	}
+	if !completeSenderProfile(row) {
+		return 0, w.failJob(ctx, row, errors.New("complete the sender profile before sending campaigns"))
+	}
+
 	if w.cfg.RequireVerifiedDomain {
 		senderDomain := domainOf(row.SenderEmail)
 		var verified bool
@@ -266,6 +300,7 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	unsubscribeURL := strings.TrimRight(w.cfg.APIBaseURL, "/") + "/api/v1/public/unsubscribe?token=" + url.QueryEscape(unsubscribeToken)
 
 	data := personalizationData(row, unsubscribeURL)
+	data["app_base_url"] = w.cfg.AppBaseURL
 	htmlBody, textBody, err := w.renderer.RenderDesign(json.RawMessage(row.Content), data)
 	if err != nil {
 		return 0, w.failJob(ctx, row, err)
@@ -277,20 +312,34 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		})
 	}
 
+	address := senderPostalAddress(row)
+	profileFooter, err := senderProfileFooter(row)
+	if err != nil {
+		return 0, w.failJob(ctx, row, err)
+	}
 	footer := fmt.Sprintf(
 		`<div style="margin-top:32px;padding-top:24px;border-top:1px solid #e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;color:#94a3b8;">
 <p style="margin:0 0 8px;">You are receiving this email because you subscribed to updates from %s.</p>
 %s
+%s
 <p style="margin:0;"><a href="%s" style="color:#64748b;text-decoration:underline;">Unsubscribe</a></p>
 </div>`,
-		html.EscapeString(row.Organization),
-		postalAddressFooter(row.SenderPostalAddress),
+		html.EscapeString(row.SenderCompany),
+		postalAddressFooter(address),
+		profileFooter,
 		html.EscapeString(unsubscribeURL),
 	)
 	htmlBody = appendBeforeBodyClose(htmlBody, footer)
-	textBody += "\n\nYou are receiving this email because you subscribed to updates from " + row.Organization + ".\n"
-	if address := strings.TrimSpace(row.SenderPostalAddress); address != "" {
-		textBody += address + "\n"
+	textBody += "\n\nYou are receiving this email because you subscribed to updates from " + row.SenderCompany + ".\n"
+	textBody += address + "\n"
+	if strings.TrimSpace(row.SenderFooterText) != "" {
+		textBody += strings.TrimSpace(row.SenderFooterText) + "\n"
+	}
+	if strings.TrimSpace(row.SenderWebsite) != "" {
+		textBody += "Website: " + strings.TrimSpace(row.SenderWebsite) + "\n"
+	}
+	if strings.TrimSpace(row.SenderSupportEmail) != "" {
+		textBody += "Support: " + strings.TrimSpace(row.SenderSupportEmail) + "\n"
 	}
 	textBody += "Unsubscribe: " + unsubscribeURL + "\n"
 
@@ -327,6 +376,35 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		HTML:        htmlBody,
 		Text:        textBody,
 		Headers:     headers,
+	}
+	verpClaims := delivery.VERPClaims{
+		WorkspaceID: row.OrganizationID,
+		CampaignID:  row.CampaignID,
+		Recipient:   strings.ToLower(row.Email),
+	}
+	verpToken, err := delivery.NewVERPToken(w.cfg.JWTSecret, verpClaims)
+	if err != nil {
+		return 0, w.failJob(ctx, row, fmt.Errorf("create signed VERP token: %w", err))
+	}
+	message.EnvelopeFrom, err = delivery.FormatVERPReturnPath(w.cfg.BounceDomain, verpToken)
+	if err != nil {
+		return 0, w.failJob(ctx, row, fmt.Errorf("format VERP return path: %w", err))
+	}
+	tag, err := w.pool.Exec(ctx, `
+		INSERT INTO delivery_verp_tokens
+			(token, organization_id, campaign_id, delivery_job_id, contact_id, email)
+		VALUES ($1, $2, $3, $4, $5, lower($6))
+		ON CONFLICT (token) DO UPDATE SET token = EXCLUDED.token
+		WHERE delivery_verp_tokens.organization_id = EXCLUDED.organization_id
+		  AND delivery_verp_tokens.campaign_id = EXCLUDED.campaign_id
+		  AND delivery_verp_tokens.delivery_job_id = EXCLUDED.delivery_job_id
+		  AND lower(delivery_verp_tokens.email) = lower(EXCLUDED.email)
+	`, verpToken, row.OrganizationID, row.CampaignID, row.ID, row.ContactID, row.Email)
+	if err != nil {
+		return 0, w.failJob(ctx, row, fmt.Errorf("persist signed VERP token mapping: %w", err))
+	}
+	if tag.RowsAffected() == 0 {
+		return 0, w.failJob(ctx, row, errors.New("signed VERP token conflicts with a different delivery"))
 	}
 	message.DKIM, err = delivery.LoadDKIMConfig(ctx, w.pool, row.OrganizationID, row.SenderEmail, w.cfg.DKIMEncryptionKey)
 	if err != nil {
@@ -365,10 +443,16 @@ func (w *Worker) loadJob(ctx context.Context, jobID string) (*jobRow, error) {
 		       cp.subject, cp.preview_text, cp.sender_name, cp.sender_email,
 		       COALESCE(cp.reply_to, ''), cp.content, cp.status,
 		       cp.track_opens, cp.track_clicks, o.name,
-		       COALESCE(cp.sender_postal_address, ''), dj.warmup_reserved_on, dj.created_at
+		       COALESCE(cp.sender_postal_address, ''),
+		       COALESCE(sp.company_name, ''), COALESCE(sp.street_address, ''),
+		       COALESCE(sp.city, ''), COALESCE(sp.region, ''), COALESCE(sp.postal_code, ''),
+		       COALESCE(sp.country, ''), COALESCE(sp.website, ''), COALESCE(sp.support_email, ''),
+		       COALESCE(sp.footer_text, ''), COALESCE(sp.social_links, '[]'::jsonb),
+		       dj.warmup_reserved_on, dj.created_at
 		FROM delivery_jobs dj
 		JOIN campaigns cp ON cp.id = dj.campaign_id
 		JOIN organizations o ON o.id = dj.organization_id
+		LEFT JOIN sender_profiles sp ON sp.organization_id = dj.organization_id
 		LEFT JOIN contacts c ON c.id = dj.contact_id
 		LEFT JOIN campaign_recipients cr
 		       ON cr.campaign_id = dj.campaign_id AND cr.contact_id = dj.contact_id
@@ -382,6 +466,9 @@ func (w *Worker) loadJob(ctx context.Context, jobID string) (*jobRow, error) {
 		&row.ReplyTo, &row.Content, &row.CampaignStatus,
 		&row.TrackOpens, &row.TrackClicks, &row.Organization,
 		&row.SenderPostalAddress,
+		&row.SenderCompany, &row.SenderStreet, &row.SenderCity, &row.SenderRegion,
+		&row.SenderPostalCode, &row.SenderCountry, &row.SenderWebsite, &row.SenderSupportEmail,
+		&row.SenderFooterText, &row.SenderSocialLinks,
 		&row.WarmupReservedOn,
 		&row.CreatedAt,
 	)
@@ -855,6 +942,85 @@ func postalAddressFooter(address string) string {
 		return ""
 	}
 	return `<p style="margin:0 0 8px;">` + html.EscapeString(strings.TrimSpace(address)) + `</p>`
+}
+
+func completeSenderProfile(row *jobRow) bool {
+	return strings.TrimSpace(row.SenderCompany) != "" &&
+		strings.TrimSpace(row.SenderStreet) != "" &&
+		strings.TrimSpace(row.SenderCity) != "" &&
+		strings.TrimSpace(row.SenderPostalCode) != "" &&
+		strings.TrimSpace(row.SenderCountry) != "" &&
+		strings.TrimSpace(row.SenderWebsite) != "" &&
+		strings.TrimSpace(row.SenderSupportEmail) != ""
+}
+
+func senderPostalAddress(row *jobRow) string {
+	parts := []string{strings.TrimSpace(row.SenderStreet), strings.TrimSpace(row.SenderCity)}
+	locality := strings.TrimSpace(strings.Join([]string{
+		strings.TrimSpace(row.SenderRegion),
+		strings.TrimSpace(row.SenderPostalCode),
+	}, " "))
+	if locality != "" {
+		parts = append(parts, locality)
+	}
+	parts = append(parts, strings.TrimSpace(row.SenderCountry))
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			values = append(values, part)
+		}
+	}
+	return strings.Join(values, ", ")
+}
+
+func senderProfileFooter(row *jobRow) (string, error) {
+	var socialLinks []struct {
+		Label string `json:"label"`
+		URL   string `json:"url"`
+	}
+	if err := json.Unmarshal(row.SenderSocialLinks, &socialLinks); err != nil {
+		return "", fmt.Errorf("decode sender profile social links: %w", err)
+	}
+	var footer strings.Builder
+	if text := strings.TrimSpace(row.SenderFooterText); text != "" {
+		footer.WriteString(`<p style="margin:0 0 8px;">`)
+		footer.WriteString(html.EscapeString(text))
+		footer.WriteString(`</p>`)
+	}
+	if website := strings.TrimSpace(row.SenderWebsite); website != "" {
+		parsed, err := url.Parse(website)
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return "", errors.New("sender profile website is not a valid HTTP or HTTPS URL")
+		}
+		footer.WriteString(`<p style="margin:0 0 8px;"><a href="`)
+		footer.WriteString(html.EscapeString(parsed.String()))
+		footer.WriteString(`" style="color:#64748b;text-decoration:underline;">`)
+		footer.WriteString(html.EscapeString(website))
+		footer.WriteString(`</a></p>`)
+	}
+	if support := strings.TrimSpace(row.SenderSupportEmail); support != "" {
+		footer.WriteString(`<p style="margin:0 0 8px;"><a href="mailto:`)
+		footer.WriteString(url.QueryEscape(support))
+		footer.WriteString(`" style="color:#64748b;text-decoration:underline;">`)
+		footer.WriteString(html.EscapeString(support))
+		footer.WriteString(`</a></p>`)
+	}
+	for _, link := range socialLinks {
+		parsed, err := url.Parse(strings.TrimSpace(link.URL))
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return "", errors.New("sender profile contains an invalid social link URL")
+		}
+		label := strings.TrimSpace(link.Label)
+		if label == "" {
+			label = parsed.Host
+		}
+		footer.WriteString(`<a href="`)
+		footer.WriteString(html.EscapeString(parsed.String()))
+		footer.WriteString(`" style="margin-right:12px;color:#64748b;text-decoration:underline;">`)
+		footer.WriteString(html.EscapeString(label))
+		footer.WriteString(`</a>`)
+	}
+	return footer.String(), nil
 }
 
 func (w *Worker) checkCampaignReputation(ctx context.Context, campaignID, organizationID string) error {

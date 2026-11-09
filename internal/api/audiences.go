@@ -391,17 +391,22 @@ func (s *Server) deleteSegment(w http.ResponseWriter, r *http.Request) {
 }
 
 type emailTemplate struct {
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Category  string          `json:"category"`
-	Design    json.RawMessage `json:"design"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
+	ID               string          `json:"id"`
+	Name             string          `json:"name"`
+	Category         string          `json:"category"`
+	Design           json.RawMessage `json:"design"`
+	Mode             string          `json:"mode"`
+	Theme            json.RawMessage `json:"theme"`
+	TextContent      string          `json:"text_content"`
+	SenderIdentityID *string         `json:"sender_identity_id"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
 }
 
 func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.pool.Query(r.Context(), `
-		SELECT id, name, category, design, created_at, updated_at
+		SELECT id, name, category, design, mode, theme, COALESCE(text_content, ''),
+		       sender_identity_id, created_at, updated_at
 		FROM templates
 		WHERE organization_id = $1
 		ORDER BY updated_at DESC
@@ -415,12 +420,16 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 	templates := make([]emailTemplate, 0)
 	for rows.Next() {
 		var item emailTemplate
-		var design []byte
-		if err := rows.Scan(&item.ID, &item.Name, &item.Category, &design, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		var design, theme []byte
+		if err := rows.Scan(
+			&item.ID, &item.Name, &item.Category, &design, &item.Mode, &theme,
+			&item.TextContent, &item.SenderIdentityID, &item.CreatedAt, &item.UpdatedAt,
+		); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load templates.")
 			return
 		}
 		item.Design = json.RawMessage(design)
+		item.Theme = json.RawMessage(theme)
 		templates = append(templates, item)
 	}
 
@@ -428,9 +437,13 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 }
 
 type templateInput struct {
-	Name     string          `json:"name"`
-	Category string          `json:"category"`
-	Design   json.RawMessage `json:"design"`
+	Name             string          `json:"name"`
+	Category         string          `json:"category"`
+	Design           json.RawMessage `json:"design"`
+	Mode             string          `json:"mode"`
+	Theme            json.RawMessage `json:"theme"`
+	TextContent      string          `json:"text_content"`
+	SenderIdentityID string          `json:"sender_identity_id"`
 }
 
 func (s *Server) createTemplate(w http.ResponseWriter, r *http.Request) {
@@ -447,6 +460,14 @@ func (s *Server) createTemplate(w http.ResponseWriter, r *http.Request) {
 	if input.Category == "" {
 		input.Category = "general"
 	}
+	input.Mode = strings.ToLower(strings.TrimSpace(input.Mode))
+	if input.Mode == "" {
+		input.Mode = "html"
+	}
+	if input.Mode != "html" && input.Mode != "plain" {
+		httpx.Error(w, http.StatusBadRequest, "invalid_template_mode", "Template mode must be plain or html.")
+		return
+	}
 	if len(input.Design) == 0 {
 		input.Design = json.RawMessage(`{"version":1,"blocks":[]}`)
 	}
@@ -454,14 +475,36 @@ func (s *Server) createTemplate(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid_design", "Template design must be valid JSON.")
 		return
 	}
+	if len(input.Theme) == 0 {
+		input.Theme = json.RawMessage(`{}`)
+	}
+	if !json.Valid(input.Theme) {
+		httpx.Error(w, http.StatusBadRequest, "invalid_template_theme", "Template theme must be valid JSON.")
+		return
+	}
+	var senderIdentityID any
+	if strings.TrimSpace(input.SenderIdentityID) != "" {
+		identity, err := s.loadVerifiedSenderIdentity(r.Context(), input.SenderIdentityID, s.organizationID(r))
+		if err != nil {
+			s.writeSenderIdentityLookupError(w, err)
+			return
+		}
+		senderIdentityID = identity.ID
+	}
 
 	var item emailTemplate
 	err := s.pool.QueryRow(r.Context(), `
-		INSERT INTO templates (organization_id, created_by, name, category, design)
-		VALUES ($1, $2, $3, $4, $5::jsonb)
-		RETURNING id, name, category, design, created_at, updated_at
-	`, s.organizationID(r), s.claims(r).Subject, input.Name, input.Category, []byte(input.Design)).Scan(
-		&item.ID, &item.Name, &item.Category, &item.Design, &item.CreatedAt, &item.UpdatedAt,
+		INSERT INTO templates (
+			organization_id, created_by, name, category, design, mode, theme,
+			text_content, sender_identity_id
+		)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9::uuid)
+		RETURNING id, name, category, design, mode, theme, COALESCE(text_content, ''),
+		          sender_identity_id, created_at, updated_at
+	`, s.organizationID(r), s.claims(r).Subject, input.Name, input.Category,
+		[]byte(input.Design), input.Mode, []byte(input.Theme), input.TextContent, senderIdentityID).Scan(
+		&item.ID, &item.Name, &item.Category, &item.Design, &item.Mode, &item.Theme,
+		&item.TextContent, &item.SenderIdentityID, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if err != nil {
 		s.logger.Error("create template", "error", err)
@@ -474,11 +517,13 @@ func (s *Server) createTemplate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getTemplate(w http.ResponseWriter, r *http.Request) {
 	var item emailTemplate
 	err := s.pool.QueryRow(r.Context(), `
-		SELECT id, name, category, design, created_at, updated_at
+		SELECT id, name, category, design, mode, theme, COALESCE(text_content, ''),
+		       sender_identity_id, created_at, updated_at
 		FROM templates
 		WHERE id = $1 AND organization_id = $2
 	`, r.PathValue("id"), s.organizationID(r)).Scan(
-		&item.ID, &item.Name, &item.Category, &item.Design, &item.CreatedAt, &item.UpdatedAt,
+		&item.ID, &item.Name, &item.Category, &item.Design, &item.Mode, &item.Theme,
+		&item.TextContent, &item.SenderIdentityID, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.Error(w, http.StatusNotFound, "template_not_found", "The template could not be found.")
@@ -494,9 +539,13 @@ func (s *Server) getTemplate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateTemplate(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Name     *string         `json:"name"`
-		Category *string         `json:"category"`
-		Design   json.RawMessage `json:"design"`
+		Name             *string         `json:"name"`
+		Category         *string         `json:"category"`
+		Design           json.RawMessage `json:"design"`
+		Mode             *string         `json:"mode"`
+		Theme            json.RawMessage `json:"theme"`
+		TextContent      *string         `json:"text_content"`
+		SenderIdentityID *string         `json:"sender_identity_id"`
 	}
 	if err := httpx.Decode(w, r, &input); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "invalid_body", "The request body is invalid.")
@@ -518,14 +567,42 @@ func (s *Server) updateTemplate(w http.ResponseWriter, r *http.Request) {
 		}
 		input.Category = &category
 	}
+	if input.Mode != nil {
+		mode := strings.ToLower(strings.TrimSpace(*input.Mode))
+		if mode != "plain" && mode != "html" {
+			httpx.Error(w, http.StatusBadRequest, "invalid_template_mode", "Template mode must be plain or html.")
+			return
+		}
+		input.Mode = &mode
+	}
 	if len(input.Design) > 0 && !json.Valid(input.Design) {
 		httpx.Error(w, http.StatusBadRequest, "invalid_design", "Template design must be valid JSON.")
 		return
+	}
+	if len(input.Theme) > 0 && !json.Valid(input.Theme) {
+		httpx.Error(w, http.StatusBadRequest, "invalid_template_theme", "Template theme must be valid JSON.")
+		return
+	}
+	var senderIdentityID any
+	if input.SenderIdentityID != nil && strings.TrimSpace(*input.SenderIdentityID) != "" {
+		identity, err := s.loadVerifiedSenderIdentity(r.Context(), strings.TrimSpace(*input.SenderIdentityID), s.organizationID(r))
+		if err != nil {
+			s.writeSenderIdentityLookupError(w, err)
+			return
+		}
+		senderIdentityID = identity.ID
 	}
 
 	var design any
 	if len(input.Design) > 0 {
 		design = []byte(input.Design)
+	}
+	var theme any
+	if len(input.Theme) > 0 {
+		theme = []byte(input.Theme)
+	}
+	if input.SenderIdentityID != nil && strings.TrimSpace(*input.SenderIdentityID) == "" {
+		senderIdentityID = nil
 	}
 	var item emailTemplate
 	err := s.pool.QueryRow(r.Context(), `
@@ -533,11 +610,18 @@ func (s *Server) updateTemplate(w http.ResponseWriter, r *http.Request) {
 		SET name = COALESCE($3, name),
 		    category = COALESCE($4, category),
 		    design = COALESCE($5::jsonb, design),
+		    mode = COALESCE($6, mode),
+		    theme = COALESCE($7::jsonb, theme),
+		    text_content = COALESCE($8, text_content),
+		    sender_identity_id = CASE WHEN $9 THEN $10::uuid ELSE sender_identity_id END,
 		    updated_at = now()
 		WHERE id = $1 AND organization_id = $2
-		RETURNING id, name, category, design, created_at, updated_at
-	`, r.PathValue("id"), s.organizationID(r), input.Name, input.Category, design).Scan(
-		&item.ID, &item.Name, &item.Category, &item.Design, &item.CreatedAt, &item.UpdatedAt,
+		RETURNING id, name, category, design, mode, theme, COALESCE(text_content, ''),
+		          sender_identity_id, created_at, updated_at
+	`, r.PathValue("id"), s.organizationID(r), input.Name, input.Category, design,
+		input.Mode, theme, input.TextContent, input.SenderIdentityID != nil, senderIdentityID).Scan(
+		&item.ID, &item.Name, &item.Category, &item.Design, &item.Mode, &item.Theme,
+		&item.TextContent, &item.SenderIdentityID, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.Error(w, http.StatusNotFound, "template_not_found", "The template could not be found.")

@@ -236,6 +236,7 @@ func TestGatewayHealthAndCORS(t *testing.T) {
 
 	req, _ := http.NewRequest(http.MethodOptions, server.URL+"/api/v1/auth/login", nil)
 	req.Header.Set("Origin", "http://localhost:3000")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPut)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("preflight: %v", err)
@@ -246,6 +247,9 @@ func TestGatewayHealthAndCORS(t *testing.T) {
 	}
 	if resp.Header.Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
 		t.Fatalf("CORS header = %q", resp.Header.Get("Access-Control-Allow-Origin"))
+	}
+	if !strings.Contains(resp.Header.Get("Access-Control-Allow-Methods"), http.MethodPut) {
+		t.Fatalf("CORS methods = %q, want PUT", resp.Header.Get("Access-Control-Allow-Methods"))
 	}
 	// Preflight must not reach upstreams.
 	if len(identityHits)+len(workspaceHits)+len(legacyHits) != 0 {
@@ -388,7 +392,7 @@ func TestGatewayStripsUpstreamCORSHeaders(t *testing.T) {
 		w.Header().Add("Access-Control-Allow-Origin", origin)
 		w.Header().Add("Access-Control-Allow-Credentials", "true")
 		w.Header().Add("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		w.Header().Add("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+		w.Header().Add("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer legacy.Close()

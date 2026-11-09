@@ -64,9 +64,9 @@ would require a separate challenge-routing design. Install a certificate for
 `STALWART_HOSTNAME` and its matching private key in
 `$STALWART_CERTS_DIR/fullchain.pem` and `privkey.pem`; Compose mounts that
 directory read-only at `/etc/stalwart/certs`. The provisioner validates the
-hostname, validity period, and key match before installing the references
-through JMAP. Certificate renewal remains the host's responsibility; rerun
-the provisioner after renewal.
+hostname (including valid wildcard SANs), validity period, and key match before
+installing the references through JMAP. Certificate renewal remains the host's
+responsibility; rerun the provisioner after renewal.
 
 ## Live server runbook
 
@@ -87,9 +87,15 @@ at production. The management API is published only on `127.0.0.1:8081`.
    STALWART_HOSTNAME=mail.example.com
    STALWART_DOMAIN=example.com
    STALWART_SUBMIT_PASSWORD=<strong submission password>
+   SPF_INCLUDE=example.com
    STALWART_BIND_ADDRESS=0.0.0.0
    STALWART_CERTS_DIR=./secrets/stalwart/certs
    ```
+
+   Set `SPF_INCLUDE` to the platform domain whose published SPF record
+   authorizes Stalwart. Leave it empty only when every campaign sending
+   domain's own MX points to the Stalwart host; otherwise the generated `mx`
+   mechanism will not authorize Stalwart's outbound IP.
 
 3. Review the non-mutating plan. It reports DNS placeholders without printing
    any configured credential:
@@ -107,7 +113,8 @@ at production. The management API is published only on `127.0.0.1:8081`.
    This sets the server hostname and platform domain, provisions
    `noreply@example.com`, configures authenticated STARTTLS on 587 and implicit
    TLS on 465, installs the mounted certificate, and applies explicit remote
-   queue concurrency/retry limits. The script prints the active platform DKIM
+   queue concurrency/retry limits. It preserves any other hosted tenant
+   domains and existing DKIM signatures. The script prints the active platform DKIM
    TXT record alongside the MX, SPF, DMARC and PTR values to publish.
 5. Publish the exact records from the script. Add an A/AAAA record for
    `mail.example.com`; MX, SPF, DKIM and DMARC are domain-specific and must not
@@ -142,6 +149,14 @@ publish port 8081 through a firewall or reverse proxy.
 
 ## Domain sending and DKIM ownership
 
+The Domains page checks each required record directly through Cloudflare
+(`1.1.1.1`), Google (`8.8.8.8`), and the authoritative nameservers. It resolves
+the closest authoritative zone for the sending domain (including delegated
+subdomains), discovers that zone's nameservers once per check, and runs the
+public-resolver queries concurrently. DNS responses are not cached by the
+application; recursive resolver caches and the record TTL can still delay
+propagation. The UI shows each source's result and the check timestamp.
+
 The platform `noreply` domain is signed by Stalwart using its single active RSA
 DKIM key. When a workspace verifies a campaign domain, the API adds that domain
 to Stalwart with DKIM management set to `Manual`. Sendwise stores the workspace
@@ -172,6 +187,21 @@ DNS TXT value returned by the management API. The pinned local certificate is
 test-only; production SMTP verifies the configured server hostname against
 system certificate roots.
 
+## Bounce and complaint collection
+
+Campaign messages use a compact signed VERP envelope sender under
+`BOUNCE_DOMAIN`. The API can authenticate and process RFC 3464 DSN and RFC 5965
+ARF message bodies at `POST /api/v1/webhooks/stalwart-feedback`; it validates
+the webhook HMAC, verifies the VERP token against the persisted tenant-scoped
+mapping, and deduplicates the raw report before changing delivery or
+suppression state.
+
+**Collection from Stalwart is not yet configured.** No Stalwart event
+subscription or bounce-mailbox poller currently forwards real DSNs/ARFs to
+that endpoint. Until a collector is deployed and exercised end to end, the
+application does not automatically learn about downstream delivery outcomes.
+Do not treat the local parser/API tests as proof of bounce collection.
+
 ## DNS and delivery limits
 
 For each sending domain, publish the records shown in Sendwise's Domains page:
@@ -180,6 +210,11 @@ For the platform receiving/sending domain, use the exact MX/SPF/DKIM/DMARC
 records emitted by `--live`. Avoid multiple SPF records. Start DMARC at
 `p=none`, review reports, and tighten policy only after every legitimate sender
 aligns.
+
+`BOUNCE_DOMAIN` also needs an MX record pointing to a Stalwart host and a
+configured mailbox/collector that accepts `bounces+<token>@<BOUNCE_DOMAIN>`.
+The current provisioner does not yet configure that inbound route or collector;
+publishing only the DNS record will not make campaign bounces flow into Sendwise.
 
 Verify inbound port 25 is reachable when Stalwart is expected to receive mail.
 A successful SMTP acceptance test does not prove external delivery, inbox
@@ -192,3 +227,17 @@ with a new, unregistered mailbox. During deployment, set
 `DEPLOY_SMOKE_MAIL_TO` to opt into this loopback-only check; it is skipped when
 unset. The unverified smoke account remains in the database, so use a fresh
 recipient for each run. The test reports SMTP acceptance, not inbox placement.
+
+## Template images and test messages
+
+The template editor stores uploaded PNG, JPEG, and GIF files in
+workspace-associated Postgres records. The public asset URL is served by
+Sendwise for use in email; uploads are limited to 8 MiB and 10000 by 10000
+pixels. External image URLs are not emitted by the campaign renderer. Bundled
+gallery artwork is neutral and created for this application.
+
+Template test messages use the configured SMTP relay and app-managed DKIM key.
+The response describes SMTP acceptance only. A local Mailpit run is not proof
+of Stalwart delivery. The supplied Beefree-style export has not been seeded
+with its artwork: redistribution rights for its design and image assets have
+not been confirmed.

@@ -46,7 +46,7 @@ func New(
 		tokens:      tokens,
 		campaigns:   campaignService,
 		apiKeys:     apiKeyService,
-		delivery:    NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret, cfg.MaxBounceRate, cfg.MaxComplaintRate),
+		delivery:    NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret, cfg.JWTSecret, cfg.BounceDomain, cfg.MaxBounceRate, cfg.MaxComplaintRate),
 		dnsResolver: newDNSResolver(cfg.DNSResolverAddr, cfg.DNSResolverTimeout),
 		logger:      logger,
 	}
@@ -144,6 +144,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/templates/{id}", protect(s.getTemplate))
 	mux.Handle("PATCH /api/v1/templates/{id}", protect(s.updateTemplate, campaignEditors...))
 	mux.Handle("DELETE /api/v1/templates/{id}", protect(s.deleteTemplate, campaignManagers...))
+	mux.Handle("POST /api/v1/templates/{id}/test", protect(s.sendTemplateTestEmail, campaignEditors...))
+	mux.Handle("POST /api/v1/assets", protect(s.uploadEmailAsset, campaignEditors...))
+	mux.HandleFunc("GET /api/v1/public/assets/{id}", s.getPublicEmailAsset)
+	mux.Handle("GET /api/v1/sender-profile", protect(s.getSenderProfile))
+	mux.Handle("PUT /api/v1/sender-profile", protect(s.putSenderProfile, audienceManagers...))
+	mux.Handle("GET /api/v1/sender-identities", protect(s.listSenderIdentities))
+	mux.Handle("POST /api/v1/sender-identities", protect(s.createSenderIdentity, audienceManagers...))
+	mux.Handle("PATCH /api/v1/sender-identities/{id}", protect(s.updateSenderIdentity, audienceManagers...))
+	mux.Handle("POST /api/v1/sender-identities/{id}/default", protect(s.setDefaultSenderIdentity, audienceManagers...))
+	mux.Handle("DELETE /api/v1/sender-identities/{id}", protect(s.deleteSenderIdentity, audienceManagers...))
 
 	mux.Handle("GET /api/v1/automations", protect(s.listAutomations))
 	mux.Handle("POST /api/v1/automations", protect(s.createAutomation, campaignEditors...))
@@ -186,6 +196,7 @@ func (s *Server) Handler() http.Handler {
 	// Inbound bounce / feedback-loop webhooks (HMAC-secured, idempotent).
 	mux.Handle("POST /api/v1/webhooks/bounce", s.delivery.requireWebhookAuth(s.delivery.bounceWebhook))
 	mux.Handle("POST /api/v1/webhooks/complaint", s.delivery.requireWebhookAuth(s.delivery.complaintWebhook))
+	mux.Handle("POST /api/v1/webhooks/stalwart-feedback", s.delivery.requireWebhookSignature(s.delivery.stalwartFeedbackWebhook))
 
 	mux.Handle("GET /api/v1/analytics/overview", protect(s.analyticsOverview))
 	mux.Handle("GET /api/v1/analytics/campaigns/{id}", protect(s.campaignReport))

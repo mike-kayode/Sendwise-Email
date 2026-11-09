@@ -103,7 +103,7 @@ test("real Stalwart outage queues verification and recovers after restart", asyn
     await page.goto("/register");
     await page.getByPlaceholder("Your name").fill("Stalwart Recovery User");
     await page.getByPlaceholder("you@example.com").fill("noreply@sendwise.test");
-    await page.getByPlaceholder("Acme Studio").fill("Stalwart Recovery Workspace");
+    await page.getByPlaceholder("Workspace name").fill("Stalwart Recovery Workspace");
     await page.getByPlaceholder("••••••••••").fill("local-Stalwart-2026!");
     await page.getByRole("button", { name: "Create workspace" }).click();
 

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khayode/email-platform/internal/auth"
+	"github.com/khayode/email-platform/internal/campaigns"
+	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/httpx"
 	"github.com/khayode/email-platform/internal/messaging"
 )
@@ -69,33 +72,39 @@ type complaintWebhook struct {
 	MessageID    string `json:"message_id,omitempty"`
 }
 
+var errFeedbackDeliveryNotFound = errors.New("delivery job not found for signed feedback scope")
+
 type DeliveryHandler struct {
-	pool             *pgxpool.Pool
-	tokens           *auth.Manager
-	logger           *slog.Logger
-	maxBounceRate    float64
-	maxComplaintRate float64
-	replayer         deliveryService
-	publisher        publisher
-	webhookSecret    string
-	idempotency      *idempotencyStore
+	pool              *pgxpool.Pool
+	tokens            *auth.Manager
+	logger            *slog.Logger
+	maxBounceRate     float64
+	maxComplaintRate  float64
+	replayer          deliveryService
+	publisher         publisher
+	webhookSecret     string
+	bounceTokenSecret string
+	bounceDomain      string
+	idempotency       *idempotencyStore
 }
 
 type publisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
 }
 
-func NewDeliveryHandler(pool *pgxpool.Pool, tokens *auth.Manager, logger *slog.Logger, replayer deliveryService, publisher publisher, webhookSecret string, maxBounceRate, maxComplaintRate float64) *DeliveryHandler {
+func NewDeliveryHandler(pool *pgxpool.Pool, tokens *auth.Manager, logger *slog.Logger, replayer deliveryService, publisher publisher, webhookSecret, bounceTokenSecret, bounceDomain string, maxBounceRate, maxComplaintRate float64) *DeliveryHandler {
 	return &DeliveryHandler{
-		pool:             pool,
-		tokens:           tokens,
-		logger:           logger,
-		maxBounceRate:    maxBounceRate,
-		maxComplaintRate: maxComplaintRate,
-		replayer:         replayer,
-		publisher:        publisher,
-		webhookSecret:    webhookSecret,
-		idempotency:      newIdempotencyStore(),
+		pool:              pool,
+		tokens:            tokens,
+		logger:            logger,
+		maxBounceRate:     maxBounceRate,
+		maxComplaintRate:  maxComplaintRate,
+		replayer:          replayer,
+		publisher:         publisher,
+		webhookSecret:     webhookSecret,
+		bounceTokenSecret: bounceTokenSecret,
+		bounceDomain:      bounceDomain,
+		idempotency:       newIdempotencyStore(),
 	}
 }
 
@@ -355,6 +364,258 @@ func (h *DeliveryHandler) complaintWebhook(w http.ResponseWriter, r *http.Reques
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *DeliveryHandler) stalwartFeedbackWebhook(w http.ResponseWriter, r *http.Request) {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 2<<20+1))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_body", "Could not read feedback message.")
+		return
+	}
+	feedback, err := delivery.ParseFeedbackMessage(bytes.NewReader(raw))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_feedback", "Message is not a supported DSN or ARF report.")
+		return
+	}
+	token, err := delivery.ParseVERPTokenAddress(h.bounceDomain, feedback.ReturnPath)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_verp", "Feedback message has an invalid VERP return address.")
+		return
+	}
+	var claims delivery.VERPClaims
+	if err := h.pool.QueryRow(r.Context(), `
+		SELECT organization_id::text, campaign_id::text, email
+		FROM delivery_verp_tokens
+		WHERE token = $1
+	`, token).Scan(&claims.WorkspaceID, &claims.CampaignID, &claims.Recipient); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			httpx.Error(w, http.StatusBadRequest, "invalid_verp", "Feedback token is unknown.")
+			return
+		}
+		h.logger.Error("load signed VERP claims", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not resolve feedback token.")
+		return
+	}
+	if !delivery.VerifyVERPToken(h.bounceTokenSecret, token, claims) {
+		httpx.Error(w, http.StatusBadRequest, "invalid_verp", "Feedback token signature is invalid.")
+		return
+	}
+	if feedback.Recipient != "" && !strings.EqualFold(feedback.Recipient, claims.Recipient) {
+		httpx.Error(w, http.StatusBadRequest, "recipient_mismatch", "Feedback recipient does not match the signed VERP token.")
+		return
+	}
+	if err := h.applyStalwartFeedback(r.Context(), raw, feedback, claims); err != nil {
+		if errors.Is(err, errFeedbackDeliveryNotFound) {
+			httpx.Error(w, http.StatusNotFound, "feedback_not_found", "Feedback does not match a campaign recipient.")
+			return
+		}
+		h.logger.Error("apply Stalwart feedback", "error", err, "campaign_id", claims.CampaignID)
+		httpx.Error(w, http.StatusServiceUnavailable, "feedback_processing_failed", "Feedback could not be processed; retry the signed request.")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte, feedback delivery.Feedback, claims delivery.VERPClaims) error {
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin feedback transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var jobID, contactID, jobStatus string
+	err = tx.QueryRow(ctx, `
+		SELECT dj.id, dj.contact_id, dj.status
+		FROM delivery_jobs dj
+		JOIN campaign_recipients cr
+		  ON cr.campaign_id = dj.campaign_id AND cr.contact_id = dj.contact_id
+		WHERE dj.organization_id = $1 AND dj.campaign_id = $2
+		  AND lower(cr.email) = lower($3)
+		FOR UPDATE OF dj
+	`, claims.WorkspaceID, claims.CampaignID, claims.Recipient).Scan(&jobID, &contactID, &jobStatus)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errFeedbackDeliveryNotFound
+		}
+		return fmt.Errorf("find tenant-scoped delivery job: %w", err)
+	}
+
+	eventHash := delivery.FeedbackMessageKey(raw)
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO delivery_feedback_ingest
+			(event_hash, organization_id, campaign_id, delivery_job_id, contact_id, email,
+			 event_type, enhanced_code, reason)
+		VALUES ($1, $2, $3, $4, $5, lower($6), $7, $8, $9)
+		ON CONFLICT (event_hash) DO NOTHING
+	`, eventHash, claims.WorkspaceID, claims.CampaignID, jobID, contactID,
+		claims.Recipient, feedback.Type, feedback.EnhancedCode, feedback.Diagnostic)
+	if err != nil {
+		return fmt.Errorf("persist feedback event: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		if feedback.Type == delivery.FeedbackSoftBounce && jobStatus == "deferred" {
+			if _, err := tx.Exec(ctx, `
+				UPDATE delivery_jobs SET status = 'processing', updated_at = now()
+				WHERE id = $1 AND status = 'deferred'
+			`, jobID); err != nil {
+				return fmt.Errorf("claim soft-bounce retry: %w", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return fmt.Errorf("commit feedback retry claim: %w", err)
+			}
+			return h.publishFeedbackRetry(ctx, jobID, contactID, claims)
+		}
+		return tx.Commit(ctx)
+	}
+
+	status := "bounced"
+	eventType := "bounced"
+	recipientStatus := status
+	suppressReason := ""
+	retry := false
+	bounceType := "hard"
+	switch feedback.Type {
+	case delivery.FeedbackComplaint:
+		status, eventType, suppressReason = "complained", "complained", "complaint"
+	case delivery.FeedbackSoftBounce:
+		bounceType = "soft"
+		var softBounceCount int
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*) FROM delivery_feedback_ingest
+			WHERE delivery_job_id = $1 AND event_type = 'soft_bounce'
+		`, jobID).Scan(&softBounceCount); err != nil {
+			return fmt.Errorf("count soft bounces: %w", err)
+		}
+		if softBounceCount < 3 {
+			status, eventType, recipientStatus, retry = "processing", "deferred", "pending", true
+		} else {
+			suppressReason = "hard_bounce"
+		}
+	case delivery.FeedbackHardBounce:
+		suppressReason = "hard_bounce"
+	default:
+		return fmt.Errorf("unsupported feedback type %q", feedback.Type)
+	}
+
+	if suppressReason != "" {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO suppressions (organization_id, email, reason, source)
+			VALUES ($1, lower($2), $3, 'stalwart_feedback')
+			ON CONFLICT (organization_id, lower(email))
+			DO UPDATE SET reason = EXCLUDED.reason, source = EXCLUDED.source
+		`, claims.WorkspaceID, claims.Recipient, suppressReason); err != nil {
+			return fmt.Errorf("suppress feedback recipient: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE contacts SET status = 'suppressed', updated_at = now()
+			WHERE organization_id = $1 AND lower(email) = lower($2)
+		`, claims.WorkspaceID, claims.Recipient); err != nil {
+			return fmt.Errorf("suppress matching contact: %w", err)
+		}
+	}
+
+	nextAttempt := "now()"
+	if retry {
+		nextAttempt = "now() + interval '30 minutes'"
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE delivery_jobs
+		SET status = $2, bounce_type = $3, smtp_enhanced_code = $4,
+		    last_error = NULLIF($5, ''), next_attempt_at = `+nextAttempt+`,
+		    updated_at = now()
+		WHERE id = $1
+	`, jobID, status, bounceType, feedback.EnhancedCode, feedback.Diagnostic); err != nil {
+		return fmt.Errorf("update delivery job from feedback: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE campaign_recipients SET status = $3
+		WHERE campaign_id = $1 AND contact_id = $2
+	`, claims.CampaignID, contactID, recipientStatus); err != nil {
+		return fmt.Errorf("update campaign recipient from feedback: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO message_events
+			(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)
+		VALUES ($1, $2, $3, $4, $5, jsonb_build_object(
+			'feedback_type', $6::text, 'enhanced_code', $7::text, 'reason', $8::text))
+	`, claims.WorkspaceID, claims.CampaignID, contactID, jobID, eventType,
+		feedback.Type, feedback.EnhancedCode, feedback.Diagnostic); err != nil {
+		return fmt.Errorf("record campaign feedback event: %w", err)
+	}
+	if !retry {
+		if err := h.pauseCampaignForFeedback(ctx, tx, claims.WorkspaceID, claims.CampaignID); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit feedback event: %w", err)
+	}
+	if retry {
+		return h.publishFeedbackRetry(ctx, jobID, contactID, claims)
+	}
+	return nil
+}
+
+func (h *DeliveryHandler) publishFeedbackRetry(ctx context.Context, jobID, contactID string, claims delivery.VERPClaims) error {
+	if h.publisher == nil {
+		return errors.New("delivery job publisher is not configured")
+	}
+	payload, err := json.Marshal(campaigns.JobPayload{
+		JobID: jobID, OrganizationID: claims.WorkspaceID,
+		CampaignID: claims.CampaignID, ContactID: contactID,
+	})
+	if err != nil {
+		return fmt.Errorf("encode feedback retry job: %w", err)
+	}
+	if err := h.publisher.Publish(ctx, messaging.SubjectDeliveryJobs, payload); err != nil {
+		_, resetErr := h.pool.Exec(ctx, `
+			UPDATE delivery_jobs
+			SET status = 'deferred', next_attempt_at = now() + interval '1 minute', updated_at = now()
+			WHERE id = $1 AND status = 'processing'
+		`, jobID)
+		if resetErr != nil {
+			return fmt.Errorf("publish feedback retry: %w; restore deferred job: %v", err, resetErr)
+		}
+		return fmt.Errorf("publish feedback retry: %w", err)
+	}
+	return nil
+}
+
+func (h *DeliveryHandler) pauseCampaignForFeedback(ctx context.Context, tx pgx.Tx, organizationID, campaignID string) error {
+	var total, bounced, complained int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (WHERE status = 'bounced'),
+		       count(*) FILTER (WHERE status = 'complained')
+		FROM campaign_recipients
+		WHERE organization_id = $1 AND campaign_id = $2
+	`, organizationID, campaignID).Scan(&total, &bounced, &complained); err != nil {
+		return fmt.Errorf("count campaign feedback rates: %w", err)
+	}
+	if total == 0 || (float64(bounced)/float64(total) <= h.maxBounceRate &&
+		float64(complained)/float64(total) <= h.maxComplaintRate) {
+		return nil
+	}
+	message := fmt.Sprintf("Campaign paused automatically: bounce rate %.2f%% (limit %.2f%%), complaint rate %.3f%% (limit %.3f%%).",
+		100*float64(bounced)/float64(total), 100*h.maxBounceRate,
+		100*float64(complained)/float64(total), 100*h.maxComplaintRate)
+	tag, err := tx.Exec(ctx, `
+		UPDATE campaigns SET status = 'paused', paused_at = now(), updated_at = now()
+		WHERE id = $1 AND organization_id = $2 AND status IN ('processing', 'sending')
+	`, campaignID, organizationID)
+	if err != nil {
+		return fmt.Errorf("pause campaign after feedback thresholds: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO campaign_alerts (organization_id, campaign_id, alert_type, message)
+		VALUES ($1, $2, 'reputation_pause', $3)
+	`, organizationID, campaignID, message); err != nil {
+		return fmt.Errorf("create campaign feedback alert: %w", err)
+	}
+	return nil
 }
 
 func (h *DeliveryHandler) recordReputationSignal(ctx context.Context, organizationID, email, campaignID, eventType, details string) error {
@@ -643,6 +904,7 @@ func (h *DeliveryHandler) requireWebhookAuth(next http.HandlerFunc) http.Handler
 			httpx.Error(w, http.StatusBadRequest, "invalid_body", "Could not read request body.")
 			return
 		}
+
 		// Restore body so downstream JSON decoding works.
 		r.Body = io.NopCloser(bytes.NewReader(body))
 
@@ -661,6 +923,23 @@ func (h *DeliveryHandler) requireWebhookAuth(next http.HandlerFunc) http.Handler
 			return
 		}
 
+		next.ServeHTTP(w, r)
+	}
+}
+
+func (h *DeliveryHandler) requireWebhookSignature(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20+1))
+		if err != nil || len(body) > 2<<20 {
+			httpx.Error(w, http.StatusBadRequest, "invalid_body", "Feedback request body is too large or could not be read.")
+			return
+		}
+		if err := h.verifyWebhookSignature(body, r.Header.Get("X-Webhook-Signature")); err != nil {
+			h.logger.Warn("Stalwart feedback signature verification failed", "error", err)
+			httpx.Error(w, http.StatusUnauthorized, "invalid_signature", "Invalid webhook signature.")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r)
 	}
 }

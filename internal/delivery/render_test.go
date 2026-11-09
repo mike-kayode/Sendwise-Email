@@ -56,6 +56,82 @@ func TestRenderDesignWithBlocks(t *testing.T) {
 	if !strings.Contains(text, "Read more: https://example.com") {
 		t.Fatalf("RenderDesign() text missing button: %q", text)
 	}
+	if !strings.Contains(html, "v:roundrect") || !strings.Contains(html, "@media screen") {
+		t.Fatalf("RenderDesign() is missing Outlook button or mobile styles: %q", html)
+	}
+}
+
+func TestRenderDesignPlainTextAndTheme(t *testing.T) {
+	raw := json.RawMessage(`{
+		"version":1,"mode":"plain","text_content":"Hello {{first_name}}\nRead the update.",
+		"theme":{"background":"#010203","content_background":"#ffffff","text":"#123456"}
+	}`)
+	htmlBody, textBody, err := NewRenderer().RenderDesign(raw, map[string]string{"first_name": "Ada"})
+	if err != nil {
+		t.Fatalf("RenderDesign() error = %v", err)
+	}
+	if textBody != "Hello Ada\nRead the update." {
+		t.Fatalf("plain text = %q", textBody)
+	}
+	if !strings.Contains(htmlBody, "background-color:#010203") ||
+		!strings.Contains(htmlBody, "Hello Ada") {
+		t.Fatalf("plain text HTML did not preserve the theme or personalized text: %q", htmlBody)
+	}
+}
+
+func TestRenderDesignGeneratesTextFromHTMLBlocks(t *testing.T) {
+	raw := json.RawMessage(`{
+		"version":1,
+		"blocks":[
+			{"type":"heading","content":"Hello"},
+			{"type":"columns-2","columns":[
+				[{"type":"paragraph","content":"First column"}],
+				[{"type":"paragraph","content":"Second column"}]
+			]}
+		]
+	}`)
+	_, textBody, err := NewRenderer().RenderDesign(raw, nil)
+	if err != nil {
+		t.Fatalf("RenderDesign() error = %v", err)
+	}
+	for _, expected := range []string{"Hello", "First column", "Second column"} {
+		if !strings.Contains(textBody, expected) {
+			t.Fatalf("generated text is missing %q: %q", expected, textBody)
+		}
+	}
+}
+
+func TestRenderDesignSanitizesImportedHTML(t *testing.T) {
+	raw := json.RawMessage(`{"version":1,"blocks":[{"type":"custom_html","content":"<table style=\"color:#123456\"><tr><td>Safe text<script>alert(1)</script><img src=\"https://tracker.example/pixel\"></td></tr></table>"}]}`)
+	htmlBody, textBody, err := NewRenderer().RenderDesign(raw, nil)
+	if err != nil {
+		t.Fatalf("RenderDesign() error = %v", err)
+	}
+	if !strings.Contains(htmlBody, "<table") || !strings.Contains(htmlBody, "color: #123456") {
+		t.Fatalf("imported table markup or inline style was lost: %q", htmlBody)
+	}
+	for _, forbidden := range []string{"<script", "alert(1)", "<img"} {
+		if strings.Contains(htmlBody, forbidden) || strings.Contains(textBody, forbidden) {
+			t.Fatalf("unsafe imported markup %q was retained: HTML=%q text=%q", forbidden, htmlBody, textBody)
+		}
+	}
+}
+
+func TestSafeImageURLRequiresSendwiseHost(t *testing.T) {
+	data := map[string]string{"app_base_url": "https://sendwise.example"}
+	if got, ok := safeImageURL("/template-assets/neutral-banner.svg", data); !ok || got != "https://sendwise.example/template-assets/neutral-banner.svg" {
+		t.Fatalf("safeImageURL() = %q, %v", got, ok)
+	}
+	assetPath := "/api/v1/public/assets/6416c701-bb37-43ce-a0ff-dba04ec9e215"
+	if got, ok := safeImageURL(assetPath, data); !ok || got != "https://sendwise.example"+assetPath {
+		t.Fatalf("safeImageURL() did not accept owned asset: %q, %v", got, ok)
+	}
+	if _, ok := safeImageURL("https://sendwise.example/uploads/external.png", data); ok {
+		t.Fatal("safeImageURL() accepted a hotlinked image from the app host")
+	}
+	if _, ok := safeImageURL("https://third-party.example/image.png", data); ok {
+		t.Fatal("safeImageURL() accepted a third-party image host")
+	}
 }
 
 func TestPersonalize(t *testing.T) {

@@ -26,6 +26,10 @@ func TestLoadDevelopmentDefaults(t *testing.T) {
 	if cfg.WarmupStartPerDay != 50 || cfg.WarmupGrowthFactor != 1.5 {
 		t.Fatalf("unexpected warm-up defaults: start=%d growth=%v", cfg.WarmupStartPerDay, cfg.WarmupGrowthFactor)
 	}
+	if cfg.SMTPPoolSize != 10 || cfg.MaxBounceRate != 0.02 || cfg.MaxComplaintRate != 0.0005 {
+		t.Fatalf("unexpected delivery feedback defaults: pool=%d bounce=%v complaint=%v",
+			cfg.SMTPPoolSize, cfg.MaxBounceRate, cfg.MaxComplaintRate)
+	}
 	if cfg.RecipientDomainRates["gmail.com"] != 0 || cfg.RecipientDomainDefault != 10 {
 		t.Fatalf("unexpected recipient rate defaults: %+v default=%d", cfg.RecipientDomainRates, cfg.RecipientDomainDefault)
 	}
@@ -235,6 +239,7 @@ func productionConfig() map[string]string {
 		"APP_ENV":                 "production",
 		"JWT_SECRET":              strings.Repeat("a", 48),
 		"SMTP_ADDR":               "smtp.example.test:587",
+		"BOUNCE_DOMAIN":           "bounces.example.test",
 		"SMTP_HOST":               "smtp.example.test",
 		"SMTP_USERNAME":           "mailer",
 		"SMTP_PASSWORD":           "smtp-secret",

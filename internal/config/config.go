@@ -34,7 +34,9 @@ type Config struct {
 	SMTPHost               string
 	SMTPUsername           string
 	SMTPPassword           string
+	SMTPPoolSize           int
 	SMTPFrom               string
+	BounceDomain           string
 	StalwartManagementURL  string
 	StalwartAdminUsername  string
 	StalwartAdminPassword  string
@@ -92,6 +94,10 @@ func load(lookup func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	smtpPoolSize, err := getenvInt(lookup, "SMTP_POOL_SIZE", 10)
+	if err != nil {
+		return Config{}, err
+	}
 	schedulerInterval, err := getenvDuration(lookup, "SCHEDULER_INTERVAL", 15*time.Second)
 	if err != nil {
 		return Config{}, err
@@ -108,11 +114,11 @@ func load(lookup func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	maxBounceRate, err := getenvFloat(lookup, "MAX_BOUNCE_RATE", 0.05)
+	maxBounceRate, err := getenvFloat(lookup, "MAX_BOUNCE_RATE", 0.02)
 	if err != nil {
 		return Config{}, err
 	}
-	maxComplaintRate, err := getenvFloat(lookup, "MAX_COMPLAINT_RATE", 0.001)
+	maxComplaintRate, err := getenvFloat(lookup, "MAX_COMPLAINT_RATE", 0.0005)
 	if err != nil {
 		return Config{}, err
 	}
@@ -164,7 +170,9 @@ func load(lookup func(string) string) (Config, error) {
 		SMTPHost:               getenv(lookup, "SMTP_HOST", "localhost"),
 		SMTPUsername:           getenv(lookup, "SMTP_USERNAME", ""),
 		SMTPPassword:           getenv(lookup, "SMTP_PASSWORD", ""),
+		SMTPPoolSize:           smtpPoolSize,
 		SMTPFrom:               getenv(lookup, "SMTP_FROM", "newsletter@example.com"),
+		BounceDomain:           strings.ToLower(getenv(lookup, "BOUNCE_DOMAIN", "bounces.sendwise.test")),
 		StalwartManagementURL:  strings.TrimRight(getenv(lookup, "STALWART_MANAGEMENT_URL", "http://127.0.0.1:8081"), "/"),
 		StalwartAdminUsername:  getenv(lookup, "STALWART_ADMIN_USERNAME", ""),
 		StalwartAdminPassword:  getenv(lookup, "STALWART_ADMIN_PASSWORD", ""),
@@ -246,6 +254,9 @@ func load(lookup func(string) string) (Config, error) {
 	if cfg.MaxDeliveryAttempts < 1 {
 		return cfg, fmt.Errorf("MAX_DELIVERY_ATTEMPTS must be at least 1")
 	}
+	if cfg.SMTPPoolSize < 1 || cfg.SMTPPoolSize > 256 {
+		return cfg, fmt.Errorf("SMTP_POOL_SIZE must be between 1 and 256")
+	}
 	if cfg.SchedulerInterval <= 0 {
 		return cfg, fmt.Errorf("SCHEDULER_INTERVAL must be positive")
 	}
@@ -281,6 +292,9 @@ func load(lookup func(string) string) (Config, error) {
 	}
 	if _, err := mail.ParseAddress(cfg.PlatformFromEmail); err != nil {
 		return cfg, fmt.Errorf("PLATFORM_FROM_EMAIL must be a valid email address")
+	}
+	if _, err := mail.ParseAddress("bounces@" + cfg.BounceDomain); err != nil {
+		return cfg, fmt.Errorf("BOUNCE_DOMAIN must be a valid domain name")
 	}
 	if cfg.DNSResolverTimeout <= 0 {
 		cfg.DNSResolverTimeout = 2 * time.Second

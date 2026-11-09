@@ -113,7 +113,7 @@ export default function RegisterPage() {
                 <FieldLabel>Organization name</FieldLabel>
                 <Input
                   {...form.register("organization_name")}
-                  placeholder="Acme Studio"
+                  placeholder="Workspace name"
                   disabled={form.formState.isSubmitting}
                 />
                 {form.formState.errors.organization_name && (

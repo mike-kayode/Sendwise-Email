@@ -56,6 +56,7 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 		SMTPAddr:               "127.0.0.1:1025",
 		SMTPHost:               "mailpit",
 		SMTPFrom:               "hello@example.com",
+		BounceDomain:           "bounces.example.test",
 		DKIMEncryptionKey:      "campaign-dkim-encryption-key-for-tests",
 		SendingRate:            20,
 		MaxDeliveryAttempts:    3,
@@ -70,7 +71,6 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 	ownerEmail := fmt.Sprintf("p5-owner-%d@example.com", time.Now().UnixNano())
 	contactEmail := fmt.Sprintf("p5-recipient-%d@example.com", time.Now().UnixNano())
 	campaignDomain := fmt.Sprintf("campaign-%d.example.test", time.Now().UnixNano())
-	campaignSender := "hello@" + campaignDomain
 	regBody := fmt.Sprintf(`{"email":"%s","password":"p5-password","name":"P5 Owner","organization_name":"P5 Org"}`, ownerEmail)
 	regResp := doAPIRequest(t, server.Handler(), "POST", "/api/v1/auth/register", "", regBody)
 	if regResp.Code != http.StatusCreated {
@@ -89,6 +89,24 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 		VALUES ($1, $2, 'verified', 'campaign-test', $3, $4)
 	`, organizationID, campaignDomain, publicKey, encryptedPrivateKey); err != nil {
 		t.Fatalf("create verified sending domain: %v", err)
+	}
+	var senderIdentityID string
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO sender_identities (
+			organization_id, domain, local_part, display_name, reply_to, is_default
+		) VALUES ($1, $2, 'hello', 'Sendwise', 'support@example.test', true)
+		RETURNING id
+	`, organizationID, campaignDomain).Scan(&senderIdentityID); err != nil {
+		t.Fatalf("create verified sender identity: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO sender_profiles (
+			organization_id, company_name, street_address, city, region, postal_code,
+			country, website, support_email, social_links
+		) VALUES ($1, 'Sendwise Tests', '1 Example Street', 'Example City', 'Example Region',
+		          '10000', 'Example Country', 'https://example.test', 'support@example.test', '[]'::jsonb)
+	`, organizationID); err != nil {
+		t.Fatalf("create sender profile: %v", err)
 	}
 	accessToken, err := tokens.IssueAccess(userID, organizationID, "owner")
 	if err != nil {
@@ -121,7 +139,7 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 		t.Fatalf("add contact to list: %v", err)
 	}
 
-	templateResp := doAPIRequest(t, server.Handler(), "POST", "/api/v1/templates", accessToken, `{"name":"P5 Template","category":"newsletter","design":{"version":1,"blocks":[{"type":"heading","content":"Hi {{first_name}}","align":"left"},{"type":"paragraph","content":"This is a live proof message with unsubscribe: {{unsubscribe_url}}","align":"left"}]}}`)
+	templateResp := doAPIRequest(t, server.Handler(), "POST", "/api/v1/templates", accessToken, fmt.Sprintf(`{"name":"P5 Template","category":"newsletter","sender_identity_id":%q,"design":{"version":1,"blocks":[{"type":"heading","content":"Hi {{first_name}}","align":"left"},{"type":"paragraph","content":"This is a live proof message with unsubscribe: {{unsubscribe_url}}","align":"left"}]}}`, senderIdentityID))
 	if templateResp.Code != http.StatusCreated {
 		t.Fatalf("template create status = %d, want %d; body: %s", templateResp.Code, http.StatusCreated, templateResp.Body.String())
 	}
@@ -134,8 +152,8 @@ func TestCampaignTemplateDeliveryIntegration(t *testing.T) {
 
 	content := `{"version":1,"blocks":[{"type":"heading","content":"Hi {{first_name}}","align":"left"},{"type":"paragraph","content":"This is a live proof message with unsubscribe: {{unsubscribe_url}}","align":"left"}]}`
 	subjectToken := fmt.Sprintf("p5-%d", time.Now().UnixNano())
-	campaignBody := fmt.Sprintf(`{"name":"P5 delivery proof","subject":"%s {{first_name}}","preview_text":"P5 proof","sender_name":"Sendwise","sender_email":"%s","sender_postal_address":"1 Example Street, Example City","list_id":"%s","template_id":"%s","content":%s}`,
-		subjectToken, campaignSender, list.ID, template.ID, content)
+	campaignBody := fmt.Sprintf(`{"name":"P5 delivery proof","subject":"%s {{first_name}}","preview_text":"P5 proof","sender_identity_id":%q,"list_id":"%s","template_id":"%s","content":%s}`,
+		subjectToken, senderIdentityID, list.ID, template.ID, content)
 	campaignResp := doAPIRequest(t, server.Handler(), "POST", "/api/v1/campaigns", accessToken, campaignBody)
 	if campaignResp.Code != http.StatusCreated {
 		t.Fatalf("campaign create status = %d, want %d; body: %s", campaignResp.Code, http.StatusCreated, campaignResp.Body.String())

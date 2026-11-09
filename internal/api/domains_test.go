@@ -8,7 +8,9 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/khayode/email-platform/internal/config"
 )
@@ -17,12 +19,49 @@ type fakeDNSResolver struct {
 	records map[string][]string
 }
 
+type delayedDNSResolver struct {
+	delay time.Duration
+}
+
+func (d delayedDNSResolver) LookupTXT(context.Context, string) ([]string, error) {
+	time.Sleep(d.delay)
+	return []string{"v=spf1 -all"}, nil
+}
+
 func (f *fakeDNSResolver) LookupTXT(_ context.Context, name string) ([]string, error) {
 	name = strings.ToLower(name)
 	if values, ok := f.records[name]; ok {
 		return values, nil
 	}
 	return nil, nil
+}
+
+func TestDomainDNSParallelLatencyComparedWithSequentialLookups(t *testing.T) {
+	const delay = 40 * time.Millisecond
+	resolver := delayedDNSResolver{delay: delay}
+	names := []string{
+		"example.com",
+		"mail._domainkey.example.com",
+		"_dmarc.example.com",
+		"_sendwise-verification.example.com",
+	}
+
+	before := time.Now()
+	for _, name := range names {
+		if _, err := resolver.LookupTXT(context.Background(), name); err != nil {
+			t.Fatalf("sequential DNS lookup: %v", err)
+		}
+	}
+	beforeDuration := time.Since(before)
+
+	server := &Server{dnsResolver: resolver}
+	after := time.Now()
+	server.checkDomainDNSDetails(context.Background(), "example.com", "mail", "key", "token")
+	afterDuration := time.Since(after)
+	t.Logf("simulated DNS check latency: sequential_before=%s parallel_after=%s", beforeDuration.Round(time.Millisecond), afterDuration.Round(time.Millisecond))
+	if afterDuration >= beforeDuration*3/4 {
+		t.Fatalf("parallel DNS check took %s, expected under 75%% of sequential baseline %s", afterDuration, beforeDuration)
+	}
 }
 
 func TestCheckDomainDNSVerified(t *testing.T) {
@@ -45,6 +84,65 @@ func TestCheckDomainDNSVerified(t *testing.T) {
 	)
 	if spf != "verified" || dkim != "verified" || dmarc != "verified" || verification != "verified" {
 		t.Fatalf("checkDomainDNS() = (%q, %q, %q, %q), want all verified", spf, dkim, dmarc, verification)
+	}
+}
+
+func TestDomainDNSVerificationDoesNotRequireDMARCOrMX(t *testing.T) {
+	server := &Server{
+		cfg: config.Config{SPFInclude: "_spf.example.com"},
+		dnsResolver: &fakeDNSResolver{records: map[string][]string{
+			"example.com":                        {"v=spf1 include:_spf.example.com ~all"},
+			"mail._domainkey.example.com":        {"v=DKIM1; k=rsa; p=expectedkey"},
+			"_sendwise-verification.example.com": {"v=sendwise-verification expected-token"},
+		}},
+	}
+	checks := server.checkDomainDNSDetails(context.Background(), "example.com", "mail", "expectedkey", "expected-token")
+	spf, dkim, dmarc, verification := checks.Statuses()
+	if got := domainDNSVerificationStatus(spf, dkim, verification); got != "verified" {
+		t.Fatalf("domain status = %q with DMARC=%q; want verified when ownership, SPF, and DKIM pass", got, dmarc)
+	}
+	if checks.Records["mx"].Status != "missing" {
+		t.Fatalf("MX status = %q, want missing warning data", checks.Records["mx"].Status)
+	}
+}
+
+type concurrentDNSResolver struct {
+	mu      sync.Mutex
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *concurrentDNSResolver) LookupTXT(context.Context, string) ([]string, error) {
+	r.started <- struct{}{}
+	<-r.release
+	return nil, nil
+}
+
+func TestCheckDomainDNSRunsRecordLookupsInParallel(t *testing.T) {
+	resolver := &concurrentDNSResolver{
+		started: make(chan struct{}, 4),
+		release: make(chan struct{}),
+	}
+	server := &Server{dnsResolver: resolver}
+	done := make(chan struct{})
+	go func() {
+		server.checkDomainDNSDetails(context.Background(), "example.com", "mail", "key", "token")
+		close(done)
+	}()
+
+	for range 4 {
+		select {
+		case <-resolver.started:
+		case <-time.After(time.Second):
+			close(resolver.release)
+			t.Fatal("DNS record queries did not start concurrently")
+		}
+	}
+	close(resolver.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("DNS checks did not finish after releasing concurrent lookups")
 	}
 }
 
@@ -123,8 +221,8 @@ func TestDNSRecordsForIncludesSendwiseVerificationRecord(t *testing.T) {
 	}
 	records := dnsRecordsFor(d, "pending", "", "")
 
-	if len(records) != 4 {
-		t.Fatalf("expected 4 dns records, got %d: %+v", len(records), records)
+	if len(records) != 5 {
+		t.Fatalf("expected 5 dns records, got %d: %+v", len(records), records)
 	}
 	if records[3].Type != "TXT" || records[3].Name != "_sendwise-verification.news.example.com" {
 		t.Fatalf("expected verification TXT record, got %+v", records[3])
@@ -151,14 +249,14 @@ func TestDNSRecordsForTrackingCNAMEAndConfiguredSPF(t *testing.T) {
 		VerificationToken: "029be151-9ec4-4fa8-83b8-f8c02b289a96", SPFStatus: "pending",
 	}
 	records := dnsRecordsFor(d, "pending", "https://clicks.sendwise.test", "_spf.sendwise.test")
-	if len(records) != 5 {
-		t.Fatalf("expected four required records and configured tracking CNAME, got %d", len(records))
+	if len(records) != 6 {
+		t.Fatalf("expected five DNS records and configured tracking CNAME, got %d", len(records))
 	}
 	if records[0].Value != "v=spf1 include:_spf.sendwise.test ~all" {
 		t.Fatalf("SPF value = %q", records[0].Value)
 	}
-	if records[4].Type != "CNAME" || records[4].Value != "clicks.sendwise.test" {
-		t.Fatalf("unexpected tracking record: %+v", records[4])
+	if records[5].Type != "CNAME" || records[5].Value != "clicks.sendwise.test" {
+		t.Fatalf("unexpected tracking record: %+v", records[5])
 	}
 }
 

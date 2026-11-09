@@ -1,7 +1,45 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 
 const API_ORIGIN = process.env.E2E_API_ORIGIN ?? "http://localhost:8084";
 const MAILPIT_API = process.env.MAILPIT_API_URL ?? "http://localhost:8025";
+
+function runLocalSQL(sql: string): void {
+  const composeFiles = [
+    resolve(process.cwd(), "../../docker-compose.yml"),
+    resolve(process.cwd(), "../../docker-compose.microservices.yml"),
+  ];
+  execFileSync("docker", [
+    "compose",
+    "--project-name",
+    process.env.E2E_COMPOSE_PROJECT ?? "sendwise-e2e-stalwart",
+    ...composeFiles.flatMap((file) => ["-f", file]),
+    "exec",
+    "-T",
+    "postgres",
+    "sh",
+    "-lc",
+    `psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "${sql}"`,
+  ], { stdio: "pipe" });
+}
+
+function seedVerifiedDomain(organizationID: string, domain: string): void {
+  if (!/^[0-9a-f-]{36}$/i.test(organizationID) || !/^[a-z0-9.-]+$/.test(domain)) {
+    throw new Error("The test organization or domain is invalid");
+  }
+  runLocalSQL(`
+    UPDATE sending_domains
+    SET status = 'verified',
+        spf_status = 'verified',
+        dkim_status = 'verified',
+        verification_status = 'verified',
+        stalwart_authenticated = true,
+        last_checked_at = now(),
+        verified_at = now()
+    WHERE organization_id = '${organizationID}' AND domain = '${domain}'
+  `);
+}
 
 async function findVerificationLink(
   request: APIRequestContext,
@@ -48,6 +86,7 @@ test("register, import an audience, edit a template, send, and verify campaign r
   page,
   request,
 }) => {
+  test.setTimeout(180_000);
   const stamp = Date.now();
   const email = `task5-${stamp}@example.test`;
   const password = `Task5-${stamp}-Password!`;
@@ -59,7 +98,7 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await page.goto("/register");
   await page.getByPlaceholder("Your name").fill("Task Five E2E");
   await page.getByPlaceholder("you@example.com").fill(email);
-  await page.getByPlaceholder("Acme Studio").fill(`Task Five Workspace ${stamp}`);
+  await page.getByPlaceholder("Workspace name").fill(`Task Five Workspace ${stamp}`);
   await page.getByPlaceholder("••••••••••").fill(password);
   await page.getByRole("button", { name: "Create workspace" }).click();
   await page.waitForURL("**/auth/verify?email=**");
@@ -77,6 +116,18 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await page.waitForURL("**/dashboard");
   const accessToken = await page.evaluate(() => localStorage.getItem("access_token"));
   expect(accessToken).toBeTruthy();
+  const claimsPayload = accessToken!.split(".")[1].replaceAll("-", "+").replaceAll("_", "/");
+  const claims = JSON.parse(
+    atob(claimsPayload.padEnd(Math.ceil(claimsPayload.length / 4) * 4, "=")),
+  ) as { org?: string };
+  expect(claims.org).toBeTruthy();
+  const sendingDomain = `task5-${stamp}.example.test`;
+  const domainResponse = await request.post(`${API_ORIGIN}/api/v1/domains`, {
+    headers: { Authorization: ["Bearer", accessToken].join(" ") },
+    data: { domain: sendingDomain },
+  });
+  expect(domainResponse.status(), await domainResponse.text()).toBe(201);
+  seedVerifiedDomain(claims.org!, sendingDomain);
 
   await page.goto("/audience/lists");
   await page.getByRole("button", { name: "Create list", exact: true }).click();
@@ -133,6 +184,101 @@ test("register, import an audience, edit a template, send, and verify campaign r
     expect(response.status(), await response.text()).toBe(200);
   }
 
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "Sender identities" })).toBeVisible();
+  const addSender = async (localPart: string, displayName: string) => {
+    await page.getByLabel("Verified sending domain").selectOption(sendingDomain);
+    await page.getByLabel("Local part").fill(localPart);
+    await page.getByLabel("Display name").fill(displayName);
+    await page.getByLabel("Reply-to").fill(`support@${sendingDomain}`);
+    await page.getByRole("button", { name: "Add sender" }).click();
+    await expect(page.getByRole("row").filter({ hasText: `${localPart}@${sendingDomain}` })).toBeVisible();
+  };
+  await addSender("newsletter", "Newsletter");
+  await addSender("sales", "Sales");
+  const salesRow = page.getByRole("row").filter({ hasText: `sales@${sendingDomain}` });
+  await salesRow.getByRole("button", { name: "Set default" }).click();
+  await expect(salesRow.getByText("Default", { exact: true })).toBeVisible();
+
+  const identitiesResponse = await request.get(`${API_ORIGIN}/api/v1/sender-identities`, {
+    headers: { Authorization: ["Bearer", accessToken].join(" ") },
+  });
+  expect(identitiesResponse.ok()).toBeTruthy();
+  const identities = (await identitiesResponse.json()) as {
+    data: Array<{ id: string; email: string; is_default: boolean }>;
+  };
+  const salesIdentity = identities.data.find((item) => item.email === `sales@${sendingDomain}`);
+  expect(salesIdentity?.id).toBeTruthy();
+  expect(salesIdentity?.is_default).toBe(true);
+
+  const listsResponse = await request.get(`${API_ORIGIN}/api/v1/lists`, {
+    headers: { Authorization: ["Bearer", accessToken].join(" ") },
+  });
+  const lists = (await listsResponse.json()) as {
+    data: Array<{ id: string; name: string }>;
+  };
+  const audience = lists.data.find((item) => item.name === listName);
+  expect(audience?.id).toBeTruthy();
+  const blockedCampaignResponse = await request.post(`${API_ORIGIN}/api/v1/campaigns`, {
+    headers: { Authorization: ["Bearer", accessToken].join(" ") },
+    data: {
+      name: `${campaignName} without sender profile`,
+      subject: "Blocked profile proof",
+      sender_identity_id: salesIdentity!.id,
+      list_id: audience!.id,
+      content: { version: 1, blocks: [{ type: "paragraph", content: "Profile enforcement proof." }] },
+    },
+  });
+  expect(blockedCampaignResponse.status(), await blockedCampaignResponse.text()).toBe(201);
+  const blockedCampaign = (await blockedCampaignResponse.json()) as { id: string };
+  const blockedSendResponse = await request.post(
+    `${API_ORIGIN}/api/v1/campaigns/${blockedCampaign.id}/send`,
+    { headers: { Authorization: ["Bearer", accessToken].join(" ") } },
+  );
+  expect(blockedSendResponse.status()).toBe(400);
+  expect(await blockedSendResponse.text()).toContain("sender_profile_incomplete");
+
+  await page.goto(`/campaigns/${blockedCampaign.id}/editor`);
+  await expect(page.getByRole("heading", { name: "Complete your sender profile" })).toBeVisible();
+  await page.getByRole("link", { name: "Set up sender profile" }).click();
+  await expect(page).toHaveURL(/\/settings#sender-profile$/);
+  await page.getByLabel("Company name").fill("Task Five E2E");
+  await page.getByLabel("Support email").fill(`support@${sendingDomain}`);
+  await page.getByLabel("Street address").fill("1 Test Road");
+  await page.getByLabel("City").fill("Test City");
+  await page.getByLabel("Region / state").fill("Test Region");
+  await page.getByLabel("Postal code").fill("10001");
+  await page.getByLabel("Country").fill("Test Country");
+  await page.getByLabel("Website").fill("https://example.test");
+  await page.getByLabel("Optional footer text").fill("A useful update from our team.");
+  const senderProfileSave = page.waitForResponse((response) =>
+    new URL(response.url()).pathname.endsWith("/sender-profile") &&
+    response.request().method() === "PUT",
+  );
+  await page.getByRole("button", { name: "Save sender profile" }).click();
+  const savedProfileResponse = await senderProfileSave;
+  expect(savedProfileResponse.status(), await savedProfileResponse.text()).toBe(200);
+  await expect(page.getByText("Profile complete. Campaign sends are enabled.")).toBeVisible();
+  const foreignFromCampaignResponse = await request.post(`${API_ORIGIN}/api/v1/campaigns`, {
+    headers: { Authorization: ["Bearer", accessToken].join(" ") },
+    data: {
+      name: `${campaignName} foreign From`,
+      subject: "Foreign sender rejection proof",
+      sender_name: "Unowned sender",
+      sender_email: "newsletter@foreign-workspace.example.test",
+      list_id: audience!.id,
+      content: { version: 1, blocks: [{ type: "paragraph", content: "This must not send." }] },
+    },
+  });
+  expect(foreignFromCampaignResponse.status(), await foreignFromCampaignResponse.text()).toBe(201);
+  const foreignFromCampaign = await foreignFromCampaignResponse.json() as { id: string };
+  const foreignFromSend = await request.post(
+    `${API_ORIGIN}/api/v1/campaigns/${foreignFromCampaign.id}/send`,
+    { headers: { Authorization: ["Bearer", accessToken].join(" ") } },
+  );
+  expect(foreignFromSend.status()).toBe(400);
+  expect(await foreignFromSend.text()).toContain("sender_identity_required");
+
   await page.goto("/templates");
   await page.getByRole("button", { name: "New template" }).click();
   await page.getByLabel("Template name").fill(templateName);
@@ -140,12 +286,60 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await page.getByRole("button", { name: "Create template" }).click();
   await page.waitForURL(/\/templates\/[0-9a-f-]+$/);
   await expect(page.getByRole("heading", { name: "Design template" })).toBeVisible();
+  const templateMode = page.getByLabel("Template mode");
+  page.once("dialog", (dialog) => dialog.accept());
+  await templateMode.selectOption("plain");
+  await expect(page.getByLabel("Plain-text message")).toBeVisible();
+  await page.getByLabel("Plain-text message").fill("A useful update in plain text.");
+  await templateMode.selectOption("html");
   await page.getByRole("button", { name: "Add heading" }).click();
   await page.getByLabel("Block content 1").fill("A useful update");
-  await page.getByRole("button", { name: "Add paragraph" }).click();
+  await page.getByRole("button", { name: "Add text" }).click();
   await page.getByLabel("Block content 2").fill("This message started from a saved template.");
+  await page.getByLabel("background color hex", { exact: true }).fill("#ddeeff");
+  await expect(page.getByLabel("background color hex", { exact: true })).toHaveValue("#ddeeff");
+  await page.locator('section[draggable="true"]').nth(0)
+    .dragTo(page.locator('section[draggable="true"]').nth(1));
+  await expect(page.getByLabel("Block content 1")).toHaveValue("This message started from a saved template.");
+
+  await page.getByRole("button", { name: "HTML code" }).click();
+  await page.getByLabel("Import HTML file").setInputFiles({
+    name: "beefree-export.html",
+    mimeType: "text/html",
+    buffer: Buffer.from(
+      '<h1>Welcome Flowi</h1><p>Imported message</p><a role="button" href="https://example.test">Read more</a><img src="https://images.cloudfront.net/banner.png" alt="Imported banner"><div style="background-image:url(https://images.cloudfront.net/panel.png)">Custom panel</div><a href="https://instagram.example.test/sendwise" aria-label="Instagram"><img src="https://images.cloudfront.net/instagram.png" alt="Instagram"></a>',
+    ),
+  });
+  await page.getByRole("button", { name: "Convert HTML to editable blocks" }).click();
+  await expect(page.getByLabel("Block content 1")).toHaveValue("Welcome {{organization}}");
+  await expect(page.getByLabel("Image URL 4")).toHaveValue("/template-assets/neutral-banner.svg");
+  await expect(page.getByLabel("Block content 5")).not.toHaveValue(/cloudfront\.net/);
+  await expect(page.getByLabel("Block content 5")).toHaveValue(/neutral-banner\.svg/);
+  await expect(page.getByLabel("Block content 6")).toHaveValue("Instagram");
+  await page.getByLabel("Upload image 4").setInputFiles({
+    name: "one-pixel.gif",
+    mimeType: "image/gif",
+    buffer: Buffer.from("R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=", "base64"),
+  });
+  await expect(page.getByLabel("Image URL 4")).toHaveValue(/^\/api\/v1\/public\/assets\/[0-9a-f-]{36}$/);
+  const uploadedImageURL = await page.getByLabel("Image URL 4").inputValue();
+  const uploadedImage = await request.get(`${API_ORIGIN}${uploadedImageURL}`);
+  expect(uploadedImage.status()).toBe(200);
+  expect(uploadedImage.headers()["content-type"]).toBe("image/gif");
   await page.getByRole("button", { name: "Save template" }).click();
   await expect(page.getByText("Your design is ready to use in a campaign.")).toBeVisible();
+  const testRecipient = `task5-test-${stamp}@example.test`;
+  await page.getByLabel("Test recipient").fill(testRecipient);
+  await page.getByRole("button", { name: "Send test email" }).click();
+  await expect(page.getByText("accepted by SMTP relay", { exact: true })).toBeVisible();
+  await expect.poll(async () => {
+    const response = await request.get(`${MAILPIT_API}/api/v1/search`, {
+      params: { query: `to:${testRecipient}` },
+    });
+    if (!response.ok()) return 0;
+    const result = await response.json() as { total?: number; messages?: unknown[] };
+    return result.total ?? result.messages?.length ?? 0;
+  }, { timeout: 30_000 }).toBeGreaterThan(0);
   const templateID = page.url().split("/").at(-1);
   expect(templateID).toBeTruthy();
 
@@ -153,20 +347,13 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await expect(page.getByText(`Using template: ${templateName}`)).toBeVisible();
   await page.locator("#subject").fill("Task 5 delivery proof");
   await page.locator("#preheader").fill("A locally delivered campaign report proof.");
-  await page.locator("#sender-name").fill("Sendwise Task 5");
-  const senderField = page.locator("#sender-email");
-  if (await senderField.evaluate((element) => element.tagName) === "SELECT") {
-    await senderField.selectOption({ index: 0 });
-  } else {
-    await senderField.fill("sender@task5.example.test");
-  }
-  await page.locator("#sender-postal-address").fill("1 Test Road, Test City");
+  await page.locator("#sender-identity").selectOption(salesIdentity!.id);
   await page.locator("label").filter({ hasText: listName }).locator('input[type="radio"]').check();
   await page.getByRole("button", { name: "Continue to editor" }).click();
   await page.waitForURL(/\/campaigns\/[0-9a-f-]+\/editor$/);
   const campaignID = page.url().match(/\/campaigns\/([0-9a-f-]+)\/editor$/)?.[1];
   expect(campaignID).toBeTruthy();
-  await expect(page.getByLabel("Block content 1")).toHaveValue("A useful update");
+  await expect(page.getByLabel("Block content 1")).toHaveValue("Welcome {{organization}}");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("All changes saved.")).toBeVisible();
   await page.getByRole("link", { name: "Preview & send" }).click();
@@ -188,7 +375,9 @@ test("register, import an audience, edit a template, send, and verify campaign r
   }, { timeout: 90_000 }).toBe(3);
 
   await page.goto("/reports");
-  await expect(page.getByRole("row").filter({ hasText: campaignName })).toContainText("3");
+  await expect(
+    page.getByRole("row").filter({ hasText: campaignName }).filter({ hasText: "completed" }),
+  ).toContainText("3");
   await expect(page.getByText("Emails sent (30 days)")).toBeVisible();
   await page.goto(`/campaigns/${campaignID}/report`);
   await expect(page.getByRole("heading", { name: "Campaign report" })).toBeVisible();

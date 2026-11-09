@@ -8,16 +8,17 @@ import (
 )
 
 type Message struct {
-	ID          string
-	WorkspaceID string
-	CampaignID  string
-	From        string
-	To          string
-	Subject     string
-	HTML        string
-	Text        string
-	Headers     map[string]string
-	DKIM        *DKIMConfig
+	ID           string
+	WorkspaceID  string
+	CampaignID   string
+	From         string
+	EnvelopeFrom string
+	To           string
+	Subject      string
+	HTML         string
+	Text         string
+	Headers      map[string]string
+	DKIM         *DKIMConfig
 }
 
 type Result struct {

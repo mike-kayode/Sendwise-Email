@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -24,26 +25,28 @@ var domainPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+
 const domainColumns = `
 	id, domain, status, dkim_selector, COALESCE(dkim_public_key, '') AS dkim_public_key, verification_token,
 	spf_status, dkim_status, dmarc_status, verification_status, last_checked_at, verified_at, created_at,
+	COALESCE(dns_check_details, '{}'::jsonb) AS dns_check_details,
 	owner_conflict, stalwart_authenticated, warmup_profile
 `
 
 type sendingDomain struct {
-	ID                    string     `json:"id"`
-	Domain                string     `json:"domain"`
-	Status                string     `json:"status"`
-	DKIMSelector          string     `json:"dkim_selector"`
-	DKIMPublicKey         string     `json:"dkim_public_key,omitempty"`
-	VerificationToken     string     `json:"-"`
-	SPFStatus             string     `json:"spf_status"`
-	DKIMStatus            string     `json:"dkim_status"`
-	DMARCStatus           string     `json:"dmarc_status"`
-	VerificationStatus    string     `json:"verification_status"`
-	LastCheckedAt         *time.Time `json:"last_checked_at"`
-	VerifiedAt            *time.Time `json:"verified_at"`
-	CreatedAt             time.Time  `json:"created_at"`
-	OwnerConflict         bool       `json:"owner_conflict"`
-	StalwartAuthenticated bool       `json:"stalwart_authenticated"`
-	WarmupProfile         string     `json:"warmup_profile"`
+	ID                    string          `json:"id"`
+	Domain                string          `json:"domain"`
+	Status                string          `json:"status"`
+	DKIMSelector          string          `json:"dkim_selector"`
+	DKIMPublicKey         string          `json:"dkim_public_key,omitempty"`
+	VerificationToken     string          `json:"-"`
+	SPFStatus             string          `json:"spf_status"`
+	DKIMStatus            string          `json:"dkim_status"`
+	DMARCStatus           string          `json:"dmarc_status"`
+	VerificationStatus    string          `json:"verification_status"`
+	LastCheckedAt         *time.Time      `json:"last_checked_at"`
+	VerifiedAt            *time.Time      `json:"verified_at"`
+	CreatedAt             time.Time       `json:"created_at"`
+	DNSCheckDetails       json.RawMessage `json:"dns_check_details"`
+	OwnerConflict         bool            `json:"owner_conflict"`
+	StalwartAuthenticated bool            `json:"stalwart_authenticated"`
+	WarmupProfile         string          `json:"warmup_profile"`
 }
 
 func scanDomain(row pgx.Row) (*sendingDomain, error) {
@@ -51,7 +54,7 @@ func scanDomain(row pgx.Row) (*sendingDomain, error) {
 	if err := row.Scan(
 		&d.ID, &d.Domain, &d.Status, &d.DKIMSelector, &d.DKIMPublicKey, &d.VerificationToken,
 		&d.SPFStatus, &d.DKIMStatus, &d.DMARCStatus, &d.VerificationStatus,
-		&d.LastCheckedAt, &d.VerifiedAt, &d.CreatedAt, &d.OwnerConflict,
+		&d.LastCheckedAt, &d.VerifiedAt, &d.CreatedAt, &d.DNSCheckDetails, &d.OwnerConflict,
 		&d.StalwartAuthenticated, &d.WarmupProfile,
 	); err != nil {
 		return nil, err
@@ -181,17 +184,11 @@ func (s *Server) verifyStalwartDomain(w http.ResponseWriter, r *http.Request, d 
 		httpx.Error(w, http.StatusConflict, "domain_owner_conflict", "Domain already owned by another workspace.")
 		return
 	}
-	spf, dkim, dmarc, verification := s.checkDomainDNS(
+	checks := s.checkDomainDNSDetails(
 		r.Context(), d.Domain, d.DKIMSelector, d.DKIMPublicKey, d.VerificationToken,
 	)
-	status := "pending"
-	switch {
-	case spf == "verified" && dkim == "verified" && dmarc == "verified" && verification == "verified":
-		status = "verified"
-	case hasDomainDNSResult("verified", spf, dkim, dmarc, verification) ||
-		hasDomainDNSResult("mismatched", spf, dkim, dmarc, verification):
-		status = "misconfigured"
-	}
+	spf, dkim, dmarc, verification := checks.Statuses()
+	status := domainDNSVerificationStatus(spf, dkim, verification)
 	if status == "verified" {
 		if s.stalwartDomainHoster == nil {
 			httpx.Error(w, http.StatusServiceUnavailable, "stalwart_unavailable", "Stalwart domain hosting is not configured.")
@@ -203,6 +200,12 @@ func (s *Server) verifyStalwartDomain(w http.ResponseWriter, r *http.Request, d 
 			return
 		}
 	}
+	dnsCheckDetails, err := json.Marshal(checks)
+	if err != nil {
+		s.logger.Error("encode domain DNS verification details", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not save domain DNS verification results.")
+		return
+	}
 
 	updated, err := scanDomain(s.pool.QueryRow(r.Context(), `
 		UPDATE sending_domains
@@ -211,13 +214,14 @@ func (s *Server) verifyStalwartDomain(w http.ResponseWriter, r *http.Request, d 
 		    dkim_status = $5,
 		    dmarc_status = $6,
 		    verification_status = $7,
+		    dns_check_details = $8::jsonb,
 		    stalwart_authenticated = ($3 = 'verified'),
 		    last_checked_at = now(),
 		    verified_at = CASE WHEN $3 = 'verified' THEN COALESCE(verified_at, now()) ELSE verified_at END,
 		    updated_at = now()
 		WHERE id = $1 AND organization_id = $2
 		RETURNING `+domainColumns,
-		d.ID, s.organizationID(r), status, spf, dkim, dmarc, verification,
+		d.ID, s.organizationID(r), status, spf, dkim, dmarc, verification, dnsCheckDetails,
 	))
 	if err != nil {
 		s.logger.Error("update domain verification", "error", err)
@@ -349,11 +353,15 @@ func (s *Server) updateDomainWarmupProfile(w http.ResponseWriter, r *http.Reques
 }
 
 type dnsRecord struct {
-	Type    string `json:"type"`
-	Name    string `json:"name"`
-	Value   string `json:"value"`
-	Purpose string `json:"purpose"`
-	Status  string `json:"status"`
+	Type        string             `json:"type"`
+	Name        string             `json:"name"`
+	Value       string             `json:"value"`
+	TTL         string             `json:"ttl"`
+	Purpose     string             `json:"purpose"`
+	Status      string             `json:"status"`
+	FoundValue  string             `json:"found_value,omitempty"`
+	Resolvers   []dnsResolverCheck `json:"resolvers,omitempty"`
+	LastChecked *time.Time         `json:"last_checked,omitempty"`
 }
 
 type DNSResolver interface {
@@ -405,34 +413,93 @@ func lookupTXTWithResolver(ctx context.Context, resolver DNSResolver, name strin
 }
 
 func dnsRecordsFor(d sendingDomain, verification string, trackingBase, spfInclude string) []dnsRecord {
+	var checks dnsCheckDetails
+	if len(d.DNSCheckDetails) > 0 {
+		_ = json.Unmarshal(d.DNSCheckDetails, &checks)
+	}
+	record := func(key string, fallbackStatus string) dnsRecord {
+		result, ok := checks.Records[key]
+		if !ok {
+			return dnsRecord{TTL: "300", Status: fallbackStatus}
+		}
+		status := result.Status
+		switch status {
+		case "verified":
+			status = "found"
+		case "mismatched":
+			status = "wrong_value"
+		case "found", "wrong_value", "missing", "lookup_failed":
+		default:
+			status = fallbackStatus
+		}
+		return dnsRecord{
+			TTL:         "300",
+			Status:      status,
+			FoundValue:  result.FoundValue,
+			Resolvers:   result.Resolvers,
+			LastChecked: checks.CheckedAt,
+		}
+	}
+	spfRecord := record("spf", d.SPFStatus)
+	dkimRecord := record("dkim", d.DKIMStatus)
+	dmarcRecord := record("dmarc", d.DMARCStatus)
+	verificationRecord := record("verification", verification)
+	mxRecord := record("mx", "warning")
 	records := []dnsRecord{
 		{
-			Type:    "TXT",
-			Name:    d.Domain,
-			Value:   spfRecordValue(spfInclude),
-			Purpose: "SPF authorizes your sending infrastructure to send for this domain.",
-			Status:  d.SPFStatus,
+			Type:        "TXT",
+			Name:        d.Domain,
+			Value:       spfRecordValue(spfInclude),
+			TTL:         spfRecord.TTL,
+			Purpose:     "SPF authorizes your sending infrastructure to send for this domain.",
+			Status:      spfRecord.Status,
+			FoundValue:  spfRecord.FoundValue,
+			Resolvers:   spfRecord.Resolvers,
+			LastChecked: spfRecord.LastChecked,
 		},
 		{
-			Type:    "TXT",
-			Name:    d.DKIMSelector + "._domainkey." + d.Domain,
-			Value:   dkimRecordValue(d.DKIMPublicKey),
-			Purpose: "DKIM cryptographically signs outbound messages. Copy the public key from your DNS provider.",
-			Status:  d.DKIMStatus,
+			Type:        "TXT",
+			Name:        d.DKIMSelector + "._domainkey." + d.Domain,
+			Value:       dkimRecordValue(d.DKIMPublicKey),
+			TTL:         dkimRecord.TTL,
+			Purpose:     "DKIM cryptographically signs outbound messages. Copy the public key from your DNS provider.",
+			Status:      dkimRecord.Status,
+			FoundValue:  dkimRecord.FoundValue,
+			Resolvers:   dkimRecord.Resolvers,
+			LastChecked: dkimRecord.LastChecked,
 		},
 		{
-			Type:    "TXT",
-			Name:    "_dmarc." + d.Domain,
-			Value:   "v=DMARC1; p=none; rua=mailto:dmarc@" + d.Domain,
-			Purpose: "DMARC tells receiving servers what to do with messages that fail authentication.",
-			Status:  d.DMARCStatus,
+			Type:        "TXT",
+			Name:        "_dmarc." + d.Domain,
+			Value:       "v=DMARC1; p=none; rua=mailto:dmarc@" + d.Domain,
+			TTL:         dmarcRecord.TTL,
+			Purpose:     "DMARC tells receiving servers what to do with messages that fail authentication.",
+			Status:      dmarcRecord.Status,
+			FoundValue:  dmarcRecord.FoundValue,
+			Resolvers:   dmarcRecord.Resolvers,
+			LastChecked: dmarcRecord.LastChecked,
 		},
 		{
-			Type:    "TXT",
-			Name:    "_sendwise-verification." + d.Domain,
-			Value:   "v=sendwise-verification " + d.VerificationToken,
-			Purpose: "Verification token used to prove domain ownership during DNS checks.",
-			Status:  verification,
+			Type:        "TXT",
+			Name:        "_sendwise-verification." + d.Domain,
+			Value:       "v=sendwise-verification " + d.VerificationToken,
+			TTL:         verificationRecord.TTL,
+			Purpose:     "Verification token used to prove domain ownership during DNS checks.",
+			Status:      verificationRecord.Status,
+			FoundValue:  verificationRecord.FoundValue,
+			Resolvers:   verificationRecord.Resolvers,
+			LastChecked: verificationRecord.LastChecked,
+		},
+		{
+			Type:        "MX",
+			Name:        d.Domain,
+			Value:       "",
+			TTL:         mxRecord.TTL,
+			Purpose:     "Optional for sending. MX is checked as a warning and does not block verification.",
+			Status:      mxRecord.Status,
+			FoundValue:  mxRecord.FoundValue,
+			Resolvers:   mxRecord.Resolvers,
+			LastChecked: mxRecord.LastChecked,
 		},
 	}
 
@@ -441,6 +508,7 @@ func dnsRecordsFor(d sendingDomain, verification string, trackingBase, spfInclud
 			Type:    "CNAME",
 			Name:    "track." + d.Domain,
 			Value:   host,
+			TTL:     "300",
 			Purpose: "Optional branded click-tracking domain.",
 			Status:  "pending",
 		})
@@ -491,90 +559,60 @@ func normalizeDomain(raw string) (string, error) {
 }
 
 func (s *Server) checkDomainDNS(ctx context.Context, domain, selector, expectedPublicKey, expectedVerificationToken string) (spf, dkim, dmarc, verification string) {
+	return s.checkDomainDNSDetails(ctx, domain, selector, expectedPublicKey, expectedVerificationToken).Statuses()
+}
+
+func (s *Server) checkDomainDNSDetails(ctx context.Context, domain, selector, expectedPublicKey, expectedVerificationToken string) dnsCheckDetails {
 	resolver := s.dnsResolver
 	if resolver == nil {
 		resolver = newDNSResolver("", 2*time.Second)
 	}
-
-	spf = "missing"
-	txtValues, err := lookupTXTWithResolver(ctx, resolver, domain)
-	if isDNSLookupFailure(err) {
-		spf = "lookup_failed"
-	} else if err == nil {
-		for _, txt := range txtValues {
-			lower := strings.ToLower(strings.TrimSpace(txt))
-			if strings.HasPrefix(lower, "v=spf1") {
-				if spfHasAuthMechanism(lower, s.cfg.SPFInclude) {
-					spf = "verified"
-				} else {
-					spf = "mismatched"
-				}
-				break
-			}
-			if strings.Contains(lower, "v=") {
-				spf = "mismatched"
-			}
-		}
-	}
-
-	dkim = "missing"
-	txtValues, err = lookupTXTWithResolver(ctx, resolver, selector+"._domainkey."+domain)
-	if isDNSLookupFailure(err) {
-		dkim = "lookup_failed"
-	} else if err == nil {
-		for _, txt := range txtValues {
-			normalized := normalizeDkimTXTValue(txt)
-			if normalized == "" {
-				continue
-			}
-			if normalized == normalizeDkimKey(expectedPublicKey) {
-				dkim = "verified"
-				break
-			}
-			dkim = "mismatched"
-			break
-		}
-	}
-
-	dmarc = "missing"
-	txtValues, err = lookupTXTWithResolver(ctx, resolver, "_dmarc."+domain)
-	if isDNSLookupFailure(err) {
-		dmarc = "lookup_failed"
-	} else if err == nil {
-		for _, txt := range txtValues {
-			lower := strings.ToLower(strings.TrimSpace(txt))
-			if strings.HasPrefix(lower, "v=dmarc1") {
-				dmarc = "verified"
-				break
-			}
-			if strings.Contains(lower, "v=") {
-				dmarc = "mismatched"
-			}
-		}
-	}
-
+	ctx = withDNSAuthorityLookup(ctx)
 	expectedVerificationToken = strings.ToLower(strings.TrimSpace(expectedVerificationToken))
-	verification = "missing"
-	txtValues, err = lookupTXTWithResolver(ctx, resolver, "_sendwise-verification."+domain)
-	if isDNSLookupFailure(err) {
-		verification = "lookup_failed"
-	} else if err == nil {
-		for _, txt := range txtValues {
-			lower := strings.ToLower(strings.TrimSpace(txt))
-			if !strings.Contains(lower, "v=sendwise-verification") {
-				continue
-			}
-			candidate := strings.TrimSpace(strings.TrimPrefix(lower, "v=sendwise-verification"))
-			candidate = strings.Trim(candidate, " \t\r\n\"'")
-			if candidate == expectedVerificationToken && expectedVerificationToken != "" {
-				verification = "verified"
-				break
-			}
-			verification = "mismatched"
-		}
+	checks := dnsCheckDetails{Records: make(map[string]dnsRecordResult), CheckedAt: timePointer(time.Now().UTC())}
+	specs := []dnsRecordSpec{
+		{Key: "spf", Type: "TXT", Name: domain, Zone: domain},
+		{Key: "dkim", Type: "TXT", Name: selector + "._domainkey." + domain, Zone: domain},
+		{Key: "dmarc", Type: "TXT", Name: "_dmarc." + domain, Zone: domain},
+		{Key: "verification", Type: "TXT", Name: "_sendwise-verification." + domain, Zone: domain},
+		{Key: "mx", Type: "MX", Name: domain, Zone: domain},
 	}
-
-	return spf, dkim, dmarc, verification
+	type result struct {
+		key    string
+		record dnsRecordResult
+	}
+	results := make(chan result, len(specs))
+	for _, spec := range specs {
+		spec := spec
+		go func() {
+			record := lookupDNSRecord(ctx, resolver, spec, func(value string) bool {
+				switch spec.Key {
+				case "spf":
+					lower := strings.ToLower(strings.TrimSpace(value))
+					return strings.HasPrefix(lower, "v=spf1") && spfHasAuthMechanism(lower, s.cfg.SPFInclude)
+				case "dkim":
+					return normalizeDkimTXTValue(value) == normalizeDkimKey(expectedPublicKey)
+				case "dmarc":
+					return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "v=dmarc1")
+				case "verification":
+					lower := strings.ToLower(strings.TrimSpace(value))
+					candidate := strings.TrimSpace(strings.TrimPrefix(lower, "v=sendwise-verification"))
+					candidate = strings.Trim(candidate, " \t\r\n\"'")
+					return strings.HasPrefix(lower, "v=sendwise-verification") && candidate == expectedVerificationToken && expectedVerificationToken != ""
+				case "mx":
+					return strings.TrimSpace(value) != ""
+				default:
+					return false
+				}
+			})
+			results <- result{key: spec.Key, record: record}
+		}()
+	}
+	for range specs {
+		result := <-results
+		checks.Records[result.key] = result.record
+	}
+	return checks
 }
 
 func isDNSLookupFailure(err error) bool {
@@ -595,6 +633,17 @@ func hasDomainDNSResult(want string, statuses ...string) bool {
 		}
 	}
 	return false
+}
+
+func domainDNSVerificationStatus(spf, dkim, verification string) string {
+	if spf == "verified" && dkim == "verified" && verification == "verified" {
+		return "verified"
+	}
+	if hasDomainDNSResult("verified", spf, dkim, verification) ||
+		hasDomainDNSResult("mismatched", spf, dkim, verification) {
+		return "misconfigured"
+	}
+	return "pending"
 }
 
 func spfRecordValue(spfInclude string) string {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { CheckCircle2, Copy, Globe, Plus, RefreshCw, ShieldCheck, XCircle, Send } from "lucide-react";
@@ -13,14 +13,24 @@ import { apiFetch, type DomainDNSRecord, type SendingDomain } from "@/lib/auth";
 import { formatDateTime } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
 
-const recordStatusText = (status?: string) => (status ? status.replaceAll("_", " ") : "unknown");
+const recordStatusText = (status?: string) =>
+  status === "wrong_value" ? "wrong value" : status ? status.replaceAll("_", " ") : "unknown";
+
+function dnsNameForDisplay(name: string, domain: string, showFullName: boolean): string {
+  if (showFullName) return name;
+  if (name.toLowerCase() === domain.toLowerCase()) return "@";
+  const suffix = `.${domain.toLowerCase()}`;
+  return name.toLowerCase().endsWith(suffix) ? name.slice(0, -suffix.length) : name;
+}
 
 export default function DomainsPage() {
   const [newDomain, setNewDomain] = useState("");
   const [selectedDomainId, setSelectedDomainId] = useState<string | null>(null);
   const [verifyingAll, setVerifyingAll] = useState(false);
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [showFullNames, setShowFullNames] = useState(false);
   const dnsSectionRef = useRef<HTMLDivElement>(null);
+  const pollingStartedAt = useRef(new Map<string, number>());
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -70,7 +80,7 @@ export default function DomainsPage() {
     }
   };
 
-  const handleVerify = async (id: string, domainName?: string) => {
+  const handleVerify = useCallback(async (id: string, domainName?: string, silent = false) => {
     setVerifyingId(id);
     try {
       const result = await apiFetch<{
@@ -79,31 +89,54 @@ export default function DomainsPage() {
       }>(`/domains/${id}/verify`, { method: "POST" });
       await queryClient.invalidateQueries({ queryKey: ["domains"] });
       await queryClient.invalidateQueries({ queryKey: ["domain-dns-records"] });
-      toast({
-        title: result.domain.status === "verified" ? `${domainName ?? "Domain"} is verified` : "DNS check complete",
-        description:
-          result.domain.status === "verified"
-            ? "SPF, DKIM, and DMARC all passed. This domain is ready to send."
-            : "Some records are still missing. Review the DNS table below.",
-        variant: result.domain.status === "verified" ? undefined : "destructive",
-      });
+      if (!silent) {
+        toast({
+          title: result.domain.status === "verified" ? `${domainName ?? "Domain"} is verified` : "DNS check complete",
+          description:
+            result.domain.status === "verified"
+              ? "Ownership, SPF, and DKIM passed. DMARC and MX are advisory."
+              : "Review the per-resolver results below for missing or incorrect records.",
+          variant: result.domain.status === "verified" ? undefined : "destructive",
+        });
+      }
     } catch (err: any) {
-      toast({ title: "Verification failed", description: err?.message ?? "Unknown error", variant: "destructive" });
+      if (!silent) {
+        toast({ title: "DNS check failed", description: err?.message ?? "Unknown error", variant: "destructive" });
+      }
     } finally {
       setVerifyingId(null);
     }
-  };
+  }, [queryClient, toast]);
+
+  useEffect(() => {
+    const now = Date.now();
+    const pendingDomains = domains.filter((domain) => domain.status !== "verified" && !domain.owner_conflict);
+    const timers = pendingDomains.map((domain) => {
+      const startedAt = pollingStartedAt.current.get(domain.id) ?? now;
+      pollingStartedAt.current.set(domain.id, startedAt);
+      const delay = now - startedAt < 10 * 60 * 1000 ? 15_000 : 60_000;
+      return window.setTimeout(() => {
+        if (verifyingId !== domain.id) void handleVerify(domain.id, domain.domain, true);
+      }, delay);
+    });
+    const active = new Set(pendingDomains.map((domain) => domain.id));
+    for (const id of pollingStartedAt.current.keys()) {
+      if (!active.has(id)) pollingStartedAt.current.delete(id);
+    }
+    return () => timers.forEach(window.clearTimeout);
+  }, [domains, handleVerify, verifyingId]);
 
   const handleVerifyAll = async () => {
     if (unverified.length === 0) return;
     setVerifyingAll(true);
     let passed = 0;
+    let failed = 0;
     for (const domain of unverified) {
       try {
         const result = await apiFetch<{ domain: SendingDomain }>(`/domains/${domain.id}/verify`, { method: "POST" });
         if (result.domain?.status === "verified") passed += 1;
       } catch {
-        // Counted as not passed; refetch below shows the real state.
+        failed += 1;
       }
     }
     await queryClient.invalidateQueries({ queryKey: ["domains"] });
@@ -111,7 +144,7 @@ export default function DomainsPage() {
     setVerifyingAll(false);
     toast({
       title: "Verification run finished",
-      description: `${passed} of ${unverified.length} domain(s) now fully verified.`,
+      description: `${passed} of ${unverified.length} domain(s) verified; ${failed} check(s) failed. See each domain for details.`,
       variant: passed === unverified.length ? undefined : "destructive",
     });
   };
@@ -124,11 +157,27 @@ export default function DomainsPage() {
 
   const copyText = async (text: string, label: string) => {
     try {
-      await navigator.clipboard.writeText(text);
-      toast({ title: `${label} copied`, description: "Paste it at your DNS provider." });
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        throw new Error("Clipboard API unavailable");
+      }
     } catch {
-      toast({ title: "Copy failed", description: "Select the value and copy it manually.", variant: "destructive" });
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      const copied = document.execCommand("copy");
+      textarea.remove();
+      if (!copied) {
+        toast({ title: "Copy failed", description: "Select the value and copy it manually.", variant: "destructive" });
+        return;
+      }
     }
+    toast({ title: "Copied", description: `${label} copied. Paste it at your DNS provider.` });
   };
 
   if (domainsQuery.isLoading) {
@@ -180,7 +229,7 @@ export default function DomainsPage() {
           <Send className="h-4 w-4 shrink-0" />
           <span>
             <span className="font-medium">All {domains.length} domain(s) are ready to send.</span>{" "}
-            SPF, DKIM, and DMARC are passing for every domain.
+            Ownership, SPF, and DKIM are passing for every domain. DMARC and MX remain advisory.
           </span>
         </div>
       ) : (
@@ -257,6 +306,7 @@ export default function DomainsPage() {
                     {[
                       { label: "SPF", status: domain.spf_status },
                       { label: "DKIM", status: domain.dkim_status },
+                      { label: "Ownership", status: domain.verification_status },
                       { label: "DMARC", status: domain.dmarc_status },
                     ].map((record) => {
                       const ok = record.status === "verified";
@@ -295,7 +345,7 @@ export default function DomainsPage() {
                       ? "Checking DNS..."
                       : isReady
                         ? "Re-check DNS"
-                        : "Verify now"}
+                        : "Check now"}
                   </button>
                 </CardContent>
               </Card>
@@ -311,8 +361,8 @@ export default function DomainsPage() {
             <div>
               <CardTitle id="dns-records">DNS records</CardTitle>
               <CardDescription>
-                Add these records at your DNS provider, then click verify. DNS changes can take up to 48
-                hours to propagate.
+                Add these records at your DNS provider, then click verify.                 Checks query 1.1.1.1, 8.8.8.8, and authoritative nameservers in parallel. Ownership, SPF,
+                and DKIM gate verification; DMARC and MX are advisory.
               </CardDescription>
             </div>
             <div className="flex items-center gap-2">
@@ -324,6 +374,13 @@ export default function DomainsPage() {
                   Show all domains
                 </button>
               ) : null}
+              <button
+                type="button"
+                onClick={() => setShowFullNames((current) => !current)}
+                className="text-xs font-medium text-indigo-600 hover:text-indigo-500"
+              >
+                {showFullNames ? "Show relative names" : "Show full names"}
+              </button>
               {domains.length > 0 ? (
                 <Badge variant="success">
                   {verifiedCount} of {domains.length} verified
@@ -347,9 +404,9 @@ export default function DomainsPage() {
                       <Th>Type</Th>
                       <Th>Name</Th>
                       <Th>Value</Th>
+                      <Th>TTL</Th>
                       <Th>Purpose</Th>
                       <Th>Status</Th>
-                      <Th />
                     </Tr>
                   </Thead>
                   <Tbody>
@@ -372,23 +429,61 @@ export default function DomainsPage() {
                             <Td>
                               <Badge variant="outline">{record.type}</Badge>
                             </Td>
-                            <Td className="font-mono text-xs text-slate-700">{record.name}</Td>
-                            <Td className="max-w-[240px] truncate font-mono text-xs text-slate-500">
-                              {record.value || "Not configured"}
+                            <Td className="font-mono text-xs text-slate-700">
+                              <div className="flex items-center gap-1">
+                                <span>{dnsNameForDisplay(record.name, domain.domain, showFullNames)}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => void copyText(record.name, "DNS name")}
+                                  className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                                  aria-label={`Copy DNS name ${record.name}`}
+                                >
+                                  <Copy className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
                             </Td>
+                            <Td className="max-w-[260px] font-mono text-xs text-slate-500">
+                              <div className="flex items-start gap-1">
+                                <span className="break-all whitespace-pre-wrap">{record.value || "Not configured"}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => void copyText(record.value, "DNS value")}
+                                  disabled={!record.value}
+                                  className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"
+                                  aria-label={`Copy DNS value ${record.name}`}
+                                >
+                                  <Copy className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                              {record.found_value ? (
+                                <p className="mt-1 break-all whitespace-pre-wrap text-[11px] text-slate-600">
+                                  Found: {record.found_value}
+                                </p>
+                              ) : null}
+                              {record.resolvers?.length ? (
+                                <details className="mt-1 text-[11px]">
+                                  <summary className="cursor-pointer">Resolver results</summary>
+                                  {record.resolvers.map((resolver) => (
+                                    <p key={resolver.resolver} className="mt-1 break-all">
+                                      {resolver.resolver}: {recordStatusText(resolver.status)}
+                                      {resolver.found_value ? ` — ${resolver.found_value}` : ""}
+                                      {resolver.error ? ` — ${resolver.error}` : ""}
+                                    </p>
+                                  ))}
+                                </details>
+                              ) : null}
+                            </Td>
+                            <Td className="text-xs text-slate-600">{record.ttl}</Td>
                             <Td className="text-xs text-slate-600">{record.purpose}</Td>
                             <Td>
-                              <StatusBadge status={recordStatusText(record.status)} />
-                            </Td>
-                            <Td>
-                              <button
-                                onClick={() => void copyText(record.value, `${record.type} record`)}
-                                disabled={!record.value}
-                                className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
-                                aria-label={`Copy ${record.name} record`}
-                              >
-                                <Copy className="h-3.5 w-3.5" />
-                              </button>
+                              <div>
+                                <StatusBadge status={recordStatusText(record.status)} />
+                                {record.last_checked ? (
+                                  <p className="mt-1 whitespace-nowrap text-[10px] text-slate-400">
+                                    {formatDateTime(record.last_checked)}
+                                  </p>
+                                ) : null}
+                              </div>
                             </Td>
                           </Tr>
                         )),
@@ -426,7 +521,7 @@ export default function DomainsPage() {
             </button>
             <div className="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
               After adding, we show the exact DNS records for Stalwart. Click{" "}
-              <span className="font-medium">Verify now</span> once they are published.
+              <span className="font-medium">Check now</span> once they are published.
             </div>
           </CardContent>
         </Card>

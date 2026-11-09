@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Plus, Trash2, RefreshCw } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
-import { Input, Select } from "@/components/ui/input";
+import { Input, Select, Textarea } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, Thead, Tbody, Tr, Th, Td } from "@/components/ui/table";
@@ -14,6 +14,7 @@ import {
   type Organization,
   type Membership,
   type Invitation,
+  type SendingDomain,
 } from "@/lib/auth";
 import { formatDate, initials } from "@/lib/utils";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -24,9 +25,35 @@ const sections = [
   { id: "sending", label: "Sending defaults" },
   { id: "team", label: "Team" },
   { id: "notifications", label: "Notifications" },
+  { id: "sender-profile", label: "Sender profile" },
   { id: "compliance", label: "Compliance" },
   { id: "danger", label: "Danger zone" },
 ];
+
+type SenderIdentity = {
+  id: string;
+  domain: string;
+  local_part: string;
+  email: string;
+  display_name: string;
+  reply_to: string;
+  is_default: boolean;
+  verified: boolean;
+};
+
+type SenderProfile = {
+  company_name: string;
+  street_address: string;
+  city: string;
+  region: string;
+  postal_code: string;
+  country: string;
+  website: string;
+  support_email: string;
+  footer_text: string;
+  social_links: Array<{ label: string; url: string }>;
+  complete: boolean;
+};
 
 export default function SettingsPage() {
   const user = useAuthStore((state) => state.user);
@@ -44,6 +71,29 @@ export default function SettingsPage() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("viewer");
   const [inviting, setInviting] = useState(false);
+  const [senderIdentities, setSenderIdentities] = useState<SenderIdentity[]>([]);
+  const [verifiedDomains, setVerifiedDomains] = useState<SendingDomain[]>([]);
+  const [identityID, setIdentityID] = useState("");
+  const [identityDomain, setIdentityDomain] = useState("");
+  const [identityLocalPart, setIdentityLocalPart] = useState("");
+  const [identityName, setIdentityName] = useState("");
+  const [identityReplyTo, setIdentityReplyTo] = useState("");
+  const [identitySaving, setIdentitySaving] = useState(false);
+  const [senderProfile, setSenderProfile] = useState<SenderProfile>({
+    company_name: "",
+    street_address: "",
+    city: "",
+    region: "",
+    postal_code: "",
+    country: "",
+    website: "",
+    support_email: "",
+    footer_text: "",
+    social_links: [],
+    complete: false,
+  });
+  const [socialLinksText, setSocialLinksText] = useState("[]");
+  const [profileSaving, setProfileSaving] = useState(false);
 
   useEffect(() => {
     void loadData();
@@ -63,14 +113,21 @@ export default function SettingsPage() {
             if (!first) throw new Error("No workspace found for this account.");
             return { id: first.organization_id, name: first.name, slug: first.slug } as Organization;
           });
-      const [orgData, membersRes, invitationsRes] = await Promise.all([
+      const [orgData, membersRes, invitationsRes, identitiesRes, profileRes, domainsRes] = await Promise.all([
         orgPromise,
         apiFetch<{ data: Membership[] | null }>("/members"),
         apiFetch<{ data: Invitation[] | null }>("/invitations"),
+        apiFetch<{ data: SenderIdentity[] | null }>("/sender-identities"),
+        apiFetch<SenderProfile>("/sender-profile"),
+        apiFetch<{ data: SendingDomain[] | null }>("/domains"),
       ]);
       setOrg(orgData);
       setMembers(membersRes.data ?? []);
       setInvitations(invitationsRes.data ?? []);
+      setSenderIdentities(identitiesRes.data ?? []);
+      setVerifiedDomains((domainsRes.data ?? []).filter((domain) => domain.status === "verified" && !domain.owner_conflict));
+      setSenderProfile(profileRes);
+      setSocialLinksText(JSON.stringify(profileRes.social_links ?? [], null, 2));
       setOrgName(orgData.name);
       setOrgSlug(orgData.slug);
     } catch (err: any) {
@@ -124,6 +181,103 @@ export default function SettingsPage() {
       toast({ title: "Failed to save", description: err?.message ?? "Unknown error", variant: "destructive" });
     } finally {
       setSaving(false);
+    }
+  }
+
+  function resetIdentityForm() {
+    setIdentityID("");
+    setIdentityDomain("");
+    setIdentityLocalPart("");
+    setIdentityName("");
+    setIdentityReplyTo("");
+  }
+
+  function editIdentity(identity: SenderIdentity) {
+    setIdentityID(identity.id);
+    setIdentityDomain(identity.domain);
+    setIdentityLocalPart(identity.local_part);
+    setIdentityName(identity.display_name);
+    setIdentityReplyTo(identity.reply_to);
+  }
+
+  async function handleSaveIdentity() {
+    if (identitySaving) return;
+    setIdentitySaving(true);
+    try {
+      await apiFetch(identityID ? `/sender-identities/${identityID}` : "/sender-identities", {
+        method: identityID ? "PATCH" : "POST",
+        body: JSON.stringify({
+          domain: identityDomain,
+          local_part: identityLocalPart,
+          display_name: identityName,
+          reply_to: identityReplyTo,
+          is_default: senderIdentities.length === 0,
+        }),
+      });
+      resetIdentityForm();
+      await loadData(false);
+      toast({ title: "Sender identity saved", description: "The address is linked to its verified sending domain." });
+    } catch (err) {
+      toast({
+        title: "Could not save sender identity",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setIdentitySaving(false);
+    }
+  }
+
+  async function handleDefaultIdentity(identity: SenderIdentity) {
+    try {
+      await apiFetch(`/sender-identities/${identity.id}/default`, { method: "POST" });
+      await loadData(false);
+      toast({ title: "Default sender updated", description: `${identity.email} is now the default sender.` });
+    } catch (err) {
+      toast({
+        title: "Could not set default sender",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  }
+
+  async function handleDeleteIdentity(identity: SenderIdentity) {
+    if (!window.confirm(`Delete sender identity ${identity.email}? Campaigns using it will no longer be sendable.`)) return;
+    try {
+      await apiFetch(`/sender-identities/${identity.id}`, { method: "DELETE" });
+      await loadData(false);
+      if (identityID === identity.id) resetIdentityForm();
+      toast({ title: "Sender identity deleted" });
+    } catch (err) {
+      toast({
+        title: "Could not delete sender identity",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  }
+
+  async function handleSaveSenderProfile() {
+    if (profileSaving) return;
+    setProfileSaving(true);
+    try {
+      const socialLinks = JSON.parse(socialLinksText) as SenderProfile["social_links"];
+      const saved = await apiFetch<SenderProfile>("/sender-profile", {
+        method: "PUT",
+        body: JSON.stringify({ ...senderProfile, social_links: socialLinks }),
+      });
+      setSenderProfile(saved);
+      setSocialLinksText(JSON.stringify(saved.social_links ?? [], null, 2));
+      toast({ title: "Sender profile saved", description: saved.complete ? "Campaigns can now be sent." : "Complete all required fields before sending." });
+    } catch (err) {
+      toast({
+        title: "Could not save sender profile",
+        description: err instanceof Error ? err.message : "Social links must be valid JSON.",
+        variant: "destructive",
+      });
+    } finally {
+      setProfileSaving(false);
     }
   }
 
@@ -205,43 +359,83 @@ export default function SettingsPage() {
 
           <Card id="sending">
             <CardHeader>
-              <CardTitle>Sending defaults</CardTitle>
-              <CardDescription>Used when you create a new campaign.</CardDescription>
+              <CardTitle>Sender identities</CardTitle>
+              <CardDescription>
+                Create addresses on verified domains. Campaigns can only send from an identity owned by this workspace.
+              </CardDescription>
             </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-700">Default sender name</label>
-                <Input defaultValue={org?.name ?? ""} disabled />
-                <p className="mt-1 text-xs text-slate-500">Set in Workspace settings.</p>
-              </div>
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-700">Default sender email</label>
-                <Select defaultValue="none" disabled>
-                  <option value="none">No verified domain — add one in Domains</option>
-                </Select>
-              </div>
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-700">Reply-to</label>
-                <Input placeholder="reply@yourdomain.com" disabled />
-              </div>
-              <div className="col-span-2 space-y-2 rounded-lg bg-slate-50 p-4 text-sm">
-                <label className="flex items-center gap-2 text-slate-700">
-                  <input type="checkbox" defaultChecked disabled />
-                  Enable open tracking by default
+            <CardContent className="space-y-5">
+              {senderIdentities.length ? (
+                <Table>
+                  <Thead>
+                    <Tr>
+                      <Th>From</Th>
+                      <Th>Domain</Th>
+                      <Th>Status</Th>
+                      <Th>Default</Th>
+                      <Th />
+                    </Tr>
+                  </Thead>
+                  <Tbody>
+                    {senderIdentities.map((identity) => (
+                      <Tr key={identity.id}>
+                        <Td>
+                          <span className="block font-medium text-slate-900">{identity.display_name}</span>
+                          <span className="text-xs text-slate-500">{identity.email}</span>
+                        </Td>
+                        <Td className="text-sm text-slate-600">{identity.domain}</Td>
+                        <Td><Badge variant={identity.verified ? "success" : "warning"}>{identity.verified ? "Verified" : "Unavailable"}</Badge></Td>
+                        <Td>{identity.is_default ? <Badge variant="outline">Default</Badge> : "—"}</Td>
+                        <Td>
+                          <div className="flex items-center gap-3">
+                            {!identity.is_default ? (
+                              <button type="button" onClick={() => void handleDefaultIdentity(identity)} className="text-xs font-medium text-indigo-600 hover:text-indigo-500">
+                                Set default
+                              </button>
+                            ) : null}
+                            <button type="button" onClick={() => editIdentity(identity)} className="text-xs font-medium text-slate-600 hover:text-slate-900">
+                              Edit
+                            </button>
+                            <button type="button" onClick={() => void handleDeleteIdentity(identity)} className="text-xs font-medium text-rose-600 hover:text-rose-500">
+                              Delete
+                            </button>
+                          </div>
+                        </Td>
+                      </Tr>
+                    ))}
+                  </Tbody>
+                </Table>
+              ) : (
+                <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+                  Add and verify a sending domain before creating a sender identity.
+                </p>
+              )}
+              <div className="grid gap-3 rounded-lg border border-slate-200 p-4 sm:grid-cols-2">
+                <label className="text-sm font-medium text-slate-700">
+                  Verified sending domain
+                  <Select className="mt-1" value={identityDomain} onChange={(event) => setIdentityDomain(event.target.value)}>
+                    <option value="">Choose a verified domain</option>
+                    {verifiedDomains.map((domain) => <option key={domain.id} value={domain.domain}>{domain.domain}</option>)}
+                  </Select>
                 </label>
-                <label className="flex items-center gap-2 text-slate-700">
-                  <input type="checkbox" defaultChecked disabled />
-                  Enable click tracking by default
+                <label className="text-sm font-medium text-slate-700">
+                  Local part
+                  <Input className="mt-1" value={identityLocalPart} onChange={(event) => setIdentityLocalPart(event.target.value.toLowerCase())} placeholder="newsletter" maxLength={64} />
                 </label>
-                <label className="flex items-center gap-2 text-slate-700">
-                  <input type="checkbox" defaultChecked disabled />
-                  Include unsubscribe footer
+                <label className="text-sm font-medium text-slate-700">
+                  Display name
+                  <Input className="mt-1" value={identityName} onChange={(event) => setIdentityName(event.target.value)} placeholder="Company Newsletter" />
                 </label>
-              </div>
-              <div className="col-span-2">
-                <Button variant="outline" disabled>
-                  Save defaults
-                </Button>
+                <label className="text-sm font-medium text-slate-700">
+                  Reply-to
+                  <Input className="mt-1" value={identityReplyTo} onChange={(event) => setIdentityReplyTo(event.target.value)} placeholder="support@example.com" type="email" />
+                </label>
+                <div className="flex gap-2 sm:col-span-2">
+                  <Button onClick={() => void handleSaveIdentity()} disabled={identitySaving || !identityDomain || !identityLocalPart.trim() || !identityName.trim()}>
+                    {identitySaving ? "Saving..." : identityID ? "Update sender" : "Add sender"}
+                  </Button>
+                  {identityID ? <Button variant="outline" onClick={resetIdentityForm}>Cancel edit</Button> : null}
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -358,6 +552,67 @@ export default function SettingsPage() {
                 </label>
               ))}
               <Button>Save notifications</Button>
+            </CardContent>
+          </Card>
+
+          <Card id="sender-profile">
+            <CardHeader>
+              <CardTitle>Sender profile</CardTitle>
+              <CardDescription>
+                This information is required for campaign sending and is included in every compliance footer.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className={`rounded-lg p-3 text-sm ${senderProfile.complete ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-900"}`}>
+                {senderProfile.complete
+                  ? "Profile complete. Campaign sends are enabled."
+                  : "Complete the company, postal address, website, and support email to enable campaign sends."}
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="text-sm font-medium text-slate-700">
+                  Company name
+                  <Input required className="mt-1" value={senderProfile.company_name} onChange={(event) => setSenderProfile({ ...senderProfile, company_name: event.target.value })} />
+                </label>
+                <label className="text-sm font-medium text-slate-700">
+                  Support email
+                  <Input required className="mt-1" type="email" value={senderProfile.support_email} onChange={(event) => setSenderProfile({ ...senderProfile, support_email: event.target.value })} />
+                </label>
+                <label className="text-sm font-medium text-slate-700 sm:col-span-2">
+                  Street address
+                  <Input required className="mt-1" value={senderProfile.street_address} onChange={(event) => setSenderProfile({ ...senderProfile, street_address: event.target.value })} />
+                </label>
+                <label className="text-sm font-medium text-slate-700">
+                  City
+                  <Input required className="mt-1" value={senderProfile.city} onChange={(event) => setSenderProfile({ ...senderProfile, city: event.target.value })} />
+                </label>
+                <label className="text-sm font-medium text-slate-700">
+                  Region / state
+                  <Input className="mt-1" value={senderProfile.region} onChange={(event) => setSenderProfile({ ...senderProfile, region: event.target.value })} />
+                </label>
+                <label className="text-sm font-medium text-slate-700">
+                  Postal code
+                  <Input required className="mt-1" value={senderProfile.postal_code} onChange={(event) => setSenderProfile({ ...senderProfile, postal_code: event.target.value })} />
+                </label>
+                <label className="text-sm font-medium text-slate-700">
+                  Country
+                  <Input required className="mt-1" value={senderProfile.country} onChange={(event) => setSenderProfile({ ...senderProfile, country: event.target.value })} />
+                </label>
+                <label className="text-sm font-medium text-slate-700 sm:col-span-2">
+                  Website
+                  <Input required className="mt-1" type="url" placeholder="https://example.com" value={senderProfile.website} onChange={(event) => setSenderProfile({ ...senderProfile, website: event.target.value })} />
+                </label>
+                <label className="text-sm font-medium text-slate-700 sm:col-span-2">
+                  Optional footer text
+                  <Textarea className="mt-1" rows={3} value={senderProfile.footer_text} onChange={(event) => setSenderProfile({ ...senderProfile, footer_text: event.target.value })} />
+                </label>
+                <label className="text-sm font-medium text-slate-700 sm:col-span-2">
+                  Social links (JSON array of {"{ label, url }"} objects)
+                  <Textarea className="mt-1 font-mono text-xs" rows={4} value={socialLinksText} onChange={(event) => setSocialLinksText(event.target.value)} />
+                </label>
+              </div>
+              <Button onClick={() => void handleSaveSenderProfile()} disabled={profileSaving}>
+                {profileSaving ? "Saving profile..." : "Save sender profile"}
+              </Button>
             </CardContent>
           </Card>
 

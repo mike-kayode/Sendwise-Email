@@ -379,7 +379,7 @@ func TestInvitationDeliveryFailureRevokesInvitation(t *testing.T) {
 
 func TestSlugify(t *testing.T) {
 	cases := map[string]string{
-		"Acme Studio":      "acme-studio",
+		"Workspace Studio": "workspace-studio",
 		"  Hello   World ": "hello-world",
 		"Weird!!Chars&&":   "weird-chars",
 		"":                 "workspace",
@@ -397,15 +397,15 @@ func TestProvisionUserOrganizationIsIdempotent(t *testing.T) {
 	store := newFakeStore()
 	ctx := context.Background()
 
-	org, created, err := store.ProvisionUserOrganization(ctx, fakeUUID(1), fakeUUID(2), "Acme Studio", fakeUUID(3))
+	org, created, err := store.ProvisionUserOrganization(ctx, fakeUUID(1), fakeUUID(2), "Workspace Studio", fakeUUID(3))
 	if err != nil || !created {
 		t.Fatalf("first provision: created=%v err=%v", created, err)
 	}
-	if org.Slug != "acme-studio" {
+	if org.Slug != "workspace-studio" {
 		t.Fatalf("slug = %q", org.Slug)
 	}
 
-	org2, created2, err := store.ProvisionUserOrganization(ctx, fakeUUID(1), fakeUUID(2), "Acme Studio", fakeUUID(3))
+	org2, created2, err := store.ProvisionUserOrganization(ctx, fakeUUID(1), fakeUUID(2), "Workspace Studio", fakeUUID(3))
 	if err != nil {
 		t.Fatalf("replay error: %v", err)
 	}

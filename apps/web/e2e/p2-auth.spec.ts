@@ -55,7 +55,7 @@ test("P2 account email, password reset, and logout journey", async ({ page, requ
   await page.goto("/register");
   await page.getByPlaceholder("Your name").fill("P2 Integration User");
   await page.getByPlaceholder("you@example.com").fill(email);
-  await page.getByPlaceholder("Acme Studio").fill(workspaceName);
+  await page.getByPlaceholder("Workspace name").fill(workspaceName);
   await page.getByPlaceholder("••••••••••").fill(initialPassword);
   await page.getByRole("button", { name: "Create workspace" }).click();
   await page.waitForURL("**/auth/verify?email=**");

@@ -141,18 +141,21 @@ func TestStalwartRegistrationDeliversAndStoresVerificationEmail(t *testing.T) {
 		Domain: workspaceDomain, Selector: workspaceSelector, PublicKey: publicKey, PrivateKey: privateKey,
 	}
 	workspaceSubject := fmt.Sprintf("Workspace DKIM single-signer test %d", time.Now().UnixNano())
-	workspaceMessage := []byte(fmt.Sprintf(
-		"From: Campaign Sender <sender@%s>\r\nTo: %s\r\nSubject: %s\r\n"+
-			"Date: %s\r\nMessage-ID: <workspace-dkim-test@%s>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"+
-			"Authenticated submission from a hosted workspace domain.\r\n",
-		workspaceDomain, sender, workspaceSubject, time.Now().UTC().Format(time.RFC1123Z), workspaceDomain,
-	))
-	workspaceMessage, err = delivery.SignMessage(workspaceMessage, workspaceDKIM)
-	if err != nil {
-		t.Fatalf("sign workspace message in the app: %v", err)
+	smtpPool := delivery.NewSMTPPool(smtpAddress, smtpHost, sender, submissionPassword, true, 2)
+	_, sendErr := smtpPool.Send(ctx, delivery.Message{
+		ID:           "workspace-dkim-test@" + workspaceDomain,
+		From:         "Campaign Sender <sender@" + workspaceDomain + ">",
+		EnvelopeFrom: "sender@" + workspaceDomain,
+		To:           sender, Subject: workspaceSubject,
+		Text: "Authenticated submission from a hosted workspace domain.",
+		DKIM: workspaceDKIM,
+	})
+	closeErr := smtpPool.Close()
+	if sendErr != nil {
+		t.Fatalf("submit app-signed message from a hosted workspace domain: %v", sendErr)
 	}
-	if err := sendRawWithSMTP(ctx, mailer, "sender@"+workspaceDomain, sender, workspaceMessage); err != nil {
-		t.Fatalf("submit app-signed message from a hosted workspace domain: %v", err)
+	if closeErr != nil {
+		t.Fatalf("close authenticated SMTP pool: %v", closeErr)
 	}
 	workspaceTXT := "v=DKIM1; k=rsa; p=" + publicKey
 	deadline = time.Now().Add(15 * time.Second)
@@ -670,35 +673,6 @@ func verifySingleDKIMSignature(rawMessage []byte, expectedName, txtRecord string
 		return fmt.Errorf("DKIM verification failed: %w", verifications[0].Err)
 	}
 	return nil
-}
-
-func sendRawWithSMTP(ctx context.Context, mailer *smtpMailer, envelopeFrom, recipient string, rawMessage []byte) error {
-	client, closeClient, err := mailer.connect(ctx)
-	if err != nil {
-		return err
-	}
-	defer closeClient()
-	if err := mailer.authenticate(client); err != nil {
-		return err
-	}
-	if err := client.Mail(envelopeFrom); err != nil {
-		return smtpCommandFailure("MAIL FROM", err)
-	}
-	if err := client.Rcpt(recipient); err != nil {
-		return smtpCommandFailure("RCPT TO", err)
-	}
-	writer, err := client.Data()
-	if err != nil {
-		return smtpCommandFailure("DATA", err)
-	}
-	if _, err := writer.Write(rawMessage); err != nil {
-		_ = writer.Close()
-		return fmt.Errorf("write SMTP message: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		return smtpCommandFailure("DATA", err)
-	}
-	return client.Quit()
 }
 
 func envOr(key, fallback string) string {

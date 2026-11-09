@@ -64,6 +64,8 @@ required=(
   SMTP_HOST
   SMTP_TLS_MODE
   SMTP_FROM
+  SMTP_POOL_SIZE
+  BOUNCE_DOMAIN
 )
 missing=0
 for v in "${required[@]}"; do

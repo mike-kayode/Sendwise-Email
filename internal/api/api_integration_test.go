@@ -21,6 +21,7 @@ import (
 	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/config"
 	"github.com/khayode/email-platform/internal/db"
+	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/kit"
 	"github.com/khayode/email-platform/internal/observability"
 	"github.com/khayode/email-platform/services/gateway"
@@ -65,6 +66,10 @@ func TestMain(m *testing.M) {
 			AccessTokenTTL:        15 * time.Minute,
 			RequireVerifiedDomain: false,
 			SMTPFrom:              "test@example.com",
+			BounceDomain:          "bounces.example.test",
+			WebhookSecret:         strings.Repeat("w", 32),
+			MaxBounceRate:         0.02,
+			MaxComplaintRate:      0.0005,
 			DKIMEncryptionKey:     "integration-dkim-encryption-key-0123456789",
 		}
 		integrationTokens = auth.NewManager(integrationCfg.JWTSecret, integrationCfg.JWTIssuer, integrationCfg.AccessTokenTTL)
@@ -94,6 +99,39 @@ func integrationToken(t *testing.T, orgID, role string) string {
 		t.Fatalf("issue token: %v", err)
 	}
 	return token
+}
+
+func seedVerifiedSender(t *testing.T, organizationID, localPart string) (string, string) {
+	t.Helper()
+	ctx := context.Background()
+	domain := "sender-" + strings.ReplaceAll(uuid.NewString(), "-", "") + ".example.test"
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO sending_domains (
+			organization_id, domain, status, dkim_selector, spf_status,
+			dkim_status, dmarc_status, verification_status, stalwart_authenticated
+		) VALUES ($1, $2, 'verified', 'mail', 'verified', 'verified', 'missing', 'verified', true)
+	`, organizationID, domain); err != nil {
+		t.Fatalf("seed verified sending domain: %v", err)
+	}
+	var identityID string
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO sender_identities (
+			organization_id, domain, local_part, display_name, reply_to, is_default
+		) VALUES ($1, $2, $3, 'Integration Sender', 'support@example.test', true)
+		RETURNING id
+	`, organizationID, domain, localPart).Scan(&identityID); err != nil {
+		t.Fatalf("seed sender identity: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO sender_profiles (
+			organization_id, company_name, street_address, city, region, postal_code,
+			country, website, support_email, social_links
+		) VALUES ($1, 'Integration Company', '1 Test Street', 'Test City', 'Test Region',
+		          '10000', 'Test Country', 'https://example.test', 'support@example.test', '[]'::jsonb)
+	`, organizationID); err != nil {
+		t.Fatalf("seed sender profile: %v", err)
+	}
+	return identityID, localPart + "@" + domain
 }
 
 func TestLegacyActorSelfHealsThroughGateway(t *testing.T) {
@@ -385,16 +423,16 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 		t, s, "campaigns-owner@example.com", "campaigns-password", "Campaigns Owner", "Campaigns Org",
 	)
 	token := registered.AccessToken
+	senderIdentityID, _ := seedVerifiedSender(t, registered.Organization.ID, "newsletter")
 
-	createBody := `{
+	createBody := fmt.Sprintf(`{
 		"name":"Integration Campaign",
 		"subject":"Hello from integration test",
-		"sender_name":"Test Sender",
-		"sender_email":"sender@example.com",
+		"sender_identity_id":"%s",
 		"track_opens":true,
 		"track_clicks":true,
 		"content":{"version":1,"blocks":[{"type":"heading","content":"Hello {{first_name}}"},{"type":"paragraph","content":"Welcome!"}]}
-	}`
+	}`, senderIdentityID)
 	w := doRequest(t, s, "POST", "/api/v1/campaigns", createBody, token)
 	assertStatus(t, w, http.StatusCreated)
 	var created struct {
@@ -422,14 +460,17 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &validation); err != nil {
 		t.Fatalf("decode campaign validation: %v", err)
 	}
-	var postalAddressRequired bool
+	var senderReady, profileReady bool
 	for _, check := range validation.Checks {
-		if check.Name == "postal_address" && check.Status == "error" {
-			postalAddressRequired = true
+		if check.Name == "sender" && check.Status == "pass" {
+			senderReady = true
+		}
+		if check.Name == "sender_profile" && check.Status == "pass" {
+			profileReady = true
 		}
 	}
-	if !postalAddressRequired {
-		t.Fatal("campaign validation did not require a sender postal address")
+	if !senderReady || !profileReady {
+		t.Fatalf("campaign validation did not accept the verified sender identity and profile: %+v", validation.Checks)
 	}
 
 	scheduleBody, err := json.Marshal(scheduleInput{ScheduledAt: time.Now().Add(time.Hour)})
@@ -437,17 +478,102 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 		t.Fatalf("encode campaign schedule: %v", err)
 	}
 	w = doRequest(t, s, "POST", "/api/v1/campaigns/"+campaignID+"/schedule", string(scheduleBody), token)
-	assertStatus(t, w, http.StatusBadRequest)
+	assertStatus(t, w, http.StatusOK)
 
 	updateBody := `{"name":"Updated Integration Campaign","sender_postal_address":"1 Integration Way"}`
 	w = doRequest(t, s, "PATCH", "/api/v1/campaigns/"+campaignID, updateBody, token)
 	assertStatus(t, w, http.StatusOK)
 
 	w = doRequest(t, s, "POST", "/api/v1/campaigns/"+campaignID+"/schedule", string(scheduleBody), token)
-	assertStatus(t, w, http.StatusOK, http.StatusAccepted)
+	assertStatus(t, w, http.StatusConflict)
 
 	w = doRequest(t, s, "POST", "/api/v1/campaigns/"+campaignID+"/cancel", "", token)
 	assertStatus(t, w, http.StatusOK)
+}
+
+func TestSenderIdentityCRUDAndCampaignOwnershipIntegration(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	s := newIntegrationServer(t)
+	first := registerIntegrationUser(t, s, "sender-one-"+uuid.NewString()+"@example.test", "sender-password", "Sender One", "Sender Workspace One")
+	second := registerIntegrationUser(t, s, "sender-two-"+uuid.NewString()+"@example.test", "sender-password", "Sender Two", "Sender Workspace Two")
+	_, defaultEmail := seedVerifiedSender(t, first.Organization.ID, "newsletter")
+	domain := strings.SplitN(defaultEmail, "@", 2)[1]
+
+	createIdentityBody := fmt.Sprintf(`{
+		"domain":%q,"local_part":"sales","display_name":"Sales Team",
+		"reply_to":"sales-support@example.test"
+	}`, domain)
+	w := doRequest(t, s, http.MethodPost, "/api/v1/sender-identities", createIdentityBody, first.AccessToken)
+	assertStatus(t, w, http.StatusCreated)
+	var identity senderIdentity
+	if err := json.Unmarshal(w.Body.Bytes(), &identity); err != nil {
+		t.Fatalf("decode new sender identity: %v", err)
+	}
+	if identity.Email != "sales@"+domain || identity.IsDefault || !identity.Verified {
+		t.Fatalf("unexpected second sender identity: %+v", identity)
+	}
+
+	w = doRequest(t, s, http.MethodPost, "/api/v1/sender-identities/"+identity.ID+"/default", "", first.AccessToken)
+	assertStatus(t, w, http.StatusOK)
+	w = doRequest(t, s, http.MethodGet, "/api/v1/sender-identities", "", first.AccessToken)
+	assertStatus(t, w, http.StatusOK)
+	var identities struct {
+		Data []senderIdentity `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &identities); err != nil {
+		t.Fatalf("decode sender identity list: %v", err)
+	}
+	defaults := 0
+	for _, item := range identities.Data {
+		if item.IsDefault {
+			defaults++
+			if item.ID != identity.ID {
+				t.Fatalf("unexpected default sender identity: %+v", item)
+			}
+		}
+	}
+	if defaults != 1 {
+		t.Fatalf("default sender count = %d, want 1", defaults)
+	}
+
+	updateIdentityBody := fmt.Sprintf(`{
+		"domain":%q,"local_part":"sales","display_name":"Sales and Support",
+		"reply_to":"sales-support@example.test","is_default":true
+	}`, domain)
+	w = doRequest(t, s, http.MethodPatch, "/api/v1/sender-identities/"+identity.ID, updateIdentityBody, first.AccessToken)
+	assertStatus(t, w, http.StatusOK)
+
+	foreignIdentityCampaign := fmt.Sprintf(`{
+		"name":"Foreign identity campaign","subject":"Foreign From",
+		"sender_identity_id":%q,
+		"content":{"version":1,"blocks":[{"type":"paragraph","content":"Hello"}]}
+	}`, identity.ID)
+	w = doRequest(t, s, http.MethodPost, "/api/v1/campaigns", foreignIdentityCampaign, second.AccessToken)
+	assertStatus(t, w, http.StatusBadRequest)
+	if !strings.Contains(w.Body.String(), "sender_identity_required") {
+		t.Fatalf("foreign identity was not rejected clearly: %s", w.Body.String())
+	}
+
+	spoofedFromCampaign := `{
+		"name":"Foreign domain From campaign","subject":"Foreign From",
+		"sender_email":"attacker@another-workspace.test",
+		"content":{"version":1,"blocks":[{"type":"paragraph","content":"Hello"}]}
+	}`
+	w = doRequest(t, s, http.MethodPost, "/api/v1/campaigns", spoofedFromCampaign, second.AccessToken)
+	assertStatus(t, w, http.StatusCreated)
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode spoofed campaign: %v", err)
+	}
+	w = doRequest(t, s, http.MethodPost, "/api/v1/campaigns/"+created.ID+"/send", "", second.AccessToken)
+	assertStatus(t, w, http.StatusBadRequest)
+	if !strings.Contains(w.Body.String(), "sender_identity_required") {
+		t.Fatalf("foreign From address was not rejected at send time: %s", w.Body.String())
+	}
 }
 
 func TestConflictedSendingDomainCannotValidateOrSendCampaign(t *testing.T) {
@@ -508,7 +634,7 @@ func TestConflictedSendingDomainCannotValidateOrSendCampaign(t *testing.T) {
 	}
 
 	w = doRequest(t, s, http.MethodPost, "/api/v1/campaigns/"+created.ID+"/send", "", registered.AccessToken)
-	assertStatus(t, w, http.StatusBadRequest)
+	assertStatus(t, w, http.StatusConflict)
 	if !strings.Contains(w.Body.String(), "Domain already owned by another workspace.") {
 		t.Fatalf("send response did not explain domain conflict: %s", w.Body.String())
 	}
@@ -651,6 +777,178 @@ func TestReputationThresholdPausesCampaignIntegration(t *testing.T) {
 	}
 }
 
+func TestStalwartFeedbackHardSoftComplaintIsolationAndIdempotency(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	server := newIntegrationServer(t)
+	server.delivery.publisher = feedbackTestPublisher{}
+	owner := registerIntegrationUser(t, server, "feedback-owner-"+uuid.NewString()+"@example.test", "feedback-password", "Feedback Owner", "Feedback Workspace")
+
+	makeFixture := func(email string) (string, string, string) {
+		t.Helper()
+		var campaignID, contactID, jobID string
+		if err := integrationPool.QueryRow(ctx, `
+			INSERT INTO campaigns (organization_id, created_by, name, status, sender_email)
+			VALUES ($1, $2, 'Feedback integration', 'sending', 'hello@example.test')
+			RETURNING id
+		`, owner.Organization.ID, owner.User.ID).Scan(&campaignID); err != nil {
+			t.Fatalf("create feedback campaign: %v", err)
+		}
+		if err := integrationPool.QueryRow(ctx, `
+			INSERT INTO contacts (organization_id, email, status)
+			VALUES ($1, $2, 'subscribed')
+			RETURNING id
+		`, owner.Organization.ID, email).Scan(&contactID); err != nil {
+			t.Fatalf("create feedback contact: %v", err)
+		}
+		if _, err := integrationPool.Exec(ctx, `
+			INSERT INTO campaign_recipients (organization_id, campaign_id, contact_id, email, status)
+			VALUES ($1, $2, $3, $4, 'submitted')
+		`, owner.Organization.ID, campaignID, contactID, email); err != nil {
+			t.Fatalf("create feedback recipient: %v", err)
+		}
+		if err := integrationPool.QueryRow(ctx, `
+			INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status)
+			VALUES ($1, $2, $3, gen_random_uuid()::text || '@feedback.test', 'submitted')
+			RETURNING id
+		`, owner.Organization.ID, campaignID, contactID).Scan(&jobID); err != nil {
+			t.Fatalf("create feedback delivery job: %v", err)
+		}
+		token, err := delivery.NewVERPToken(integrationCfg.JWTSecret, delivery.VERPClaims{
+			WorkspaceID: owner.Organization.ID,
+			CampaignID:  campaignID,
+			Recipient:   strings.ToLower(email),
+		})
+		if err != nil {
+			t.Fatalf("create feedback token mapping: %v", err)
+		}
+		if _, err := integrationPool.Exec(ctx, `
+			INSERT INTO delivery_verp_tokens
+				(token, organization_id, campaign_id, delivery_job_id, contact_id, email)
+			VALUES ($1, $2, $3, $4, $5, lower($6))
+		`, token, owner.Organization.ID, campaignID, jobID, contactID, email); err != nil {
+			t.Fatalf("persist feedback token mapping: %v", err)
+		}
+		return campaignID, contactID, jobID
+	}
+	postFeedback := func(raw string) int {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/stalwart-feedback", strings.NewReader(raw))
+		request.Header.Set("X-Webhook-Signature", computeWebhookSignature(integrationCfg.WebhookSecret, time.Now().Unix(), raw))
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		return response.Code
+	}
+	makeMessage := func(email, campaignID, status, action, diagnostic string) string {
+		t.Helper()
+		returnPath, err := delivery.NewVERPReturnPath(integrationCfg.JWTSecret, integrationCfg.BounceDomain, delivery.VERPClaims{
+			WorkspaceID: owner.Organization.ID,
+			CampaignID:  campaignID,
+			Recipient:   strings.ToLower(email),
+		})
+		if err != nil {
+			t.Fatalf("create test VERP address: %v", err)
+		}
+		if status == "" {
+			return fmt.Sprintf("From: fbl@example.test\r\nTo: %s\r\nContent-Type: multipart/report; report-type=feedback-report; boundary=x\r\n\r\n--x\r\nContent-Type: message/feedback-report\r\n\r\nFeedback-Type: abuse\r\nOriginal-Rcpt-To: %s\r\n--x--\r\n", returnPath, email)
+		}
+		return fmt.Sprintf("From: mailer-daemon@example.test\r\nTo: %s\r\nContent-Type: multipart/report; report-type=delivery-status; boundary=x\r\n\r\n--x\r\nContent-Type: message/delivery-status\r\n\r\nFinal-Recipient: rfc822; %s\r\nAction: %s\r\nStatus: %s\r\nDiagnostic-Code: smtp; %s\r\n--x--\r\n", returnPath, email, action, status, diagnostic)
+	}
+
+	hardEmail := "Hard-" + uuid.NewString() + "@example.test"
+	hardCampaign, hardContact, hardJob := makeFixture(hardEmail)
+	hardMessage := makeMessage(hardEmail, hardCampaign, "5.1.1", "failed", "550 user unknown")
+	for attempt := 0; attempt < 2; attempt++ {
+		if code := postFeedback(hardMessage); code != http.StatusNoContent {
+			t.Fatalf("hard bounce request status = %d, want 204", code)
+		}
+	}
+	var count int
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT count(*) FROM delivery_feedback_ingest WHERE delivery_job_id = $1
+	`, hardJob).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("hard feedback rows = %d, err=%v; want one idempotent event", count, err)
+	}
+	var reason, status string
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT reason FROM suppressions WHERE organization_id = $1 AND lower(email) = lower($2)
+	`, owner.Organization.ID, hardEmail).Scan(&reason); err != nil || reason != "hard_bounce" {
+		t.Fatalf("hard suppression reason = %q, err=%v", reason, err)
+	}
+	if err := integrationPool.QueryRow(ctx, `SELECT status FROM contacts WHERE id = $1`, hardContact).Scan(&status); err != nil || status != "suppressed" {
+		t.Fatalf("hard-bounced contact status = %q, err=%v", status, err)
+	}
+
+	softEmail := "soft-" + uuid.NewString() + "@example.test"
+	softCampaign, _, softJob := makeFixture(softEmail)
+	for attempt := 1; attempt <= 3; attempt++ {
+		message := makeMessage(softEmail, softCampaign, "4.2.0", "delayed", fmt.Sprintf("450 mailbox busy attempt %d", attempt))
+		if code := postFeedback(message); code != http.StatusNoContent {
+			t.Fatalf("soft bounce %d request status = %d, want 204", attempt, code)
+		}
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT count(*) FROM delivery_feedback_ingest WHERE delivery_job_id = $1 AND event_type = 'soft_bounce'
+	`, softJob).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("soft feedback rows = %d, err=%v; want 3", count, err)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT reason FROM suppressions WHERE organization_id = $1 AND lower(email) = lower($2)
+	`, owner.Organization.ID, softEmail).Scan(&reason); err != nil || reason != "hard_bounce" {
+		t.Fatalf("repeated soft-bounce suppression reason = %q, err=%v", reason, err)
+	}
+
+	complaintEmail := "complaint-" + uuid.NewString() + "@example.test"
+	complaintCampaign, _, complaintJob := makeFixture(complaintEmail)
+	if code := postFeedback(makeMessage(complaintEmail, complaintCampaign, "", "", "")); code != http.StatusNoContent {
+		t.Fatalf("ARF complaint request status = %d, want 204", code)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT status FROM delivery_jobs WHERE id = $1
+	`, complaintJob).Scan(&status); err != nil || status != "complained" {
+		t.Fatalf("complaint job status = %q, err=%v", status, err)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT reason FROM suppressions WHERE organization_id = $1 AND lower(email) = lower($2)
+	`, owner.Organization.ID, complaintEmail).Scan(&reason); err != nil || reason != "complaint" {
+		t.Fatalf("complaint suppression reason = %q, err=%v", reason, err)
+	}
+
+	other := registerIntegrationUser(t, server, "feedback-other-"+uuid.NewString()+"@example.test", "feedback-password", "Other Owner", "Other Workspace")
+	forgedTokenAddress, err := delivery.NewVERPReturnPath(integrationCfg.JWTSecret, integrationCfg.BounceDomain, delivery.VERPClaims{
+		WorkspaceID: other.Organization.ID,
+		CampaignID:  hardCampaign,
+		Recipient:   hardEmail,
+	})
+	if err != nil {
+		t.Fatalf("create cross-workspace VERP token: %v", err)
+	}
+	forgedMessage := strings.Replace(hardMessage, mustExtractToAddress(hardMessage), forgedTokenAddress, 1)
+	if code := postFeedback(forgedMessage); code != http.StatusBadRequest {
+		t.Fatalf("cross-workspace feedback status = %d, want 400 for unknown token", code)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT count(*) FROM delivery_feedback_ingest WHERE organization_id = $1 AND campaign_id = $2
+	`, other.Organization.ID, hardCampaign).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("cross-workspace feedback rows = %d, err=%v", count, err)
+	}
+}
+
+type feedbackTestPublisher struct{}
+
+func (feedbackTestPublisher) Publish(context.Context, string, []byte) error { return nil }
+
+func mustExtractToAddress(message string) string {
+	for _, line := range strings.Split(message, "\r\n") {
+		if strings.HasPrefix(strings.ToLower(line), "to: ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "To: "))
+		}
+	}
+	return ""
+}
+
 func TestDomainsIntegration(t *testing.T) {
 	if integrationPool == nil {
 		t.Skip("no database available")
@@ -760,8 +1058,8 @@ func TestDomainsIntegration(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &nullKeyRecords); err != nil {
 		t.Fatalf("decode NULL-key DNS records: %v", err)
 	}
-	if len(nullKeyRecords.DNSRecords) != 4 || nullKeyRecords.DNSRecords[1].Value != "" {
-		t.Fatalf("expected four records and no DKIM placeholder for NULL key, got %+v", nullKeyRecords.DNSRecords)
+	if len(nullKeyRecords.DNSRecords) != 5 || nullKeyRecords.DNSRecords[1].Value != "" {
+		t.Fatalf("expected five records and no DKIM placeholder for NULL key, got %+v", nullKeyRecords.DNSRecords)
 	}
 
 	createBody := `{"domain":"newsletter-` + suffix + `.example.com"}`
@@ -830,8 +1128,8 @@ func TestDomainsIntegration(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &recordsResp); err != nil {
 		t.Fatalf("decode dns-records response: %v; body: %s", err, w.Body.String())
 	}
-	if len(recordsResp.DNSRecords) != 4 {
-		t.Fatalf("expected 4 dns records, got %d: %s", len(recordsResp.DNSRecords), w.Body.String())
+	if len(recordsResp.DNSRecords) != 5 {
+		t.Fatalf("expected 5 dns records, got %d: %s", len(recordsResp.DNSRecords), w.Body.String())
 	}
 	verificationRecord := recordsResp.DNSRecords[3]
 	if verificationRecord.Type != "TXT" || !strings.HasPrefix(verificationRecord.Name, "_sendwise-verification.") {
@@ -879,11 +1177,11 @@ func TestDomainsIntegration(t *testing.T) {
 	if verifiedResp.Domain.Status != "verified" || verifiedResp.Domain.VerificationStatus != "verified" {
 		t.Fatalf("expected fully verified domain, got %+v", verifiedResp.Domain)
 	}
-	if len(verifiedResp.DNSRecords) != 4 {
-		t.Fatalf("expected four verified DNS records, got %+v", verifiedResp.DNSRecords)
+	if len(verifiedResp.DNSRecords) != 5 {
+		t.Fatalf("expected five verified/advisory DNS records, got %+v", verifiedResp.DNSRecords)
 	}
-	if verifiedResp.DNSRecords[3].Status != "verified" {
-		t.Fatalf("verification TXT record status = %q, want verified", verifiedResp.DNSRecords[3].Status)
+	if verifiedResp.DNSRecords[3].Status != "found" {
+		t.Fatalf("verification TXT record status = %q, want found", verifiedResp.DNSRecords[3].Status)
 	}
 	if len(hostedDomains) != 1 || hostedDomains[0] != created.Domain {
 		t.Fatalf("Stalwart hosted domains = %v, want [%s]", hostedDomains, created.Domain)

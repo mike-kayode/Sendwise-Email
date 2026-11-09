@@ -27,6 +27,40 @@ type Template = {
 const templateCategories = ["general", "newsletter", "lifecycle", "promotion", "events"];
 const accents = ["#4f46e5", "#0891b2", "#b45309", "#059669", "#e11d48", "#7c3aed"];
 const variants = ["digest", "welcome", "launch", "plain"] as const;
+const builtInTemplates = [
+  { name: "Welcome Note", category: "lifecycle", accent: "#4f46e5", variant: "welcome" },
+  { name: "Monthly Digest", category: "newsletter", accent: "#0891b2", variant: "digest" },
+  { name: "Product Launch", category: "promotion", accent: "#7c3aed", variant: "launch" },
+  { name: "Event Invitation", category: "events", accent: "#059669", variant: "welcome" },
+  { name: "Customer Story", category: "newsletter", accent: "#b45309", variant: "digest" },
+  { name: "Product Update", category: "general", accent: "#e11d48", variant: "plain" },
+  { name: "Sale Announcement", category: "promotion", accent: "#db2777", variant: "launch" },
+  { name: "Event Follow-up", category: "events", accent: "#0f766e", variant: "plain" },
+] as const;
+
+function builtInDesign(name: string, accent: string) {
+  return {
+    version: 1,
+    mode: "html",
+    theme: {
+      background: "#f1f5f9",
+      content_background: "#ffffff",
+      text: "#334155",
+      heading: "#0f172a",
+      accent,
+      button: accent,
+      link: accent,
+    },
+    blocks: [
+      { type: "header", content: "", src: "/template-assets/neutral-logo.svg", alt: "Newsletter", align: "center" },
+      { type: "heading", content: name, align: "center" },
+      { type: "paragraph", content: "Share a thoughtful update with your subscribers. Add your own message, brand details, and links here.", align: "left" },
+      { type: "image", content: "", src: "/template-assets/neutral-banner.svg", alt: "Decorative banner" },
+      { type: "button", content: "Read the update", url: "", align: "center", bg_color: accent },
+      { type: "footer", content: "Your sender profile and unsubscribe link are added when this message is sent.", align: "center" },
+    ],
+  };
+}
 
 function TemplateThumb({ accent, variant }: { accent: string; variant: string }) {
   return (
@@ -83,6 +117,7 @@ export default function TemplatesPage() {
   const [newCategory, setNewCategory] = useState("general");
   const [creating, setCreating] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [usingBuiltin, setUsingBuiltin] = useState<string | null>(null);
 
   const templatesQuery = useQuery({
     queryKey: ["templates"],
@@ -134,6 +169,35 @@ export default function TemplatesPage() {
     }
   };
 
+  const handleUseBuiltin = async (builtin: (typeof builtInTemplates)[number]) => {
+    if (usingBuiltin) return;
+    setUsingBuiltin(builtin.name);
+    try {
+      const template = await apiFetch<Template>("/templates", {
+        method: "POST",
+        body: JSON.stringify({ name: builtin.name, category: builtin.category }),
+      });
+      await apiFetch<Template>(`/templates/${template.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          design: builtInDesign(builtin.name, builtin.accent),
+          mode: "html",
+          theme: builtInDesign(builtin.name, builtin.accent).theme,
+        }),
+      });
+      await queryClient.invalidateQueries({ queryKey: ["templates"] });
+      router.push(`/templates/${template.id}`);
+    } catch (error) {
+      toast({
+        title: "Could not use template",
+        description: error instanceof Error ? error.message : "The template could not be copied.",
+        variant: "destructive",
+      });
+    } finally {
+      setUsingBuiltin(null);
+    }
+  };
+
   const handleDeleteTemplate = async (template: Template) => {
     if (!window.confirm(`Delete "${template.name}"? Campaigns already created from it will not be affected.`)) return;
     setDeletingId(template.id);
@@ -181,6 +245,37 @@ export default function TemplatesPage() {
           Unable to load templates: {(templatesQuery.error as Error).message}
         </div>
       ) : null}
+
+      <section className="mb-8">
+        <div className="mb-3">
+          <h2 className="text-base font-semibold text-slate-900">Prebuilt templates</h2>
+          <p className="text-sm text-slate-500">Original, editable starting points. Use a template to create your own workspace copy.</p>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {builtInTemplates.map((template) => (
+            <Card key={template.name}>
+              <CardContent className="p-4">
+                <TemplateThumb accent={template.accent} variant={template.variant} />
+                <div className="mt-3 flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">{template.name}</p>
+                    <p className="text-xs capitalize text-slate-500">{template.category}</p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    disabled={usingBuiltin !== null}
+                    onClick={() => void handleUseBuiltin(template)}
+                  >
+                    {usingBuiltin === template.name ? "Copying…" : "Use template"}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </section>
 
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap gap-1">
