@@ -55,6 +55,7 @@ type ImportResult = {
 
 type ContactField = CSVContactField;
 type ImportList = { id: string; name: string };
+type ImportStatus = "pending" | "subscribed";
 
 export function ImportDialog({
   open,
@@ -92,6 +93,8 @@ export function ImportDialog({
       setMapping({});
       setListID("");
       setCsvHasHeader(true);
+      setImportStatus("pending");
+      setConsentConfirmed(false);
       setJobId(null);
       setImportResult(null);
       setIsImporting(false);
@@ -106,6 +109,8 @@ export function ImportDialog({
   const [mapping, setMapping] = useState<Record<string, ContactField>>({});
   const [csvHasHeader, setCsvHasHeader] = useState(true);
   const [listID, setListID] = useState("");
+  const [importStatus, setImportStatus] = useState<ImportStatus>("pending");
+  const [consentConfirmed, setConsentConfirmed] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [isImporting, setIsImporting] = useState(false);
@@ -115,6 +120,7 @@ export function ImportDialog({
     { value: "email", label: "Email" },
     { value: "first_name", label: "First Name" },
     { value: "last_name", label: "Last Name" },
+    { value: "full_name", label: "Full Name" },
     { value: "phone", label: "Phone" },
     { value: "company", label: "Company" },
     { value: "title", label: "Job Title" },
@@ -189,6 +195,14 @@ export function ImportDialog({
   };
 
   const handleImport = async () => {
+    if (importStatus === "subscribed" && !consentConfirmed) {
+      toast.toast({
+        title: "Consent confirmation required",
+        description: "Confirm that every imported contact opted in before marking them subscribed.",
+        variant: "destructive",
+      });
+      return;
+    }
     if (!isFieldMapped("email")) {
       toast.toast({
         title: "Missing email",
@@ -214,6 +228,8 @@ export function ImportDialog({
     const formData = new FormData();
     formData.append("file", file);
     formData.append("mapping", JSON.stringify(columnMapping));
+    formData.append("subscription_status", importStatus);
+    if (consentConfirmed) formData.append("consent_confirmed", "true");
     if (listID) formData.append("list_id", listID);
 
     setIsImporting(true);
@@ -325,6 +341,8 @@ export function ImportDialog({
     setMapping({});
     setListID("");
     setCsvHasHeader(true);
+    setImportStatus("pending");
+    setConsentConfirmed(false);
     setJobId(null);
     setImportResult(null);
     setIsImporting(false);
@@ -341,6 +359,16 @@ export function ImportDialog({
 
   const stepOrder: ImportStep[] = ["upload", "map", "preview", "importing", "complete"];
 
+  const downloadSampleCSV = () => {
+    const blob = new Blob(["fullname,email\nMike Bright,mikebright283@gmail.com\n"], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "contacts-sample.csv";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
@@ -348,7 +376,7 @@ export function ImportDialog({
           <Upload className="h-4 w-4 mr-2" /> Import Contacts
         </Button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className="max-h-[90vh] w-[calc(100%-2rem)] overflow-y-auto border-slate-200 bg-white p-0 text-slate-900 sm:max-w-2xl">
         <div className="flex flex-col space-y-1 p-4 border-b border-slate-100">
           <DialogTitle>Import Contacts</DialogTitle>
           <DialogDescription>
@@ -356,7 +384,7 @@ export function ImportDialog({
           </DialogDescription>
         </div>
         <div className="p-0">
-          <div className="flex items-center gap-2 mb-4 px-4">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2 px-4">
             {stepOrder.map((stepKey, idx) => {
               const isCompleted = stepOrder.indexOf(step) > stepOrder.indexOf(stepKey);
               const isActive = step === stepKey;
@@ -378,6 +406,9 @@ export function ImportDialog({
                 </div>
               );
             })}
+            <Button type="button" variant="outline" size="sm" onClick={downloadSampleCSV}>
+              Download sample CSV
+            </Button>
           </div>
           {step === "upload" && (
             <div className="p-6">
@@ -391,21 +422,23 @@ export function ImportDialog({
                   Drop CSV file here
                 </p>
                 <p className="text-xs text-slate-500 mb-4">or click to browse</p>
-                <Button variant="outline" onClick={() => document.getElementById("file-input")?.click()}>
+                <label
+                  htmlFor="file-input"
+                  className="inline-flex h-9 cursor-pointer items-center rounded-md border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                >
                   Choose CSV file
-                  <input
-                    id="file-input"
-                    type="file"
-                    accept=".csv"
-                    className="hidden"
-                    onChange={(e) => {
-                      if (e.target.files?.[0]) handleFileSelect(e.target.files[0]);
-                    }}
-                  />
-                </Button>
-                {fileError && (
-                  <div className="mt-4 text-sm text-rose-600">{fileError}</div>
-                )}
+                </label>
+                <input
+                  id="file-input"
+                  type="file"
+                  accept=".csv,text/csv"
+                  className="sr-only"
+                  onChange={(e) => {
+                    if (e.target.files?.[0]) handleFileSelect(e.target.files[0]);
+                    e.target.value = "";
+                  }}
+                />
+                {fileError && <p role="alert" className="mt-4 text-sm text-rose-600">{fileError}</p>}
                 {file && (
                   <div className="mt-4 flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-50 border border-slate-200">
                     <FileText className="h-4 w-4 text-slate-500" />
@@ -482,6 +515,45 @@ export function ImportDialog({
                     Lists could not be loaded: {(listsQuery.error as Error).message}
                   </p>
                 )}
+                <fieldset className="mt-5 space-y-3 rounded-lg border border-slate-200 p-4">
+                  <legend className="px-1 text-sm font-semibold text-slate-900">Subscription status for this import</legend>
+                  <label className="flex cursor-pointer items-start gap-3 text-sm text-slate-700">
+                    <input
+                      type="radio"
+                      name="contact-import-status"
+                      value="pending"
+                      checked={importStatus === "pending"}
+                      onChange={() => {
+                        setImportStatus("pending");
+                        setConsentConfirmed(false);
+                      }}
+                      className="mt-0.5"
+                    />
+                    <span><strong className="font-medium text-slate-900">Pending confirmation</strong><span className="block text-xs text-slate-500">Safest option when consent has not been confirmed.</span></span>
+                  </label>
+                  <label className="flex cursor-pointer items-start gap-3 text-sm text-slate-700">
+                    <input
+                      type="radio"
+                      name="contact-import-status"
+                      value="subscribed"
+                      checked={importStatus === "subscribed"}
+                      onChange={() => setImportStatus("subscribed")}
+                      className="mt-0.5"
+                    />
+                    <span><strong className="font-medium text-slate-900">Mark all imported contacts as subscribed</strong><span className="block text-xs text-slate-500">Use only when every person on this CSV gave permission for marketing email.</span></span>
+                  </label>
+                  {importStatus === "subscribed" ? (
+                    <label className="flex items-start gap-2 rounded-md bg-amber-50 p-3 text-xs text-amber-950">
+                      <input
+                        type="checkbox"
+                        checked={consentConfirmed}
+                        onChange={(event) => setConsentConfirmed(event.target.checked)}
+                        className="mt-0.5"
+                      />
+                      I confirm that every imported contact opted in to receive marketing email. Sendwise will record this confirmation as consent evidence.
+                    </label>
+                  ) : null}
+                </fieldset>
               </div>
             </div>
           )}
@@ -493,7 +565,11 @@ export function ImportDialog({
                   <Button variant="outline" size="sm" onClick={() => setStep("map" as const)}>
                     <ChevronLeft className="h-3 w-3 mr-1" /> Back
                   </Button>
-                  <Button onClick={handleImport} className="bg-indigo-600 hover:bg-indigo-700">
+                  <Button
+                    onClick={handleImport}
+                    className="bg-indigo-600 hover:bg-indigo-700"
+                    disabled={importStatus === "subscribed" && !consentConfirmed}
+                  >
                     Start Import <ChevronRight className="h-3 w-3 ml-1" />
                   </Button>
                 </div>

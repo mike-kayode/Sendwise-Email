@@ -127,6 +127,77 @@ func TestContactImportWorkerPersistsPendingContactsAndResults(t *testing.T) {
 	}
 }
 
+func TestContactImportWorkerRecordsConsentForSubscribedFullNameImport(t *testing.T) {
+	pool := testutil.NewPostgres(t)
+	ctx := context.Background()
+
+	var organizationID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO organizations (name, slug)
+		VALUES ('Subscribed Import', 'subscribed-import')
+		RETURNING id
+	`).Scan(&organizationID); err != nil {
+		t.Fatalf("create integration organization: %v", err)
+	}
+	mapping := `{
+		"email":"email",
+		"full_name":"fullname",
+		"import_status":"subscribed",
+		"consent":{
+			"source":"csv_import",
+			"evidence":{"confirmation":"User confirmed marketing opt-in","purpose":"marketing"}
+		}
+	}`
+	var importID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO contact_imports (organization_id, file_name, source_data, mapping)
+		VALUES ($1, 'contacts.csv', $2, $3::jsonb)
+		RETURNING id
+	`, organizationID, []byte("fullname,email\nMike Bright,mikebright283@gmail.com\n"), mapping).Scan(&importID); err != nil {
+		t.Fatalf("create subscribed import job: %v", err)
+	}
+
+	worker := &Worker{
+		pool:   pool,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	if err := worker.processPendingContactImports(ctx); err != nil {
+		t.Fatalf("process subscribed import: %v", err)
+	}
+
+	var firstName, lastName, status string
+	var contactID string
+	if err := pool.QueryRow(ctx, `
+		SELECT id, first_name, last_name, status
+		FROM contacts
+		WHERE organization_id = $1 AND email = 'mikebright283@gmail.com'
+	`, organizationID).Scan(&contactID, &firstName, &lastName, &status); err != nil {
+		t.Fatalf("load imported contact: %v", err)
+	}
+	if firstName != "Mike" || lastName != "Bright" || status != "subscribed" {
+		t.Fatalf("imported contact = %s %s (%s), want Mike Bright (subscribed)", firstName, lastName, status)
+	}
+
+	var consentCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM consent_events
+		WHERE organization_id = $1 AND contact_id = $2 AND event_type = 'subscribe'
+	`, organizationID, contactID).Scan(&consentCount); err != nil {
+		t.Fatalf("load imported consent event: %v", err)
+	}
+	var metadata string
+	if err := pool.QueryRow(ctx, `
+		SELECT metadata::text FROM consent_events
+		WHERE organization_id = $1 AND contact_id = $2 AND event_type = 'subscribe'
+	`, organizationID, contactID).Scan(&metadata); err != nil {
+		t.Fatalf("load imported consent metadata: %v", err)
+	}
+	if consentCount != 1 || !bytes.Contains([]byte(metadata), []byte("User confirmed marketing opt-in")) {
+		t.Fatalf("consent events = %d, metadata = %s", consentCount, metadata)
+	}
+}
+
 // TestContactImportRecoversJobStuckInProcessing proves that a job whose worker
 // crashed mid-run (status still 'processing', lease expired) is re-claimed and
 // finished instead of being stuck forever.

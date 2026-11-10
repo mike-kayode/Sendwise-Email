@@ -97,6 +97,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/contacts", protect(s.listContacts))
 	mux.Handle("POST /api/v1/contacts", protect(s.createContact, audienceManagers...))
+	mux.Handle("POST /api/v1/contacts/bulk", protect(s.bulkContactAction, audienceManagers...))
 	mux.Handle("POST /api/v1/contacts/import", protect(s.importContacts, audienceManagers...))
 	mux.Handle("GET /api/v1/contact-imports/{id}", protect(s.getContactImport))
 	mux.Handle("GET /api/v1/contacts/export", protect(s.exportContacts))
@@ -180,6 +181,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/domains", protect(s.listDomains))
 	mux.Handle("POST /api/v1/domains", protect(s.createDomain, domainManagers...))
+	mux.Handle("DELETE /api/v1/domains/{id}", protect(s.deleteDomain, domainManagers...))
 	mux.Handle("POST /api/v1/domains/{id}/verify", protect(s.verifyDomain, domainManagers...))
 	mux.Handle("POST /api/v1/domains/{id}/providers/{provider}", protect(s.configureDomainProvider, domainManagers...))
 	mux.Handle("POST /api/v1/domains/{id}/providers/{provider}/verify", protect(s.verifyDomainProvider, domainManagers...))

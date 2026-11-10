@@ -178,6 +178,19 @@ func TestCheckDomainDNSRejectsUnconfiguredSPFInclude(t *testing.T) {
 	}
 }
 
+func TestCheckDomainDNSRequiresConfiguredSPFIncludeInsteadOfMX(t *testing.T) {
+	server := &Server{
+		cfg: config.Config{SPFInclude: "_spf.sendwise.example"},
+		dnsResolver: &fakeDNSResolver{records: map[string][]string{
+			"example.com": {"v=spf1 mx ~all"},
+		}},
+	}
+	spf, _, _, _ := server.checkDomainDNS(context.Background(), "example.com", "mail", "expected-key", "expected-token")
+	if spf != "mismatched" {
+		t.Fatalf("SPF status = %q, want mismatched when configured SPF include is absent", spf)
+	}
+}
+
 type failingDNSResolver struct{}
 
 func (failingDNSResolver) LookupTXT(context.Context, string) ([]string, error) {

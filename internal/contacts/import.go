@@ -27,8 +27,16 @@ type CSVColumnMapping struct {
 	Email        string            `json:"email"`
 	FirstName    string            `json:"first_name,omitempty"`
 	LastName     string            `json:"last_name,omitempty"`
+	FullName     string            `json:"full_name,omitempty"`
 	CustomFields map[string]string `json:"custom_fields,omitempty"`
 	HasHeader    *bool             `json:"has_header,omitempty"`
+	ImportStatus string            `json:"import_status,omitempty"`
+	Consent      *CSVImportConsent `json:"consent,omitempty"`
+}
+
+type CSVImportConsent struct {
+	Source   string          `json:"source"`
+	Evidence json.RawMessage `json:"evidence"`
 }
 
 type CSVContactRow struct {
@@ -45,6 +53,7 @@ type CSVReader struct {
 	emailIndex     int
 	firstNameIndex int
 	lastNameIndex  int
+	fullNameIndex  int
 	customIndexes  map[string]int
 }
 
@@ -119,6 +128,13 @@ func NewCSVReader(source io.Reader, mapping *CSVColumnMapping) (*CSVReader, CSVC
 	if err != nil {
 		return nil, CSVColumnMapping{}, err
 	}
+	fullNameIndex, err := optionalColumnIndex(indexes, resolved.FullName, "full_name")
+	if err != nil {
+		return nil, CSVColumnMapping{}, err
+	}
+	if fullNameIndex >= 0 && (firstNameIndex >= 0 || lastNameIndex >= 0) {
+		return nil, CSVColumnMapping{}, fmt.Errorf("map either a full name column or separate first and last name columns")
+	}
 
 	customIndexes := make(map[string]int, len(resolved.CustomFields))
 	fieldKeys := make(map[string]struct{}, len(resolved.CustomFields))
@@ -146,6 +162,9 @@ func NewCSVReader(source io.Reader, mapping *CSVColumnMapping) (*CSVReader, CSVC
 	if lastNameIndex >= 0 {
 		resolved.LastName = header[lastNameIndex]
 	}
+	if fullNameIndex >= 0 {
+		resolved.FullName = header[fullNameIndex]
+	}
 	return &CSVReader{
 		reader:         reader,
 		mapping:        resolved,
@@ -153,6 +172,7 @@ func NewCSVReader(source io.Reader, mapping *CSVColumnMapping) (*CSVReader, CSVC
 		emailIndex:     emailIndex,
 		firstNameIndex: firstNameIndex,
 		lastNameIndex:  lastNameIndex,
+		fullNameIndex:  fullNameIndex,
 		customIndexes:  customIndexes,
 	}, resolved, nil
 }
@@ -185,10 +205,15 @@ func (r *CSVReader) Read() (CSVContactRow, error) {
 	if err != nil {
 		return CSVContactRow{}, fmt.Errorf("encode custom fields: %w", err)
 	}
+	firstName := strings.TrimSpace(cell(record, r.firstNameIndex))
+	lastName := strings.TrimSpace(cell(record, r.lastNameIndex))
+	if r.fullNameIndex >= 0 {
+		firstName, lastName = splitFullName(cell(record, r.fullNameIndex))
+	}
 	return CSVContactRow{
 		Email:        strings.ToLower(address.Address),
-		FirstName:    strings.TrimSpace(cell(record, r.firstNameIndex)),
-		LastName:     strings.TrimSpace(cell(record, r.lastNameIndex)),
+		FirstName:    firstName,
+		LastName:     lastName,
 		CustomFields: customJSON,
 	}, nil
 }
@@ -203,6 +228,8 @@ func defaultCSVMapping(headers []string) CSVColumnMapping {
 			mapping.FirstName = header
 		case "last_name", "lastname", "family_name", "surname":
 			mapping.LastName = header
+		case "fullname", "full_name", "name":
+			mapping.FullName = header
 		case "status", "source":
 			continue
 		default:
@@ -212,6 +239,17 @@ func defaultCSVMapping(headers []string) CSVColumnMapping {
 		}
 	}
 	return mapping
+}
+
+func splitFullName(value string) (string, string) {
+	parts := strings.Fields(value)
+	if len(parts) < 2 {
+		if len(parts) == 1 {
+			return parts[0], ""
+		}
+		return "", ""
+	}
+	return parts[0], strings.Join(parts[1:], " ")
 }
 
 func optionalColumnIndex(indexes map[string]int, column, label string) (int, error) {

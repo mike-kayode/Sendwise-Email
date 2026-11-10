@@ -2,6 +2,7 @@ export type CSVContactField =
   | "email"
   | "first_name"
   | "last_name"
+  | "full_name"
   | "phone"
   | "company"
   | "title"
@@ -14,6 +15,7 @@ export type CSVColumnMapping = {
   email: string;
   first_name?: string;
   last_name?: string;
+  full_name?: string;
   custom_fields?: Record<string, string>;
   has_header: boolean;
 };
@@ -80,6 +82,10 @@ export function autoMapCSVHeader(header: string): CSVContactField {
     case "family_name":
     case "surname":
       return "last_name";
+    case "fullname":
+    case "full_name":
+    case "name":
+      return "full_name";
     case "phone":
     case "phone_number":
     case "mobile":
@@ -140,6 +146,8 @@ export function buildCSVColumnMapping(
       }
       customKeys.add(key);
       customFields[header] = key;
+    } else if (field === "full_name") {
+      columns.set(field, header);
     } else {
       columns.set(field, header);
     }
@@ -153,6 +161,8 @@ export function buildCSVColumnMapping(
   const lastName = columns.get("last_name");
   if (firstName) mapping.first_name = firstName;
   if (lastName) mapping.last_name = lastName;
+  const fullName = columns.get("full_name");
+  if (fullName) mapping.full_name = fullName;
   if (Object.keys(customFields).length > 0) mapping.custom_fields = customFields;
   return mapping;
 }

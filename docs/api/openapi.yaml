@@ -847,6 +847,15 @@ paths:
       summary: Add a sending domain
       responses:
         '201': { description: Sending domain created }
+  /api/v1/domains/{id}:
+    delete:
+      tags: [domains]
+      security: [{ BearerAuth: [] }]
+      summary: Delete a sending domain and its sender identities
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Sending domain and associated sender identities deleted }
+        '404': { description: Sending domain not found in the current workspace }
   /api/v1/domains/{id}/verify:
     post:
       tags: [domains]

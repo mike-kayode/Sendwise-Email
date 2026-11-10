@@ -64,11 +64,16 @@ Each sending domain must be verified before campaigns can send from it (enforced
 `REQUIRE_VERIFIED_DOMAIN=true`). Verification performs actual DNS lookups:
 
 - SPF: `TXT` record at the domain apex starting with `v=spf1`.
+- SPF must authorize the actual Stalwart sending host. Set `SPF_INCLUDE` to the
+  platform SPF domain that authorizes it; the `mx` fallback only works when
+  the sending domain's MX points to Stalwart.
 - DKIM: `TXT` record at `<selector>._domainkey.<domain>` containing `v=DKIM1` and `p=`.
 - DMARC: `TXT` record at `_dmarc.<domain>` starting with `v=DMARC1`.
 
 Statuses: `pending` → `verified` (all required records present) → `misconfigured` (records missing
 or invalid). Verification does not pretend to pass; missing DNS blocks sending.
+Deleting a sending domain removes its Sendwise domain and sender-identity records;
+it does not remove DNS entries from the external DNS provider.
 
 ## Target bounce classification
 | Type | SMTP signal | Action | Status |

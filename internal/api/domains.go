@@ -146,6 +146,56 @@ func (s *Server) createDomain(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusCreated, d)
 }
 
+func (s *Server) deleteDomain(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		s.logger.Error("begin sending domain delete", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not delete the sending domain.")
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var domain string
+	err = tx.QueryRow(ctx, `
+		SELECT domain FROM sending_domains
+		WHERE id = $1 AND organization_id = $2
+		FOR UPDATE
+	`, r.PathValue("id"), s.organizationID(r)).Scan(&domain)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.Error(w, http.StatusNotFound, "domain_not_found", "The sending domain could not be found.")
+		return
+	}
+	if err != nil {
+		s.logger.Error("load sending domain for delete", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not delete the sending domain.")
+		return
+	}
+
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM sender_identities
+		WHERE organization_id = $1 AND lower(domain) = lower($2)
+	`, s.organizationID(r), domain); err != nil {
+		s.logger.Error("delete sender identities for sending domain", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not delete the sending domain.")
+		return
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM sending_domains
+		WHERE id = $1 AND organization_id = $2
+	`, r.PathValue("id"), s.organizationID(r)); err != nil {
+		s.logger.Error("delete sending domain", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not delete the sending domain.")
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		s.logger.Error("commit sending domain delete", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not delete the sending domain.")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) verifyDomain(w http.ResponseWriter, r *http.Request) {
 	s.verifyDomainByProvider(w, r, "")
 }
@@ -486,7 +536,7 @@ func dnsRecordsFor(d sendingDomain, verification string, trackingBase, spfInclud
 			Name:        d.Domain,
 			Value:       spfRecordValue(spfInclude),
 			TTL:         spfRecord.TTL,
-			Purpose:     "SPF authorizes your sending infrastructure to send for this domain.",
+			Purpose:     "SPF must authorize the Stalwart sending host. Set SPF_INCLUDE to its authorized SPF domain; mx only works when this domain's MX points to Stalwart.",
 			Status:      spfRecord.Status,
 			FoundValue:  spfRecord.FoundValue,
 			Resolvers:   spfRecord.Resolvers,
@@ -690,10 +740,12 @@ func spfRecordValue(spfInclude string) string {
 }
 
 func spfHasAuthMechanism(spfRecord, configuredInclude string) bool {
+	configuredInclude = strings.ToLower(strings.TrimSpace(configuredInclude))
 	mechanisms := strings.Fields(spfRecord)
 	for _, mechanism := range mechanisms {
 		mechanism = strings.TrimLeft(strings.ToLower(mechanism), "+-~?")
-		if mechanism == "mx" || configuredInclude != "" && mechanism == "include:"+strings.ToLower(configuredInclude) {
+		if (configuredInclude == "" && mechanism == "mx") ||
+			(configuredInclude != "" && mechanism == "include:"+configuredInclude) {
 			return true
 		}
 	}

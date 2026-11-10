@@ -30,6 +30,8 @@ type contactImportJob struct {
 	LeaseToken    string
 	SourceData    []byte
 	Mapping       []byte
+	ImportStatus  string
+	Consent       *contacts.CSVImportConsent
 	Attempts      int
 	TotalRows     int
 	ProcessedRows int
@@ -135,6 +137,23 @@ func (w *Worker) processContactImport(ctx context.Context, job *contactImportJob
 	var mapping contacts.CSVColumnMapping
 	if err := json.Unmarshal(job.Mapping, &mapping); err != nil {
 		return w.failContactImport(ctx, job, "The saved column mapping is invalid.")
+	}
+	job.ImportStatus = mapping.ImportStatus
+	if job.ImportStatus == "" {
+		job.ImportStatus = "pending"
+	}
+	if job.ImportStatus != "pending" && job.ImportStatus != "subscribed" {
+		return w.failContactImport(ctx, job, "The saved import subscription status is invalid.")
+	}
+	job.Consent = mapping.Consent
+	if job.ImportStatus == "subscribed" {
+		if job.Consent == nil || job.Consent.Source == "" || len(job.Consent.Evidence) == 0 {
+			return w.failContactImport(ctx, job, "Consent evidence is required to import contacts as subscribed.")
+		}
+		var evidence map[string]json.RawMessage
+		if err := json.Unmarshal(job.Consent.Evidence, &evidence); err != nil || len(evidence) == 0 {
+			return w.failContactImport(ctx, job, "Consent evidence for the subscribed import is invalid.")
+		}
 	}
 	totalRows, err := countContactImportRows(job.SourceData, &mapping)
 	if err != nil {
@@ -245,29 +264,69 @@ func (w *Worker) commitContactImportBatch(ctx context.Context, job *contactImpor
 	}
 
 	if len(rows) > 0 {
-		batch := &pgx.Batch{}
-		for _, row := range rows {
-			batch.Queue(`
-				INSERT INTO contacts (organization_id, email, first_name, last_name, status, custom_fields, source)
-				VALUES ($1, $2, $3, $4, 'pending', $5::jsonb, 'csv_import')
-				ON CONFLICT (organization_id, lower(email)) DO NOTHING
-			`, job.Organization, row.Email, optionalImportText(row.FirstName), optionalImportText(row.LastName), row.CustomFields)
-		}
-		results := tx.SendBatch(ctx, batch)
 		inserted := 0
-		for range rows {
-			tag, err := results.Exec()
+		if job.ImportStatus == "subscribed" {
+			metadata, err := json.Marshal(map[string]any{
+				"purpose":  "marketing",
+				"evidence": job.Consent.Evidence,
+			})
 			if err != nil {
-				_ = results.Close()
-				return fmt.Errorf("insert imported contacts: %w", err)
+				return fmt.Errorf("encode imported consent evidence: %w", err)
 			}
-			inserted += int(tag.RowsAffected())
-		}
-		if err := results.Close(); err != nil {
-			return fmt.Errorf("close import batch: %w", err)
+			for _, row := range rows {
+				var contactID string
+				err := tx.QueryRow(ctx, `
+					INSERT INTO contacts (organization_id, email, first_name, last_name, status, custom_fields, source)
+					SELECT $1, $2, $3, $4, 'subscribed', $5::jsonb, 'csv_import'
+					WHERE NOT EXISTS (
+						SELECT 1 FROM suppressions
+						WHERE organization_id = $1 AND lower(email) = lower($2)
+					)
+					ON CONFLICT (organization_id, lower(email)) DO NOTHING
+					RETURNING id
+				`, job.Organization, row.Email, optionalImportText(row.FirstName), optionalImportText(row.LastName), row.CustomFields).Scan(&contactID)
+				if errors.Is(err, pgx.ErrNoRows) {
+					job.Skipped++
+					continue
+				}
+				if err != nil {
+					return fmt.Errorf("insert subscribed contact: %w", err)
+				}
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO consent_events
+						(organization_id, contact_id, event_type, source, metadata)
+					VALUES ($1, $2, 'subscribe', $3, $4::jsonb)
+				`, job.Organization, contactID, job.Consent.Source, metadata); err != nil {
+					return fmt.Errorf("record imported subscribe consent: %w", err)
+				}
+				inserted++
+			}
+		} else {
+			batch := &pgx.Batch{}
+			for _, row := range rows {
+				batch.Queue(`
+					INSERT INTO contacts (organization_id, email, first_name, last_name, status, custom_fields, source)
+					VALUES ($1, $2, $3, $4, 'pending', $5::jsonb, 'csv_import')
+					ON CONFLICT (organization_id, lower(email)) DO NOTHING
+				`, job.Organization, row.Email, optionalImportText(row.FirstName), optionalImportText(row.LastName), row.CustomFields)
+			}
+			results := tx.SendBatch(ctx, batch)
+			for range rows {
+				tag, err := results.Exec()
+				if err != nil {
+					_ = results.Close()
+					return fmt.Errorf("insert imported contacts: %w", err)
+				}
+				inserted += int(tag.RowsAffected())
+			}
+			if err := results.Close(); err != nil {
+				return fmt.Errorf("close import batch: %w", err)
+			}
 		}
 		job.Imported += inserted
-		job.Skipped += len(rows) - inserted
+		if job.ImportStatus != "subscribed" {
+			job.Skipped += len(rows) - inserted
+		}
 
 		if job.ListID != "" {
 			emails := make([]string, len(rows))

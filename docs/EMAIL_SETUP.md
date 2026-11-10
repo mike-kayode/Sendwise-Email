@@ -99,7 +99,9 @@ at production. The management API is published only on `127.0.0.1:8081`.
    Set `SPF_INCLUDE` to the platform domain whose published SPF record
    authorizes Stalwart. Leave it empty only when every campaign sending
    domain's own MX points to the Stalwart host; otherwise the generated `mx`
-   mechanism will not authorize Stalwart's outbound IP.
+   mechanism will not authorize Stalwart's outbound IP. When configured, domain
+   verification requires the matching `include:` mechanism instead of accepting
+   an unrelated `mx` mechanism.
 
 3. Review the non-mutating plan. It reports DNS placeholders without printing
    any configured credential:

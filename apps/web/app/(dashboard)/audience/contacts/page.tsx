@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Download, Plus, Search, Upload, UserCheck, UserMinus, Users } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
@@ -61,6 +61,9 @@ export default function ContactsPage() {
   const [exporting, setExporting] = useState(false);
   const [selectedContactIDs, setSelectedContactIDs] = useState<string[]>([]);
   const [selectedTagID, setSelectedTagID] = useState("");
+  const [bulkActionBusy, setBulkActionBusy] = useState(false);
+  const [subscribeDialogOpen, setSubscribeDialogOpen] = useState(false);
+  const [consentConfirmed, setConsentConfirmed] = useState(false);
   const { toast } = useToast();
 
   const query = useQuery({
@@ -118,6 +121,10 @@ export default function ContactsPage() {
   const total = query.data?.pagination.total ?? 0;
   const stats = statsQuery.data;
 
+  useEffect(() => {
+    setSelectedContactIDs([]);
+  }, [search, status]);
+
   const refreshAll = () => {
     void query.refetch();
     void statsQuery.refetch();
@@ -136,6 +143,56 @@ export default function ContactsPage() {
     } catch (error) {
       toast({ title: "Tag assignment failed", description: error instanceof Error ? error.message : "The tag could not be assigned.", variant: "destructive" });
     }
+  };
+
+  const runBulkContactAction = async (action: "delete" | "subscribe" | "unsubscribe") => {
+    if (selectedContactIDs.length === 0 || bulkActionBusy) return;
+    setBulkActionBusy(true);
+    try {
+      const result = await apiFetch<{ affected: number }>("/contacts/bulk", {
+        method: "POST",
+        body: JSON.stringify({
+          contact_ids: selectedContactIDs,
+          action,
+          ...(action === "subscribe"
+            ? {
+                consent: {
+                  source: "contact_management",
+                  purpose: "marketing",
+                  evidence: {
+                    confirmation: "The user confirmed that the selected contacts opted in to marketing email.",
+                    confirmed_at: new Date().toISOString(),
+                  },
+                },
+              }
+            : {}),
+        }),
+      });
+      setSelectedContactIDs([]);
+      setSubscribeDialogOpen(false);
+      setConsentConfirmed(false);
+      await Promise.all([query.refetch(), statsQuery.refetch()]);
+      const actionLabel = action === "delete" ? "deleted" : action === "subscribe" ? "marked as subscribed" : "marked as unsubscribed";
+      toast({ title: "Contacts updated", description: `${result.affected} contacts ${actionLabel}.` });
+    } catch (error) {
+      toast({
+        title: "Could not update contacts",
+        description: error instanceof Error ? error.message : "The selected contacts could not be updated.",
+        variant: "destructive",
+      });
+    } finally {
+      setBulkActionBusy(false);
+    }
+  };
+
+  const unsubscribeSelected = () => {
+    if (!window.confirm(`Mark ${selectedContactIDs.length} selected contacts as unsubscribed?`)) return;
+    void runBulkContactAction("unsubscribe");
+  };
+
+  const deleteSelected = () => {
+    if (!window.confirm(`Permanently delete ${selectedContactIDs.length} selected contacts? This cannot be undone.`)) return;
+    void runBulkContactAction("delete");
   };
 
   const updateContactTag = async (tagID: string, assign: boolean) => {
@@ -295,6 +352,20 @@ export default function ContactsPage() {
         {selectedContactIDs.length > 0 ? (
           <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 bg-indigo-50 px-4 py-3">
             <span className="text-sm text-indigo-900">{selectedContactIDs.length} selected</span>
+            <Button
+              type="button"
+              size="sm"
+              disabled={bulkActionBusy}
+              onClick={() => setSubscribeDialogOpen(true)}
+            >
+              Mark subscribed
+            </Button>
+            <Button type="button" variant="secondary" size="sm" disabled={bulkActionBusy} onClick={unsubscribeSelected}>
+              Mark unsubscribed
+            </Button>
+            <Button type="button" variant="danger" size="sm" disabled={bulkActionBusy} onClick={deleteSelected}>
+              {bulkActionBusy ? "Updating..." : "Delete selected"}
+            </Button>
             <select
               aria-label="Tag to assign"
               value={selectedTagID}
@@ -438,7 +509,7 @@ export default function ContactsPage() {
           if (!next) setViewingId(null);
         }}
       >
-        <DialogContent>
+        <DialogContent className="max-h-[85vh] overflow-y-auto border-slate-200 bg-white text-slate-900">
           <DialogTitle className="text-base font-semibold text-slate-900">
             {detailQuery.data
               ? detailQuery.data.first_name || detailQuery.data.last_name
@@ -516,6 +587,42 @@ export default function ContactsPage() {
               </div>
             </div>
           ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={subscribeDialogOpen}
+        onOpenChange={(next) => {
+          setSubscribeDialogOpen(next);
+          if (!next) setConsentConfirmed(false);
+        }}
+      >
+        <DialogContent className="border-slate-200 bg-white text-slate-900">
+          <DialogTitle>Mark contacts as subscribed</DialogTitle>
+          <DialogDescription>
+            This records marketing consent for the {selectedContactIDs.length} selected contacts. Only continue if they actually opted in.
+          </DialogDescription>
+          <label className="flex items-start gap-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-950">
+            <input
+              type="checkbox"
+              checked={consentConfirmed}
+              onChange={(event) => setConsentConfirmed(event.target.checked)}
+              className="mt-1"
+            />
+            I confirm these contacts gave permission to receive marketing email.
+          </label>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="secondary" onClick={() => setSubscribeDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={!consentConfirmed || bulkActionBusy}
+              onClick={() => void runBulkContactAction("subscribe")}
+            >
+              {bulkActionBusy ? "Updating..." : "Confirm and subscribe"}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

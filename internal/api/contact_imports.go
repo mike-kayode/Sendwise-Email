@@ -97,11 +97,6 @@ func (s *Server) importContacts(w http.ResponseWriter, r *http.Request) {
 		mapping = &resolved
 	}
 
-	mappingJSON, err := json.Marshal(mapping)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not save the import mapping.")
-		return
-	}
 	fileName := filepath.Base(strings.ReplaceAll(header.Filename, "\\", "/"))
 	fileName = strings.TrimSpace(fileName)
 	if fileName == "" || fileName == "." {
@@ -111,6 +106,48 @@ func (s *Server) importContacts(w http.ResponseWriter, r *http.Request) {
 		fileName = fileName[:255]
 	}
 	fileName = strings.ToValidUTF8(fileName, "_")
+
+	importStatus := strings.TrimSpace(r.FormValue("subscription_status"))
+	if importStatus == "" {
+		importStatus = "pending"
+	}
+	switch importStatus {
+	case "pending":
+		if r.FormValue("consent_confirmed") == "true" {
+			httpx.Error(w, http.StatusBadRequest, "invalid_consent", "Consent confirmation is only accepted when importing contacts as subscribed.")
+			return
+		}
+	case "subscribed":
+		if r.FormValue("consent_confirmed") != "true" {
+			httpx.Error(w, http.StatusBadRequest, "consent_required", "Confirm that every imported contact opted in before importing them as subscribed.")
+			return
+		}
+		evidence, err := json.Marshal(map[string]string{
+			"confirmation": "The user confirmed that every imported contact opted in to marketing email.",
+			"file_name":    fileName,
+			"purpose":      "marketing",
+		})
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not save the consent confirmation.")
+			return
+		}
+		mapping.ImportStatus = importStatus
+		mapping.Consent = &contacts.CSVImportConsent{
+			Source:   "csv_import",
+			Evidence: evidence,
+		}
+	default:
+		httpx.Error(w, http.StatusBadRequest, "invalid_status", "Imported contacts must be pending or subscribed.")
+		return
+	}
+	if importStatus == "pending" {
+		mapping.ImportStatus = importStatus
+	}
+	mappingJSON, err := json.Marshal(mapping)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not save the import mapping.")
+		return
+	}
 
 	listID := strings.TrimSpace(r.FormValue("list_id"))
 	if listID != "" {

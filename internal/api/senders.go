@@ -444,23 +444,22 @@ func (s *Server) putSenderProfile(w http.ResponseWriter, r *http.Request) {
 	profile.Website = strings.TrimSpace(profile.Website)
 	profile.SupportEmail = strings.TrimSpace(profile.SupportEmail)
 	profile.FooterText = strings.TrimSpace(profile.FooterText)
-	if len(profile.SocialLinks) == 0 {
-		profile.SocialLinks = json.RawMessage(`[]`)
-	}
-	if !json.Valid(profile.SocialLinks) {
-		httpx.Error(w, 400, "invalid_social_links", "Social links must be a JSON array.")
-		return
-	}
-	var socialLinks []map[string]string
-	if err := json.Unmarshal(profile.SocialLinks, &socialLinks); err != nil || socialLinks == nil {
-		httpx.Error(w, 400, "invalid_social_links", "Social links must be a JSON array.")
-		return
-	}
-	for _, link := range socialLinks {
-		parsed, err := url.Parse(strings.TrimSpace(link["url"]))
-		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-			httpx.Error(w, 400, "invalid_social_links", "Each social link must be an HTTP or HTTPS URL.")
+	if len(profile.SocialLinks) > 0 {
+		if !json.Valid(profile.SocialLinks) {
+			httpx.Error(w, 400, "invalid_social_links", "Social links must be a JSON array.")
 			return
+		}
+		var socialLinks []map[string]string
+		if err := json.Unmarshal(profile.SocialLinks, &socialLinks); err != nil || socialLinks == nil {
+			httpx.Error(w, 400, "invalid_social_links", "Social links must be a JSON array.")
+			return
+		}
+		for _, link := range socialLinks {
+			parsed, err := url.Parse(strings.TrimSpace(link["url"]))
+			if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+				httpx.Error(w, 400, "invalid_social_links", "Each social link must be an HTTP or HTTPS URL.")
+				return
+			}
 		}
 	}
 	if profile.SupportEmail != "" {
@@ -477,12 +476,16 @@ func (s *Server) putSenderProfile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var socialLinks any
+	if len(profile.SocialLinks) > 0 {
+		socialLinks = []byte(profile.SocialLinks)
+	}
 	err := s.pool.QueryRow(r.Context(), `
 		INSERT INTO sender_profiles (
 			organization_id, company_name, street_address, city, region,
 			postal_code, country, website, support_email, footer_text, social_links
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11::jsonb, '[]'::jsonb))
 		ON CONFLICT (organization_id) DO UPDATE SET
 			company_name = EXCLUDED.company_name,
 			street_address = EXCLUDED.street_address,
@@ -493,12 +496,15 @@ func (s *Server) putSenderProfile(w http.ResponseWriter, r *http.Request) {
 			website = EXCLUDED.website,
 			support_email = EXCLUDED.support_email,
 			footer_text = EXCLUDED.footer_text,
-			social_links = EXCLUDED.social_links,
+			social_links = CASE
+				WHEN $11::jsonb IS NULL THEN sender_profiles.social_links
+				ELSE EXCLUDED.social_links
+			END,
 			updated_at = now()
-		RETURNING updated_at
+		RETURNING social_links, updated_at
 	`, s.organizationID(r), profile.CompanyName, profile.Street, profile.City, profile.Region,
-		profile.PostalCode, profile.Country, profile.Website, profile.SupportEmail, profile.FooterText, profile.SocialLinks,
-	).Scan(&profile.UpdatedAt)
+		profile.PostalCode, profile.Country, profile.Website, profile.SupportEmail, profile.FooterText, socialLinks,
+	).Scan(&profile.SocialLinks, &profile.UpdatedAt)
 	if err != nil {
 		s.logger.Error("save sender profile", "error", err)
 		httpx.Error(w, 500, "internal_error", "Could not save sender profile.")

@@ -88,3 +88,22 @@ test("custom columns receive validated, stable field keys", () => {
   });
   assert.equal(autoMapCSVHeader("Preferred language"), "custom");
 });
+
+test("fullname,email CSV headers map to the full-name contact field", () => {
+  const preview = parseCSVPreview("fullname,email\nMike Bright,mikebright283@gmail.com\n");
+  assert.equal(preview.hasHeader, true);
+  assert.deepEqual(preview.headers, ["fullname", "email"]);
+  assert.deepEqual(preview.rows, [["Mike Bright", "mikebright283@gmail.com"]]);
+  assert.deepEqual(
+    Object.fromEntries(preview.headers.map((header) => [header, autoMapCSVHeader(header)])),
+    { fullname: "full_name", email: "email" },
+  );
+  assert.deepEqual(
+    buildCSVColumnMapping(
+      preview.headers,
+      { fullname: "full_name", email: "email" },
+      preview.hasHeader,
+    ),
+    { email: "email", full_name: "fullname", has_header: true },
+  );
+});

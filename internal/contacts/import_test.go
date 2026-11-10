@@ -52,6 +52,30 @@ func TestCSVReaderUsesExplicitMapping(t *testing.T) {
 	}
 }
 
+func TestCSVReaderSplitsFullNameColumn(t *testing.T) {
+	reader, mapping, err := NewCSVReader(strings.NewReader("fullname,email\nMike Bright,mikebright283@gmail.com\nMary Jane Watson,mary@example.test\n"), nil)
+	if err != nil {
+		t.Fatalf("NewCSVReader() error = %v", err)
+	}
+	if mapping.FullName != "fullname" || mapping.Email != "email" {
+		t.Fatalf("unexpected full-name mapping: %#v", mapping)
+	}
+	first, err := reader.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if first.FirstName != "Mike" || first.LastName != "Bright" {
+		t.Fatalf("Mike Bright was parsed as first=%q last=%q", first.FirstName, first.LastName)
+	}
+	second, err := reader.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if second.FirstName != "Mary" || second.LastName != "Jane Watson" {
+		t.Fatalf("Mary Jane Watson was parsed as first=%q last=%q", second.FirstName, second.LastName)
+	}
+}
+
 func TestNewCSVReaderRejectsInvalidMappingsAndHeaders(t *testing.T) {
 	tests := []struct {
 		name    string

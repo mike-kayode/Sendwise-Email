@@ -26,9 +26,12 @@ export function GrapesEmailEditor({
   const editorRef = useRef<Editor | null>(null);
   const initialRef = useRef({ project, html });
   const onChangeRef = useRef(onChange);
+  const htmlSourceRef = useRef<HTMLTextAreaElement>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const [sourceHTML, setSourceHTML] = useState(html);
 
   onChangeRef.current = onChange;
 
@@ -38,6 +41,7 @@ export function GrapesEmailEditor({
       setError("The email editor could not export the current design.");
       return;
     }
+    setSourceHTML(exported);
     onChangeRef.current({
       project: instance.getProjectData(),
       html: exported,
@@ -133,6 +137,33 @@ export function GrapesEmailEditor({
     }
   };
 
+  const applyHTMLSource = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    try {
+      editor.setComponents(sourceHTML);
+      publish(editor, true);
+    } catch (sourceError) {
+      setError(sourceError instanceof Error ? sourceError.message : "The HTML could not be applied.");
+    }
+  };
+
+  const clearDesign = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.setComponents("");
+    publish(editor, true);
+  };
+
+  const copyHTMLSource = async () => {
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard access is unavailable in this browser.");
+      await navigator.clipboard.writeText(sourceHTML);
+    } catch (copyError) {
+      setError(copyError instanceof Error ? copyError.message : "The HTML could not be copied.");
+    }
+  };
+
   return (
     <section className="space-y-3" aria-label="Email design editor">
       <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3">
@@ -181,7 +212,55 @@ export function GrapesEmailEditor({
         <span className="text-xs text-slate-500">
           Imported HTML is parsed into editable blocks. Uploaded images are stored by Sendwise.
         </span>
+        <button
+          type="button"
+          className="rounded-md border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!ready}
+          aria-expanded={sourceOpen}
+          onClick={() => setSourceOpen((open) => !open)}
+        >
+          {sourceOpen ? "Hide HTML" : "Edit HTML"}
+        </button>
+        <button
+          type="button"
+          className="rounded-md border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!ready}
+          onClick={clearDesign}
+        >
+          Clear design
+        </button>
       </div>
+      {sourceOpen ? (
+        <div className="space-y-2 rounded-lg border border-slate-200 bg-white p-3">
+          <label htmlFor="email-html-source" className="block text-sm font-medium text-slate-800">
+            HTML source
+          </label>
+          <textarea
+            ref={htmlSourceRef}
+            id="email-html-source"
+            aria-label="HTML source"
+            value={sourceHTML}
+            onChange={(event) => setSourceHTML(event.target.value)}
+            spellCheck={false}
+            className="min-h-48 w-full rounded-md border border-slate-200 bg-white p-3 font-mono text-xs leading-5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          <p className="text-xs text-slate-500">Paste or edit HTML here. Use Select all, then copy or replace the source.</p>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" onClick={() => htmlSourceRef.current?.select()}>
+              Select all
+            </button>
+            <button type="button" className="rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" onClick={() => void copyHTMLSource()}>
+              Copy HTML
+            </button>
+            <button type="button" className="rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" onClick={() => setSourceHTML("")}>
+              Clear source
+            </button>
+            <button type="button" className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500" onClick={applyHTMLSource}>
+              Apply HTML
+            </button>
+          </div>
+        </div>
+      ) : null}
       {error ? <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-800">{error}</p> : null}
       {!ready && !error ? <p role="status" className="text-sm text-slate-500">Loading email editor…</p> : null}
       <div

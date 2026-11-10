@@ -51,7 +51,6 @@ type SenderProfile = {
   website: string;
   support_email: string;
   footer_text: string;
-  social_links: Array<{ label: string; url: string }>;
   complete: boolean;
 };
 
@@ -89,10 +88,8 @@ export default function SettingsPage() {
     website: "",
     support_email: "",
     footer_text: "",
-    social_links: [],
     complete: false,
   });
-  const [socialLinksText, setSocialLinksText] = useState("[]");
   const [profileSaving, setProfileSaving] = useState(false);
 
   useEffect(() => {
@@ -127,7 +124,6 @@ export default function SettingsPage() {
       setSenderIdentities(identitiesRes.data ?? []);
       setVerifiedDomains((domainsRes.data ?? []).filter((domain) => domain.status === "verified" && !domain.owner_conflict));
       setSenderProfile(profileRes);
-      setSocialLinksText(JSON.stringify(profileRes.social_links ?? [], null, 2));
       setOrgName(orgData.name);
       setOrgSlug(orgData.slug);
     } catch (err: any) {
@@ -262,18 +258,16 @@ export default function SettingsPage() {
     if (profileSaving) return;
     setProfileSaving(true);
     try {
-      const socialLinks = JSON.parse(socialLinksText) as SenderProfile["social_links"];
       const saved = await apiFetch<SenderProfile>("/sender-profile", {
         method: "PUT",
-        body: JSON.stringify({ ...senderProfile, social_links: socialLinks }),
+        body: JSON.stringify(senderProfile),
       });
       setSenderProfile(saved);
-      setSocialLinksText(JSON.stringify(saved.social_links ?? [], null, 2));
       toast({ title: "Sender profile saved", description: saved.complete ? "Campaigns can now be sent." : "Complete all required fields before sending." });
     } catch (err) {
       toast({
         title: "Could not save sender profile",
-        description: err instanceof Error ? err.message : "Social links must be valid JSON.",
+        description: err instanceof Error ? err.message : "The sender profile could not be saved.",
         variant: "destructive",
       });
     } finally {
@@ -604,10 +598,6 @@ export default function SettingsPage() {
                 <label className="text-sm font-medium text-slate-700 sm:col-span-2">
                   Optional footer text
                   <Textarea className="mt-1" rows={3} value={senderProfile.footer_text} onChange={(event) => setSenderProfile({ ...senderProfile, footer_text: event.target.value })} />
-                </label>
-                <label className="text-sm font-medium text-slate-700 sm:col-span-2">
-                  Social links (JSON array of {"{ label, url }"} objects)
-                  <Textarea className="mt-1 font-mono text-xs" rows={4} value={socialLinksText} onChange={(event) => setSocialLinksText(event.target.value)} />
                 </label>
               </div>
               <Button onClick={() => void handleSaveSenderProfile()} disabled={profileSaving}>

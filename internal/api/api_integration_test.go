@@ -442,6 +442,125 @@ func TestContactsCRUDIntegration(t *testing.T) {
 	assertStatus(t, w, http.StatusNotFound)
 }
 
+func TestBulkContactActionsRecordConsentAndDelete(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	s := newIntegrationServer(t)
+	registered := seedIntegrationUser(
+		t, "bulk-contacts-owner@example.com", "contacts-password", "Bulk Contacts Owner", "Bulk Contacts Org",
+	)
+	contactIDs := make([]uuid.UUID, 0, 2)
+	for _, email := range []string{"bulk-one@example.test", "bulk-two@example.test"} {
+		var id string
+		if err := integrationPool.QueryRow(context.Background(), `
+			INSERT INTO contacts (organization_id, email, first_name, status)
+			VALUES ($1, $2, 'Bulk', 'pending')
+			RETURNING id
+		`, registered.Organization.ID, email).Scan(&id); err != nil {
+			t.Fatalf("seed bulk contact: %v", err)
+		}
+		parsedID, err := uuid.Parse(id)
+		if err != nil {
+			t.Fatalf("parse bulk contact ID: %v", err)
+		}
+		contactIDs = append(contactIDs, parsedID)
+	}
+	idsJSON, err := json.Marshal(contactIDs)
+	if err != nil {
+		t.Fatalf("encode contact IDs: %v", err)
+	}
+	subscribeBody := fmt.Sprintf(
+		`{"contact_ids":%s,"action":"subscribe","consent":{"source":"bulk_test","purpose":"marketing","evidence":{"confirmed":true}}}`,
+		idsJSON,
+	)
+	w := doRequest(t, s, http.MethodPost, "/api/v1/contacts/bulk", subscribeBody, registered.AccessToken)
+	assertStatus(t, w, http.StatusOK)
+	for _, contactID := range contactIDs {
+		var status string
+		var consentEvents int
+		if err := integrationPool.QueryRow(context.Background(), `
+			SELECT status FROM contacts WHERE id = $1 AND organization_id = $2
+		`, contactID, registered.Organization.ID).Scan(&status); err != nil {
+			t.Fatalf("load bulk subscribed contact: %v", err)
+		}
+		if status != "subscribed" {
+			t.Fatalf("bulk contact status = %q, want subscribed", status)
+		}
+		if err := integrationPool.QueryRow(context.Background(), `
+			SELECT count(*) FROM consent_events
+			WHERE contact_id = $1 AND event_type = 'subscribe' AND source = 'bulk_test'
+		`, contactID).Scan(&consentEvents); err != nil {
+			t.Fatalf("count bulk subscribe consent: %v", err)
+		}
+		if consentEvents != 1 {
+			t.Fatalf("subscribe consent events = %d, want 1", consentEvents)
+		}
+	}
+
+	w = doRequest(t, s, http.MethodPost, "/api/v1/contacts/bulk",
+		fmt.Sprintf(`{"contact_ids":%s,"action":"unsubscribe"}`, idsJSON),
+		registered.AccessToken)
+	assertStatus(t, w, http.StatusOK)
+	var unsubscribed int
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT count(*) FROM contacts
+		WHERE id = ANY($1::uuid[]) AND organization_id = $2 AND status = 'unsubscribed'
+	`, contactIDs, registered.Organization.ID).Scan(&unsubscribed); err != nil {
+		t.Fatalf("count bulk unsubscribed contacts: %v", err)
+	}
+	if unsubscribed != len(contactIDs) {
+		t.Fatalf("bulk unsubscribed contacts = %d, want %d", unsubscribed, len(contactIDs))
+	}
+
+	w = doRequest(t, s, http.MethodPost, "/api/v1/contacts/bulk",
+		fmt.Sprintf(`{"contact_ids":%s,"action":"delete"}`, idsJSON),
+		registered.AccessToken)
+	assertStatus(t, w, http.StatusOK)
+	var remaining int
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT count(*) FROM contacts WHERE id = ANY($1::uuid[]) AND organization_id = $2
+	`, contactIDs, registered.Organization.ID).Scan(&remaining); err != nil {
+		t.Fatalf("count deleted contacts: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("remaining selected contacts = %d, want 0", remaining)
+	}
+}
+
+func TestSenderProfileUpdatePreservesSocialLinksWhenOmitted(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	s := newIntegrationServer(t)
+	registered := seedIntegrationUser(
+		t, "sender-profile-owner@example.com", "profile-password", "Profile Owner", "Profile Org",
+	)
+
+	w := doRequest(t, s, http.MethodPut, "/api/v1/sender-profile",
+		`{"social_links":[{"label":"Company","url":"https://example.test"}]}`,
+		registered.AccessToken,
+	)
+	assertStatus(t, w, http.StatusOK)
+
+	w = doRequest(t, s, http.MethodPut, "/api/v1/sender-profile", `{}`, registered.AccessToken)
+	assertStatus(t, w, http.StatusOK)
+	var profile struct {
+		SocialLinks []struct {
+			Label string `json:"label"`
+			URL   string `json:"url"`
+		} `json:"social_links"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &profile); err != nil {
+		t.Fatalf("decode sender profile: %v", err)
+	}
+	if len(profile.SocialLinks) != 1 ||
+		profile.SocialLinks[0].Label != "Company" ||
+		profile.SocialLinks[0].URL != "https://example.test" {
+		t.Fatalf("social links after omitted update = %#v, want the previously saved link", profile.SocialLinks)
+	}
+}
+
 func TestCampaignsLifecycleIntegration(t *testing.T) {
 	if integrationPool == nil {
 		t.Skip("no database available")
@@ -1247,6 +1366,57 @@ func TestDomainsIntegration(t *testing.T) {
 	assertStatus(t, w, http.StatusNotFound)
 	w = doRequest(t, s, "GET", "/api/v1/domains/"+domainID+"/dns-records", "", token2)
 	assertStatus(t, w, http.StatusNotFound)
+}
+
+func TestDeleteSendingDomainRemovesRelatedRecords(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	s := newIntegrationServer(t)
+	owner := seedIntegrationUser(
+		t, "delete-domain-owner@example.com", "delete-domain-password", "Domain Owner", "Domain Delete Org",
+	)
+	domain := "delete-" + strings.ReplaceAll(uuid.NewString(), "-", "") + ".example.test"
+	var domainID, identityID string
+	if err := integrationPool.QueryRow(context.Background(), `
+		INSERT INTO sending_domains (organization_id, domain, status)
+		VALUES ($1, $2, 'pending')
+		RETURNING id
+	`, owner.Organization.ID, domain).Scan(&domainID); err != nil {
+		t.Fatalf("seed sending domain: %v", err)
+	}
+	if err := integrationPool.QueryRow(context.Background(), `
+		INSERT INTO sender_identities (organization_id, domain, local_part, display_name)
+		VALUES ($1, $2, 'news', 'News')
+		RETURNING id
+	`, owner.Organization.ID, domain).Scan(&identityID); err != nil {
+		t.Fatalf("seed sender identity: %v", err)
+	}
+
+	other := seedIntegrationUser(
+		t, "other-delete-domain-owner@example.com", "delete-domain-password", "Other Owner", "Other Delete Org",
+	)
+	w := doRequest(t, s, http.MethodDelete, "/api/v1/domains/"+domainID, "", other.AccessToken)
+	assertStatus(t, w, http.StatusNotFound)
+	var count int
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT count(*) FROM sending_domains WHERE id = $1 AND organization_id = $2
+	`, domainID, owner.Organization.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("domain after cross-workspace delete = %d, err=%v; want 1", count, err)
+	}
+
+	w = doRequest(t, s, http.MethodDelete, "/api/v1/domains/"+domainID, "", owner.AccessToken)
+	assertStatus(t, w, http.StatusNoContent)
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT count(*) FROM sending_domains WHERE id = $1 AND organization_id = $2
+	`, domainID, owner.Organization.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("domain records after delete = %d, err=%v; want 0", count, err)
+	}
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT count(*) FROM sender_identities WHERE id = $1 AND organization_id = $2
+	`, identityID, owner.Organization.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("sender identities after delete = %d, err=%v; want 0", count, err)
+	}
 }
 
 func TestStalwartDomainVerificationHostsTenantDomain(t *testing.T) {

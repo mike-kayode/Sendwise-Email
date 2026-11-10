@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { CheckCircle2, Copy, Globe, Plus, RefreshCw, ShieldCheck, XCircle, Send } from "lucide-react";
+import { CheckCircle2, Copy, Globe, Plus, RefreshCw, ShieldCheck, Trash2, XCircle, Send } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { StatusBadge, Badge } from "@/components/ui/badge";
@@ -28,6 +28,7 @@ export default function DomainsPage() {
   const [selectedDomainId, setSelectedDomainId] = useState<string | null>(null);
   const [verifyingAll, setVerifyingAll] = useState(false);
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [showFullNames, setShowFullNames] = useState(false);
   const dnsSectionRef = useRef<HTMLDivElement>(null);
   const pollingStartedAt = useRef(new Map<string, number>());
@@ -77,6 +78,33 @@ export default function DomainsPage() {
       toast({ title: "Domain added", description: "Add the DNS records below, then verify." });
     } catch (err: any) {
       toast({ title: "Failed to add domain", description: err?.message ?? "Unknown error", variant: "destructive" });
+    }
+  };
+
+  const handleDeleteDomain = async (domain: SendingDomain) => {
+    if (deletingId) return;
+    const confirmed = window.confirm(
+      `Delete ${domain.domain} and its Sendwise sender identities? DNS records at your DNS provider will not be removed.`,
+    );
+    if (!confirmed) return;
+
+    setDeletingId(domain.id);
+    try {
+      await apiFetch<void>(`/domains/${domain.id}`, { method: "DELETE" });
+      if (selectedDomainId === domain.id) setSelectedDomainId(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["domains"] }),
+        queryClient.invalidateQueries({ queryKey: ["domain-dns-records"] }),
+      ]);
+      toast({ title: "Domain deleted", description: `${domain.domain} and its Sendwise sender identities were deleted.` });
+    } catch (error) {
+      toast({
+        title: "Could not delete domain",
+        description: error instanceof Error ? error.message : "The sending domain could not be deleted.",
+        variant: "destructive",
+      });
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -238,6 +266,38 @@ export default function DomainsPage() {
         }
       />
 
+      <Card className="mb-5">
+        <CardHeader>
+          <CardTitle>Add a domain</CardTitle>
+          <CardDescription>
+            Use a subdomain for sending to protect your root domain. Add the generated DNS records before verifying it.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <Input
+              placeholder="mail.yourdomain.com"
+              value={newDomain}
+              onChange={(event) => setNewDomain(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void handleAddDomain();
+              }}
+              aria-label="Sending domain"
+            />
+            <button
+              onClick={() => void handleAddDomain()}
+              className="inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+              disabled={!newDomain.trim()}
+            >
+              <Plus className="h-4 w-4" /> Add domain
+            </button>
+          </div>
+          <p className="text-xs text-slate-500">
+            Sending also requires SPF to authorize the Stalwart sending host. If this domain&apos;s MX does not point to Stalwart, configure the platform SPF include before verifying.
+          </p>
+        </CardContent>
+      </Card>
+
       {domains.length === 0 ? null : needsAttention.length === 0 ? (
         <div className="mb-5 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
           <Send className="h-4 w-4 shrink-0" />
@@ -292,17 +352,32 @@ export default function DomainsPage() {
                     >
                       <Globe className="h-4 w-4" />
                     </span>
-                    {domain.owner_conflict ? (
-                      <Badge variant="danger">Ownership conflict</Badge>
-                    ) : isReady ? (
-                      <Badge variant="success">
-                        <CheckCircle2 className="mr-1 h-3 w-3" /> Ready to send
-                      </Badge>
-                    ) : (
-                      <Badge variant="warning">
-                        <XCircle className="mr-1 h-3 w-3" /> Verification needed
-                      </Badge>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {domain.owner_conflict ? (
+                        <Badge variant="danger">Ownership conflict</Badge>
+                      ) : isReady ? (
+                        <Badge variant="success">
+                          <CheckCircle2 className="mr-1 h-3 w-3" /> Ready to send
+                        </Badge>
+                      ) : (
+                        <Badge variant="warning">
+                          <XCircle className="mr-1 h-3 w-3" /> Verification needed
+                        </Badge>
+                      )}
+                      <button
+                        type="button"
+                        aria-label={`Delete ${domain.domain}`}
+                        title={`Delete ${domain.domain}`}
+                        disabled={deletingId !== null || verifyingId === domain.id}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void handleDeleteDomain(domain);
+                        }}
+                        className="rounded-md p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
                   </div>
                   <p className="mt-3 text-sm font-semibold text-slate-900">{domain.domain}</p>
                   <p className="text-xs text-slate-500">
@@ -369,14 +444,13 @@ export default function DomainsPage() {
       </div>
 
       <div ref={dnsSectionRef}>
-      <div className="grid gap-5 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
+        <Card className="w-full min-w-0 overflow-hidden">
           <CardHeader className="flex items-start justify-between">
             <div>
               <CardTitle id="dns-records">DNS records</CardTitle>
               <CardDescription>
-                Add these records at your DNS provider, then click verify.                 Checks query 1.1.1.1, 8.8.8.8, and authoritative nameservers in parallel. Ownership, SPF,
-                and DKIM gate verification; DMARC and MX are advisory.
+                Add these records at your DNS provider, then click verify. Checks query public and authoritative nameservers.
+                Ownership, SPF, and DKIM gate verification; DMARC and MX are advisory.
               </CardDescription>
             </div>
             <div className="flex items-center gap-2">
@@ -402,7 +476,7 @@ export default function DomainsPage() {
               ) : null}
             </div>
           </CardHeader>
-          <CardContent className="px-0 py-0">
+          <CardContent className="min-w-0 px-0 py-0">
             {domains.length === 0 ? (
               <div className="p-8 text-center text-slate-500">Add a domain to see its DNS records.</div>
             ) : (
@@ -412,15 +486,15 @@ export default function DomainsPage() {
                     Showing records for <span className="font-semibold">{selectedDomain.domain}</span>
                   </div>
                 ) : null}
-                <Table>
+                <Table className="min-w-[1100px] table-fixed">
                   <Thead>
                     <Tr>
-                      <Th>Type</Th>
-                      <Th>Name</Th>
-                      <Th>Value</Th>
-                      <Th>TTL</Th>
-                      <Th>Purpose</Th>
-                      <Th>Status</Th>
+                      <Th className="w-[7%]">Type</Th>
+                      <Th className="w-[20%]">Name</Th>
+                      <Th className="w-[34%]">Value</Th>
+                      <Th className="w-[6%]">TTL</Th>
+                      <Th className="w-[22%]">Purpose</Th>
+                      <Th className="w-[11%]">Status</Th>
                     </Tr>
                   </Thead>
                   <Tbody>
@@ -456,7 +530,7 @@ export default function DomainsPage() {
                                 </button>
                               </div>
                             </Td>
-                            <Td className="max-w-[260px] font-mono text-xs text-slate-500">
+                            <Td className="max-w-[360px] whitespace-normal font-mono text-xs text-slate-500">
                               <div className="flex items-start gap-1">
                                 <span className="break-all whitespace-pre-wrap">{record.value || "Not configured"}</span>
                                 <button
@@ -488,7 +562,7 @@ export default function DomainsPage() {
                               ) : null}
                             </Td>
                             <Td className="text-xs text-slate-600">{record.ttl}</Td>
-                            <Td className="text-xs text-slate-600">{record.purpose}</Td>
+                            <Td className="whitespace-normal text-xs text-slate-600">{record.purpose}</Td>
                             <Td>
                               <div>
                                 <StatusBadge status={recordStatusText(record.status)} />
@@ -509,37 +583,6 @@ export default function DomainsPage() {
             )}
           </CardContent>
         </Card>
-
-        <Card className="h-fit">
-          <CardHeader>
-            <CardTitle>Add a domain</CardTitle>
-            <CardDescription>
-              Use a subdomain for sending to protect your root domain.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <Input
-              placeholder="mail.yourdomain.com"
-              value={newDomain}
-              onChange={(e) => setNewDomain(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void handleAddDomain();
-              }}
-            />
-            <button
-              onClick={() => void handleAddDomain()}
-              className="inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-indigo-600 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-              disabled={!newDomain.trim()}
-            >
-              <Plus className="h-4 w-4" /> Add domain
-            </button>
-            <div className="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
-              After adding, we show the exact DNS records for Stalwart. Click{" "}
-              <span className="font-medium">Check now</span> once they are published.
-            </div>
-          </CardContent>
-        </Card>
-        </div>
       </div>
     </div>
   );
