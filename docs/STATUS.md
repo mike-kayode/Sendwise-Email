@@ -1,7 +1,7 @@
 # Sendwise Status
 
-Evidence recorded 2026-11-09 from the local development stack. This report does
-not describe production behavior.
+Evidence recorded 2026-11-09 from the local development stack and GitHub Actions
+run #69. This report does not describe production behavior.
 
 ## Part 1 — transactional registration email
 
@@ -78,6 +78,17 @@ ok  	github.com/khayode/email-platform/shared/contracts/events	0.284s
 
 `go vet ./...`, `go build ./...`, and `gofmt -l cmd internal services shared`
 also completed successfully; the formatting check printed no files.
+
+After removing Identity verification delivery from the Stalwart campaign test,
+the focused local Stalwart SMTP and app-side DKIM integration test passed:
+
+```text
+=== RUN   TestStalwartAcceptsAppSignedTenantCampaign
+    stalwart_integration_test.go:116: verified one app DKIM signature for authenticated submission from hosted domain hosted-tenant.example.test
+--- PASS: TestStalwartAcceptsAppSignedTenantCampaign (0.75s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity	1.649s
+```
 
 ### Web checks
 
@@ -163,9 +174,31 @@ Duplicate sending domains (domain, organization_id, status):
 No duplicate sending domains found.
 ```
 
-Repository searches returned no matches for the retired mail-key names in
-`.env.example` and `scripts/check-env.sh`, no old hardcoded footer, and no
-provider-specific references in campaign code.
+Repository cleanup search output:
+
+```text
+Legacy hardcoded footer: No matches found.
+Retired mail configuration in .env.example and scripts/check-env.sh: No matches found.
+Provider-specific references in campaign code: No matches found.
+```
+
+### GitHub Actions
+
+Run [#69](https://github.com/mike-kayode/Sendwise-Email/actions/runs/42716796181)
+for commit `c9bc94e` completed successfully. `deploy-validate`, `lint`,
+`test-go`, `test-web`, `e2e`, and `docker-build` all succeeded.
+
+The browser suite and dedicated relay-recovery Playwright proof reported:
+
+```text
+  2 skipped
+  10 passed (51.1s)
+...
+  1 passed (3.4s)
+```
+
+The two skipped cases require optional E2E settings; the separate relay-recovery
+spec ran and passed.
 
 ## Not done / not independently verified
 
@@ -178,14 +211,5 @@ provider-specific references in campaign code.
 - Real non-HTTPS clipboard behavior; its browser test was skipped.
 - Redistribution rights and user-provided Figma exports/images for any bundled
   artwork.
-- The first GitHub Actions run for Part 2 failed in `deploy-validate` because
-  the pre-migration check ran before PostgreSQL was ready. The workflow now
-  waits for PostgreSQL health; the follow-up run must be checked before release.
-  The failure output was:
-
-  ```text
-  psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory
-  ##[error]Process completed with exit code 2.
-  ```
 - Any unrelated legacy module not demonstrated by the commands above. Prior
   status claims outside this report are not treated as current evidence.
