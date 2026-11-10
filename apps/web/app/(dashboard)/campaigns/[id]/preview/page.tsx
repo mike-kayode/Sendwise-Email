@@ -107,6 +107,10 @@ export default function CampaignPreviewPage() {
 
   const content = typeof campaign.content === "string" ? JSON.parse(campaign.content) : campaign.content ?? {};
   const blocks: ContentBlock[] = Array.isArray(content.blocks) ? content.blocks : [];
+  const designHTML = typeof content.html === "string" ? content.html : "";
+  const plainText = content.mode === "plain" && typeof content.text_content === "string"
+    ? content.text_content
+    : undefined;
   const audienceLabel = campaign.list_id
     ? (listsQuery.data ?? []).find((l) => l.id === campaign.list_id)?.name ?? "Selected list"
     : campaign.segment_id
@@ -169,11 +173,13 @@ export default function CampaignPreviewPage() {
           </div>
           <div className="rounded-xl bg-slate-100 p-4 sm:p-8">
             <div className={device === "mobile" ? "mx-auto max-w-sm" : "mx-auto max-w-2xl"}>
-              {blocks.length > 0 ? (
+              {designHTML || blocks.length > 0 || plainText !== undefined ? (
                 <EmailPreview
                   subject={campaign.subject || "(no subject)"}
                   preheader={campaign.preview_text || undefined}
                   blocks={blocks}
+                  html={plainText === undefined ? designHTML || undefined : undefined}
+                  textContent={plainText}
                 />
               ) : (
                 <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">

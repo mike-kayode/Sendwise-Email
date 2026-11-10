@@ -4,13 +4,14 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Redo2, Save, Trash2, Undo2 } from "lucide-react";
-import { EmailDesignEditor, type EmailDesignBlock, type EmailDesignTheme } from "@/components/email-design-editor";
+import { ArrowLeft, Save, Trash2 } from "lucide-react";
+import { GrapesEmailEditor, type GrapesEmailDesign } from "@/components/grapes-email-editor";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input, Select } from "@/components/ui/input";
+import { Input, Select, Textarea } from "@/components/ui/input";
 import { apiFetch, type SenderIdentity } from "@/lib/auth";
+import { blocksToHtml, type EmailDesignBlock } from "@/lib/email-html-importer";
 import { useToast } from "@/components/ui/use-toast";
 
 type Template = {
@@ -20,12 +21,12 @@ type Template = {
   design: unknown;
   mode?: "plain" | "html";
   text_content?: string;
-  theme?: EmailDesignTheme;
+  theme?: Record<string, string>;
   sender_identity_id?: string | null;
 };
 
 const categories = ["general", "newsletter", "lifecycle", "promotion", "events"];
-const defaultTheme: EmailDesignTheme = {
+const defaultTheme = {
   background: "#f1f5f9",
   content_background: "#ffffff",
   text: "#334155",
@@ -35,46 +36,35 @@ const defaultTheme: EmailDesignTheme = {
   link: "#4f46e5",
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function readDesign(template: Template) {
-  const parsed = typeof template.design === "string" ? JSON.parse(template.design) as unknown : template.design;
-  const design = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
-  const blocks = Array.isArray(design.blocks) ? design.blocks : [];
-  const designTheme = design.theme && typeof design.theme === "object" ? design.theme as Partial<EmailDesignTheme> : {};
-  const templateTheme = template.theme && typeof template.theme === "object" ? template.theme : {};
-  const theme = { ...defaultTheme, ...designTheme, ...templateTheme };
+  let parsed: unknown = template.design;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed) as unknown;
+    } catch {
+      parsed = {};
+    }
+  }
+  const design = isRecord(parsed) ? parsed : {};
+  const blocks = Array.isArray(design.blocks) ? design.blocks as EmailDesignBlock[] : [];
+  const html = typeof design.html === "string" ? design.html : blocksToHtml(blocks);
+  const project = design.editor_project;
+  const theme = {
+    ...defaultTheme,
+    ...(isRecord(design.theme) ? design.theme : {}),
+    ...(template.theme ?? {}),
+  };
   return {
-    blocks: blocks.map((block, index) => {
-      if (!block || typeof block !== "object") return { id: `block-${index}`, type: "paragraph", content: "" };
-      const item = block as Record<string, unknown>;
-      return {
-        id: typeof item.id === "string" ? item.id : `block-${index}`,
-        type: typeof item.type === "string" ? item.type : "paragraph",
-        content: typeof item.content === "string" ? item.content : "",
-        ...(typeof item.url === "string" ? { url: item.url } : {}),
-        ...(typeof item.src === "string" ? { src: item.src } : {}),
-        ...(typeof item.alt === "string" ? { alt: item.alt } : {}),
-        ...(typeof item.align === "string" ? { align: item.align } : {}),
-        ...(typeof item.size === "string" ? { size: item.size } : {}),
-        ...(typeof item.bg_color === "string" ? { bg_color: item.bg_color } : {}),
-        ...(typeof item.text_color === "string" ? { text_color: item.text_color } : {}),
-        ...(Array.isArray(item.columns) ? { columns: item.columns as EmailDesignBlock[][] } : {}),
-      };
-    }) as EmailDesignBlock[],
+    html,
+    project,
     mode: template.mode ?? (design.mode === "plain" ? "plain" : "html"),
     textContent: template.text_content ?? (typeof design.text_content === "string" ? design.text_content : ""),
     theme,
   };
-}
-
-type DesignSnapshot = {
-  blocks: EmailDesignBlock[];
-  mode: "plain" | "html";
-  textContent: string;
-  theme: EmailDesignTheme;
-};
-
-function snapshot(blocks: EmailDesignBlock[], mode: "plain" | "html", textContent: string, theme: EmailDesignTheme): DesignSnapshot {
-  return { blocks, mode, textContent, theme };
 }
 
 export default function TemplateEditorPage() {
@@ -84,10 +74,11 @@ export default function TemplateEditorPage() {
   const { toast } = useToast();
   const [name, setName] = useState("");
   const [category, setCategory] = useState("general");
-  const [blocks, setBlocks] = useState<EmailDesignBlock[]>([]);
+  const [html, setHtml] = useState("");
+  const [editorProject, setEditorProject] = useState<unknown>(null);
   const [mode, setMode] = useState<"plain" | "html">("html");
   const [textContent, setTextContent] = useState("");
-  const [theme, setTheme] = useState<EmailDesignTheme>(defaultTheme);
+  const [theme, setTheme] = useState(defaultTheme);
   const [senderIdentityID, setSenderIdentityID] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -95,8 +86,6 @@ export default function TemplateEditorPage() {
   const [sendingTest, setSendingTest] = useState(false);
   const [testStatus, setTestStatus] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
-  const [past, setPast] = useState<DesignSnapshot[]>([]);
-  const [future, setFuture] = useState<DesignSnapshot[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const templateQuery = useQuery({
@@ -114,7 +103,8 @@ export default function TemplateEditorPage() {
     setName(template.name);
     setCategory(template.category);
     const design = readDesign(template);
-    setBlocks(design.blocks);
+    setHtml(design.html);
+    setEditorProject(design.project);
     setMode(design.mode);
     setTextContent(design.textContent);
     setTheme(design.theme);
@@ -122,54 +112,21 @@ export default function TemplateEditorPage() {
     setDirty(false);
   }, [templateQuery.data]);
 
-  const recordEdit = () => {
-    setPast((items) => [...items.slice(-49), snapshot(blocks, mode, textContent, theme)]);
-    setFuture([]);
-    setDirty(true);
+  const handleEditorChange = (next: GrapesEmailDesign, changed: boolean) => {
+    setEditorProject(next.project);
+    setHtml(next.html);
+    if (changed) setDirty(true);
   };
-  const updateBlocks = (next: EmailDesignBlock[]) => {
-    recordEdit();
-    setBlocks(next);
-  };
-  const updateTheme = (next: EmailDesignTheme) => {
-    recordEdit();
-    setTheme(next);
-  };
-  const updateTextContent = (next: string) => {
-    recordEdit();
-    setTextContent(next);
-  };
+
   const changeMode = (next: "plain" | "html") => {
     if (next === mode) return;
     if (mode === "html" && next === "plain") {
       if (!window.confirm("Switching from HTML to plain text may lose layout and formatting. Continue?")) return;
       if (!textContent.trim()) {
-        setTextContent(blocks.map((block) => block.content).filter(Boolean).join("\n\n"));
+        setTextContent(new DOMParser().parseFromString(html, "text/html").body.textContent?.trim() ?? "");
       }
     }
-    recordEdit();
     setMode(next);
-  };
-  const undo = () => {
-    const previous = past[past.length - 1];
-    if (!previous) return;
-    setFuture((items) => [snapshot(blocks, mode, textContent, theme), ...items]);
-    setPast((items) => items.slice(0, -1));
-    setBlocks(previous.blocks);
-    setMode(previous.mode);
-    setTextContent(previous.textContent);
-    setTheme(previous.theme);
-    setDirty(true);
-  };
-  const redo = () => {
-    const next = future[0];
-    if (!next) return;
-    setPast((items) => [...items, snapshot(blocks, mode, textContent, theme)]);
-    setFuture((items) => items.slice(1));
-    setBlocks(next.blocks);
-    setMode(next.mode);
-    setTextContent(next.textContent);
-    setTheme(next.theme);
     setDirty(true);
   };
 
@@ -183,7 +140,15 @@ export default function TemplateEditorPage() {
         body: JSON.stringify({
           name,
           category,
-          design: { version: 1, mode, text_content: textContent, theme, blocks },
+          design: {
+            version: 2,
+            editor: "grapesjs",
+            editor_project: editorProject,
+            html,
+            mode,
+            text_content: textContent,
+            theme,
+          },
           mode,
           text_content: textContent,
           theme,
@@ -213,7 +178,7 @@ export default function TemplateEditorPage() {
         body: JSON.stringify({ recipient: testRecipient.trim(), sender_identity_id: senderIdentityID }),
       });
       setTestStatus(result.status);
-      toast({ title: "Test email accepted", description: `Stalwart accepted the test message for ${testRecipient.trim()}.` });
+      toast({ title: "Test email accepted", description: `The relay accepted the test message for ${testRecipient.trim()}.` });
     } catch (sendError) {
       const message = sendError instanceof Error ? sendError.message : "The test email could not be sent.";
       setTestStatus(message);
@@ -227,7 +192,7 @@ export default function TemplateEditorPage() {
     if (!dirty || !templateQuery.data || saving) return;
     const timeout = window.setTimeout(() => void save(), 1800);
     return () => window.clearTimeout(timeout);
-  }, [dirty, blocks, mode, textContent, theme, name, category, saving, templateQuery.data]);
+  }, [dirty, html, editorProject, mode, textContent, theme, name, category, senderIdentityID, saving, templateQuery.data]);
 
   const remove = async () => {
     if (!templateQuery.data || deleting) return;
@@ -267,11 +232,9 @@ export default function TemplateEditorPage() {
       <PageHeader
         eyebrow="Templates"
         title="Design template"
-        description="Edit the content blocks, their order, and the live email preview."
+        description="Build responsive email layouts, import existing HTML, and save the editable project."
         actions={
           <div className="flex gap-2">
-            <Button type="button" variant="ghost" aria-label="Undo" onClick={undo} disabled={!past.length || saving}><Undo2 className="h-4 w-4" /></Button>
-            <Button type="button" variant="ghost" aria-label="Redo" onClick={redo} disabled={!future.length || saving}><Redo2 className="h-4 w-4" /></Button>
             <Button type="button" variant="secondary" onClick={() => void remove()} disabled={deleting || saving}>
               <Trash2 className="h-4 w-4" /> {deleting ? "Deleting..." : "Delete"}
             </Button>
@@ -309,9 +272,24 @@ export default function TemplateEditorPage() {
               ))}
             </Select>
           </label>
+          <label className="text-sm font-medium text-slate-700">
+            Content format
+            <Select aria-label="Template mode" className="mt-1" value={mode} onChange={(event) => changeMode(event.target.value as "plain" | "html")}>
+              <option value="html">Visual HTML email</option>
+              <option value="plain">Plain text</option>
+            </Select>
+          </label>
         </CardContent>
       </Card>
-      <Card className="mb-5">
+      {mode === "plain" ? (
+        <label className="mb-5 block text-sm font-medium text-slate-700">
+          Plain-text message
+          <Textarea aria-label="Plain-text message" rows={12} className="mt-1 font-mono" value={textContent} onChange={(event) => { setTextContent(event.target.value); setDirty(true); }} />
+        </label>
+      ) : (
+        <GrapesEmailEditor project={editorProject} html={html} onChange={handleEditorChange} />
+      )}
+      <Card className="mt-5">
         <CardContent className="flex flex-col gap-3 p-5 sm:flex-row sm:items-end">
           <label className="flex-1 text-sm font-medium text-slate-700">
             Test recipient
@@ -321,25 +299,20 @@ export default function TemplateEditorPage() {
               className="mt-1"
               value={testRecipient}
               onChange={(event) => setTestRecipient(event.target.value)}
+              placeholder="you@example.com"
             />
           </label>
-          <Button type="button" variant="secondary" onClick={() => void sendTestEmail()} disabled={sendingTest || !testRecipient.trim()}>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => void sendTestEmail()}
+            disabled={!testRecipient.trim() || sendingTest || saving || dirty}
+          >
             {sendingTest ? "Sending test..." : "Send test email"}
           </Button>
           {testStatus ? <p role="status" className="text-sm text-slate-600">{testStatus}</p> : null}
         </CardContent>
       </Card>
-      <EmailDesignEditor
-        blocks={blocks}
-        onChange={updateBlocks}
-        subject={templateQuery.data.name}
-        mode={mode}
-        onModeChange={changeMode}
-        textContent={textContent}
-        onTextContentChange={updateTextContent}
-        theme={theme}
-        onThemeChange={updateTheme}
-      />
       <p className="mt-3 text-xs text-slate-500" role="status">{saving ? "Autosaving…" : dirty ? "Unsaved changes" : "All changes saved"}</p>
     </div>
   );

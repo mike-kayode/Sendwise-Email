@@ -238,13 +238,15 @@ with a new, unregistered mailbox. During deployment, set
 unset. The unverified smoke account remains in the database, so use a fresh
 recipient for each run. The test reports SMTP acceptance, not inbox placement.
 
-## Template images and test messages
+## Template editor, images, and test messages
 
-The template editor stores uploaded PNG, JPEG, and GIF files in
-workspace-associated Postgres records. The public asset URL is served by
-Sendwise for use in email; uploads are limited to 8 MiB and 10000 by 10000
-pixels. External image URLs are not emitted by the campaign renderer. Bundled
-gallery artwork is neutral and created for this application.
+The visual template editor stores GrapesJS project JSON alongside compiled
+HTML, allowing templates to be reopened for editing and rendered by the Go
+campaign delivery service. Imported HTML is parsed into editor components.
+Uploaded PNG, JPEG, and GIF files are stored in workspace-associated Postgres
+records. The public asset URL is served by Sendwise for use in email; uploads
+are limited to 8 MiB and 10000 by 10000 pixels. External image URLs are not
+emitted by the campaign renderer.
 
 Template test messages use the configured SMTP relay and app-managed DKIM key.
 The response describes SMTP acceptance only. A local Mailpit run is not proof

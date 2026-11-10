@@ -502,6 +502,24 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 		t.Fatalf("campaign validation did not accept the verified sender identity and profile: %+v", validation.Checks)
 	}
 
+	htmlContentUpdate := `{"content":{"version":2,"editor":"grapesjs","html":"<table role=\"presentation\"><tr><td><h1>HTML campaign</h1></td></tr></table>","blocks":[]}}`
+	w = doRequest(t, s, http.MethodPatch, "/api/v1/campaigns/"+campaignID, htmlContentUpdate, token)
+	assertStatus(t, w, http.StatusOK)
+	w = doRequest(t, s, http.MethodPost, "/api/v1/campaigns/"+campaignID+"/validate", "", token)
+	assertStatus(t, w, http.StatusOK)
+	if err := json.Unmarshal(w.Body.Bytes(), &validation); err != nil {
+		t.Fatalf("decode HTML campaign validation: %v", err)
+	}
+	var htmlContentReady bool
+	for _, check := range validation.Checks {
+		if check.Name == "content" && check.Status == "pass" {
+			htmlContentReady = true
+		}
+	}
+	if !htmlContentReady {
+		t.Fatalf("campaign validation did not accept saved HTML content: %+v", validation.Checks)
+	}
+
 	scheduleBody, err := json.Marshal(scheduleInput{ScheduledAt: time.Now().Add(time.Hour)})
 	if err != nil {
 		t.Fatalf("encode campaign schedule: %v", err)

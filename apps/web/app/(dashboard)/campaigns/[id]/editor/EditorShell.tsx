@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
-import { type EmailDesignBlock } from "@/components/email-design-editor";
+import { type EmailDesignBlock } from "@/lib/email-html-importer";
 import { Card, CardContent } from "@/components/ui/card";
 import { apiFetch, type Campaign } from "@/lib/auth";
 import EditorForm from "./EditorForm";
@@ -80,7 +80,12 @@ export default function EditorShell({ campaignId }: EditorShellProps) {
         title={res.name}
         description="Edit sender details, subject, and reusable email content."
       />
-      <EditorForm initialCampaign={res} initialBlocks={blocks} />
+      <EditorForm
+        initialCampaign={res}
+        initialBlocks={blocks}
+        initialProject={contentObject.editor_project}
+        initialHtml={typeof contentObject.html === "string" ? contentObject.html : ""}
+      />
     </div>
   );
 }

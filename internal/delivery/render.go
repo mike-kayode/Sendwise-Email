@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/microcosm-cc/bluemonday"
+	xhtml "golang.org/x/net/html"
 )
 
 var placeholderPattern = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}`)
@@ -18,7 +19,7 @@ func newImportedHTMLPolicy() *bluemonday.Policy {
 	policy := bluemonday.NewPolicy()
 	policy.AllowElements(
 		"a", "b", "blockquote", "br", "caption", "center", "col", "colgroup",
-		"div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "li",
+		"div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "li",
 		"ol", "p", "span", "strong", "table", "tbody", "td", "th", "thead",
 		"tr", "u", "ul",
 	)
@@ -32,6 +33,7 @@ func newImportedHTMLPolicy() *bluemonday.Policy {
 		"margin", "max-width", "padding", "text-align", "text-decoration", "vertical-align",
 		"width",
 	).Globally()
+	policy.AllowAttrs("src", "alt", "width", "height").OnElements("img")
 	policy.AllowAttrs("href", "title").OnElements("a")
 	policy.AllowURLSchemes("http", "https", "mailto")
 	policy.RequireParseableURLs(true)
@@ -42,6 +44,7 @@ type Design struct {
 	Version     int     `json:"version"`
 	Mode        string  `json:"mode"`
 	TextContent string  `json:"text_content"`
+	HTML        string  `json:"html"`
 	Theme       Theme   `json:"theme"`
 	Blocks      []Block `json:"blocks"`
 }
@@ -86,6 +89,20 @@ func (r *Renderer) RenderDesign(raw json.RawMessage, data map[string]string) (st
 	}
 	theme := defaultTheme(design.Theme)
 
+	if design.Mode != "plain" && strings.TrimSpace(design.HTML) != "" {
+		body := sanitizeEmailHTML(personalize(design.HTML, data), data)
+		text := strings.TrimSpace(design.TextContent)
+		if text == "" {
+			text = textFromHTML(body)
+		} else {
+			text = personalize(text, data)
+		}
+		if text == "" {
+			text = "This email contains HTML content. Please use an email client that displays HTML."
+		}
+		return documentWithTheme(body, theme), text, nil
+	}
+
 	var body strings.Builder
 	var text strings.Builder
 
@@ -125,6 +142,65 @@ func (r *Renderer) RenderDesign(raw json.RawMessage, data map[string]string) (st
 		text.WriteString("This email contains HTML content. Please use an email client that displays HTML.")
 	}
 	return documentWithTheme(body.String(), theme), text.String(), nil
+}
+
+func sanitizeEmailHTML(source string, data map[string]string) string {
+	document, err := xhtml.Parse(strings.NewReader(source))
+	if err != nil {
+		return ""
+	}
+	var bodyNode *xhtml.Node
+	var findBody func(*xhtml.Node)
+	findBody = func(node *xhtml.Node) {
+		if node.Type == xhtml.ElementNode && node.Data == "body" {
+			bodyNode = node
+			return
+		}
+		for child := node.FirstChild; child != nil && bodyNode == nil; child = child.NextSibling {
+			findBody(child)
+		}
+	}
+	findBody(document)
+	if bodyNode == nil {
+		return ""
+	}
+
+	var sanitizeImages func(*xhtml.Node)
+	sanitizeImages = func(parent *xhtml.Node) {
+		for child := parent.FirstChild; child != nil; {
+			next := child.NextSibling
+			if child.Type == xhtml.ElementNode && child.Data == "img" {
+				src := ""
+				for _, attribute := range child.Attr {
+					if attribute.Key == "src" {
+						src = attribute.Val
+						break
+					}
+				}
+				if safeURL, ok := safeImageURL(personalize(src, data), data); ok {
+					for index := range child.Attr {
+						if child.Attr[index].Key == "src" {
+							child.Attr[index].Val = safeURL
+						}
+					}
+				} else {
+					parent.RemoveChild(child)
+				}
+			} else {
+				sanitizeImages(child)
+			}
+			child = next
+		}
+	}
+	sanitizeImages(bodyNode)
+
+	var markup strings.Builder
+	for child := bodyNode.FirstChild; child != nil; child = child.NextSibling {
+		if err := xhtml.Render(&markup, child); err != nil {
+			return ""
+		}
+	}
+	return importedHTMLPolicy.Sanitize(markup.String())
 }
 
 func documentWithTheme(body string, theme Theme) string {
@@ -263,7 +339,7 @@ func renderBlock(block Block, data map[string]string, theme Theme) (string, stri
 			content
 
 	case "custom_html":
-		sanitized := importedHTMLPolicy.Sanitize(personalize(block.Content, data))
+		sanitized := sanitizeEmailHTML(personalize(block.Content, data), data)
 		return sanitized, textFromHTML(sanitized)
 
 	default:

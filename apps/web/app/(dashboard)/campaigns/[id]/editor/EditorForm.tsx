@@ -4,21 +4,37 @@ import { useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Eye, Save } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { EmailDesignEditor, type EmailDesignBlock, type EmailDesignTheme } from "@/components/email-design-editor";
+import { GrapesEmailEditor } from "@/components/grapes-email-editor";
 import { Button } from "@/components/ui/button";
-import { Input, Select } from "@/components/ui/input";
+import { Input, Select, Textarea } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch, type Campaign, type SenderIdentity } from "@/lib/auth";
+import { blocksToHtml, type EmailDesignBlock } from "@/lib/email-html-importer";
+
+type EmailDesignTheme = {
+  background: string;
+  content_background: string;
+  text: string;
+  heading: string;
+  accent: string;
+  button: string;
+  link: string;
+};
 
 export default function EditorForm({
   initialCampaign,
   initialBlocks,
+  initialProject,
+  initialHtml,
 }: {
   initialCampaign: Campaign;
   initialBlocks: EmailDesignBlock[];
+  initialProject?: unknown;
+  initialHtml: string;
 }) {
-  const [blocks, setBlocks] = useState(initialBlocks);
   const initialDesign = initialCampaign.content ?? {};
+  const [editorProject, setEditorProject] = useState<unknown>(initialProject);
+  const [html, setHtml] = useState(initialHtml || blocksToHtml(initialBlocks));
   const [mode, setMode] = useState<"plain" | "html">(initialDesign.mode === "plain" ? "plain" : "html");
   const [textContent, setTextContent] = useState(typeof initialDesign.text_content === "string" ? initialDesign.text_content : "");
   const [theme, setTheme] = useState<EmailDesignTheme>({
@@ -62,7 +78,15 @@ export default function EditorForm({
           subject,
           preview_text: previewText,
           sender_identity_id: senderIdentityID,
-          content: { version: 1, mode, text_content: textContent, theme, blocks },
+          content: {
+            version: 2,
+            editor: "grapesjs",
+            editor_project: editorProject,
+            html,
+            mode,
+            text_content: textContent,
+            theme,
+          },
           track_opens: initialCampaign.track_opens,
           track_clicks: initialCampaign.track_clicks,
         }),
@@ -152,24 +176,49 @@ export default function EditorForm({
         <p className="self-end text-xs text-slate-500">The sender profile supplies the compliance footer and reply address.</p>
       </section>
 
-      <EmailDesignEditor
-        blocks={blocks}
-        onChange={setBlocks}
-        subject={subject}
-        preheader={previewText}
-        mode={mode}
-        onModeChange={(next) => {
-          if (mode === "html" && next === "plain" && !window.confirm("Switching from HTML to plain text may lose layout and formatting. Continue?")) return;
-          if (mode === "html" && next === "plain" && !textContent.trim()) {
-            setTextContent(blocks.map((block) => block.content).filter(Boolean).join("\n\n"));
-          }
-          setMode(next);
-        }}
-        textContent={textContent}
-        onTextContentChange={setTextContent}
-        theme={theme}
-        onThemeChange={setTheme}
-      />
+      <label className="block max-w-sm text-sm font-medium text-slate-700">
+        Content format
+        <Select
+          className="mt-1"
+          value={mode}
+          onChange={(event) => {
+            const next = event.target.value as "plain" | "html";
+            if (mode === "html" && next === "plain" && !window.confirm("Switching from HTML to plain text may lose layout and formatting. Continue?")) return;
+            if (mode === "html" && next === "plain" && !textContent.trim()) {
+              setTextContent(new DOMParser().parseFromString(html, "text/html").body.textContent?.trim() ?? "");
+            }
+            setMode(next);
+            setSaved(false);
+          }}
+        >
+          <option value="html">Visual HTML email</option>
+          <option value="plain">Plain text</option>
+        </Select>
+      </label>
+      {mode === "html" ? (
+        <GrapesEmailEditor
+          project={editorProject}
+          html={html}
+          onChange={(design, changed) => {
+            setEditorProject(design.project);
+            setHtml(design.html);
+            if (changed) setSaved(false);
+          }}
+        />
+      ) : (
+        <label className="block text-sm font-medium text-slate-700">
+          Plain-text message
+          <Textarea
+            rows={12}
+            className="mt-1 font-mono"
+            value={textContent}
+            onChange={(event) => {
+              setTextContent(event.target.value);
+              setSaved(false);
+            }}
+          />
+        </label>
+      )}
     </div>
   );
 }

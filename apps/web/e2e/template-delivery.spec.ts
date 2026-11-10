@@ -292,45 +292,32 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await expect(page.getByLabel("Plain-text message")).toBeVisible();
   await page.getByLabel("Plain-text message").fill("A useful update in plain text.");
   await templateMode.selectOption("html");
-  await page.getByRole("button", { name: "Add heading" }).click();
-  await page.getByLabel("Block content 1").fill("A useful update");
-  await page.getByRole("button", { name: "Add text" }).click();
-  await page.getByLabel("Block content 2").fill("This message started from a saved template.");
-  await page.getByLabel("background color hex", { exact: true }).fill("#ddeeff");
-  await expect(page.getByLabel("background color hex", { exact: true })).toHaveValue("#ddeeff");
-  await page.locator('section[draggable="true"]').nth(0)
-    .dragTo(page.locator('section[draggable="true"]').nth(1));
-  await expect(page.getByLabel("Block content 1")).toHaveValue("This message started from a saved template.");
-
-  await page.getByRole("button", { name: "HTML code" }).click();
-  await page.getByLabel("Import HTML file").setInputFiles({
+  await expect(page.getByTestId("grapes-email-editor")).toBeVisible();
+  await expect(page.getByTestId("email-html-import-input")).toBeEnabled();
+  await page.getByTestId("email-html-import-input").setInputFiles({
     name: "beefree-export.html",
     mimeType: "text/html",
     buffer: Buffer.from(
-      '<h1>Welcome Flowi</h1><p>Imported message</p><a role="button" href="https://example.test">Read more</a><img src="https://images.cloudfront.net/banner.png" alt="Imported banner"><div style="background-image:url(https://images.cloudfront.net/panel.png)">Custom panel</div><a href="https://instagram.example.test/sendwise" aria-label="Instagram"><img src="https://images.cloudfront.net/instagram.png" alt="Instagram"></a>',
+      '<table role="presentation" width="100%"><tr><td><h1>Welcome {{organization}}</h1><p>This message started from an imported email design.</p><a href="https://example.test">Read more</a></td></tr></table>',
     ),
   });
-  await page.getByRole("button", { name: "Convert HTML to editable blocks" }).click();
-  await expect(page.getByLabel("Block content 1")).toHaveValue("Welcome {{organization}}");
-  await expect(page.getByLabel("Image URL 4")).toHaveValue("/template-assets/neutral-banner.svg");
-  await expect(page.getByLabel("Block content 5")).not.toHaveValue(/cloudfront\.net/);
-  await expect(page.getByLabel("Block content 5")).toHaveValue(/neutral-banner\.svg/);
-  await expect(page.getByLabel("Block content 6")).toHaveValue("Instagram");
-  const htmlPreview = page.frameLocator('iframe[title="HTML content preview"]');
-  await expect(htmlPreview.getByText("Custom panel", { exact: true })).toBeVisible();
-  await expect(htmlPreview.locator("body")).not.toContainText("<div");
-  await page.getByLabel("Upload image 4").setInputFiles({
-    name: "one-pixel.gif",
-    mimeType: "image/gif",
-    buffer: Buffer.from("R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=", "base64"),
-  });
-  await expect(page.getByLabel("Image URL 4")).toHaveValue(/^\/api\/v1\/public\/assets\/[0-9a-f-]{36}$/);
-  const uploadedImageURL = await page.getByLabel("Image URL 4").inputValue();
-  const uploadedImage = await request.get(`${API_ORIGIN}${uploadedImageURL}`);
-  expect(uploadedImage.status()).toBe(200);
-  expect(uploadedImage.headers()["content-type"]).toBe("image/gif");
+  await expect(page.frameLocator("iframe.gjs-frame").locator("h1").filter({ hasText: "Welcome {{organization}}" })).toBeVisible();
   await page.getByRole("button", { name: "Save template" }).click();
   await expect(page.getByText("Your design is ready to use in a campaign.")).toBeVisible();
+  const templateID = page.url().split("/").at(-1);
+  expect(templateID).toBeTruthy();
+  const savedTemplateResponse = await request.get(`${API_ORIGIN}/api/v1/templates/${templateID}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  expect(savedTemplateResponse.status(), await savedTemplateResponse.text()).toBe(200);
+  const savedTemplate = await savedTemplateResponse.json() as { design: unknown };
+  const savedDesign = typeof savedTemplate.design === "string"
+    ? JSON.parse(savedTemplate.design) as Record<string, unknown>
+    : savedTemplate.design as Record<string, unknown>;
+  expect(savedDesign.editor).toBe("grapesjs");
+  expect(savedDesign.editor_project).toMatchObject({ pages: expect.any(Array) });
+  expect(savedDesign.html).toContain("Welcome {{organization}}");
+
   const testRecipient = `task5-test-${stamp}@example.test`;
   await page.getByLabel("Test recipient").fill(testRecipient);
   await page.getByRole("button", { name: "Send test email" }).click();
@@ -343,9 +330,6 @@ test("register, import an audience, edit a template, send, and verify campaign r
     const result = await response.json() as { total?: number; messages?: unknown[] };
     return result.total ?? result.messages?.length ?? 0;
   }, { timeout: 30_000 }).toBeGreaterThan(0);
-  const templateID = page.url().split("/").at(-1);
-  expect(templateID).toBeTruthy();
-
   await page.goto(`/campaigns/new?template_id=${encodeURIComponent(templateID!)}`);
   await expect(page.getByText(`Using template: ${templateName}`)).toBeVisible();
   await page.locator("#subject").fill("Task 5 delivery proof");
@@ -356,10 +340,11 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await page.waitForURL(/\/campaigns\/[0-9a-f-]+\/editor$/);
   const campaignID = page.url().match(/\/campaigns\/([0-9a-f-]+)\/editor$/)?.[1];
   expect(campaignID).toBeTruthy();
-  await expect(page.getByLabel("Block content 1")).toHaveValue("Welcome {{organization}}");
+  await expect(page.getByTestId("grapes-email-editor")).toBeVisible();
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("All changes saved.")).toBeVisible();
   await page.getByRole("link", { name: "Preview & send" }).click();
+  await expect(page.frameLocator('iframe[title="Email HTML preview"]').locator("h1").filter({ hasText: "Welcome {{organization}}" })).toBeVisible();
   await expect(page.getByText("All required checks passed.")).toBeVisible();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Send now" }).click();

@@ -4,10 +4,9 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { LayoutTemplate, Plus, Search, Sparkles, Trash2 } from "lucide-react";
+import { LayoutTemplate, Plus, Search, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input, Select } from "@/components/ui/input";
@@ -25,86 +24,6 @@ type Template = {
 };
 
 const templateCategories = ["general", "newsletter", "lifecycle", "promotion", "events"];
-const accents = ["#4f46e5", "#0891b2", "#b45309", "#059669", "#e11d48", "#7c3aed"];
-const variants = ["digest", "welcome", "launch", "plain"] as const;
-const builtInTemplates = [
-  { name: "Welcome Note", category: "lifecycle", accent: "#4f46e5", variant: "welcome" },
-  { name: "Monthly Digest", category: "newsletter", accent: "#0891b2", variant: "digest" },
-  { name: "Product Launch", category: "promotion", accent: "#7c3aed", variant: "launch" },
-  { name: "Event Invitation", category: "events", accent: "#059669", variant: "welcome" },
-  { name: "Customer Story", category: "newsletter", accent: "#b45309", variant: "digest" },
-  { name: "Product Update", category: "general", accent: "#e11d48", variant: "plain" },
-  { name: "Sale Announcement", category: "promotion", accent: "#db2777", variant: "launch" },
-  { name: "Event Follow-up", category: "events", accent: "#0f766e", variant: "plain" },
-] as const;
-
-function builtInDesign(name: string, accent: string) {
-  return {
-    version: 1,
-    mode: "html",
-    theme: {
-      background: "#f1f5f9",
-      content_background: "#ffffff",
-      text: "#334155",
-      heading: "#0f172a",
-      accent,
-      button: accent,
-      link: accent,
-    },
-    blocks: [
-      { type: "header", content: "", src: "/template-assets/neutral-logo.svg", alt: "Newsletter", align: "center" },
-      { type: "heading", content: name, align: "center" },
-      { type: "paragraph", content: "Share a thoughtful update with your subscribers. Add your own message, brand details, and links here.", align: "left" },
-      { type: "image", content: "", src: "/template-assets/neutral-banner.svg", alt: "Decorative banner" },
-      { type: "button", content: "Read the update", url: "", align: "center", bg_color: accent },
-      { type: "footer", content: "Your sender profile and unsubscribe link are added when this message is sent.", align: "center" },
-    ],
-  };
-}
-
-function TemplateThumb({ accent, variant }: { accent: string; variant: string }) {
-  return (
-    <div className="flex h-44 flex-col gap-2 overflow-hidden rounded-lg border border-slate-200 bg-white p-4">
-      <div className="h-2 w-10 rounded-full" style={{ backgroundColor: accent }} />
-      {variant === "digest" ? (
-        <>
-          <div className="h-2.5 w-3/4 rounded bg-slate-800" />
-          <div className="h-14 rounded" style={{ backgroundColor: `${accent}22` }} />
-          <div className="h-1.5 w-full rounded bg-slate-200" />
-          <div className="h-1.5 w-5/6 rounded bg-slate-200" />
-          <div className="mt-auto h-5 w-20 rounded" style={{ backgroundColor: accent }} />
-        </>
-      ) : variant === "welcome" ? (
-        <>
-          <div className="h-2.5 w-2/3 rounded bg-slate-800" />
-          <div className="h-1.5 w-full rounded bg-slate-200" />
-          <div className="h-1.5 w-4/6 rounded bg-slate-200" />
-          <div className="mt-2 h-10 rounded" style={{ backgroundColor: `${accent}18` }} />
-          <div className="mt-auto h-5 w-24 rounded" style={{ backgroundColor: accent }} />
-        </>
-      ) : variant === "launch" ? (
-        <>
-          <div className="h-16 rounded" style={{ backgroundColor: `${accent}25` }} />
-          <div className="h-2.5 w-3/4 rounded bg-slate-800" />
-          <div className="h-1.5 w-full rounded bg-slate-200" />
-          <div className="mt-auto flex gap-2">
-            <div className="h-5 w-20 rounded" style={{ backgroundColor: accent }} />
-            <div className="h-5 w-16 rounded border border-slate-200" />
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="h-2.5 w-1/2 rounded bg-slate-800" />
-          <div className="h-1.5 w-full rounded bg-slate-200" />
-          <div className="h-1.5 w-11/12 rounded bg-slate-200" />
-          <div className="h-1.5 w-4/5 rounded bg-slate-200" />
-          <div className="mt-auto h-5 w-20 rounded" style={{ backgroundColor: accent }} />
-        </>
-      )}
-    </div>
-  );
-}
-
 export default function TemplatesPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -117,7 +36,6 @@ export default function TemplatesPage() {
   const [newCategory, setNewCategory] = useState("general");
   const [creating, setCreating] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [usingBuiltin, setUsingBuiltin] = useState<string | null>(null);
 
   const templatesQuery = useQuery({
     queryKey: ["templates"],
@@ -169,35 +87,6 @@ export default function TemplatesPage() {
     }
   };
 
-  const handleUseBuiltin = async (builtin: (typeof builtInTemplates)[number]) => {
-    if (usingBuiltin) return;
-    setUsingBuiltin(builtin.name);
-    try {
-      const template = await apiFetch<Template>("/templates", {
-        method: "POST",
-        body: JSON.stringify({ name: builtin.name, category: builtin.category }),
-      });
-      await apiFetch<Template>(`/templates/${template.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          design: builtInDesign(builtin.name, builtin.accent),
-          mode: "html",
-          theme: builtInDesign(builtin.name, builtin.accent).theme,
-        }),
-      });
-      await queryClient.invalidateQueries({ queryKey: ["templates"] });
-      router.push(`/templates/${template.id}`);
-    } catch (error) {
-      toast({
-        title: "Could not use template",
-        description: error instanceof Error ? error.message : "The template could not be copied.",
-        variant: "destructive",
-      });
-    } finally {
-      setUsingBuiltin(null);
-    }
-  };
-
   const handleDeleteTemplate = async (template: Template) => {
     if (!window.confirm(`Delete "${template.name}"? Campaigns already created from it will not be affected.`)) return;
     setDeletingId(template.id);
@@ -246,37 +135,6 @@ export default function TemplatesPage() {
         </div>
       ) : null}
 
-      <section className="mb-8">
-        <div className="mb-3">
-          <h2 className="text-base font-semibold text-slate-900">Prebuilt templates</h2>
-          <p className="text-sm text-slate-500">Original, editable starting points. Use a template to create your own workspace copy.</p>
-        </div>
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          {builtInTemplates.map((template) => (
-            <Card key={template.name}>
-              <CardContent className="p-4">
-                <TemplateThumb accent={template.accent} variant={template.variant} />
-                <div className="mt-3 flex items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-semibold text-slate-900">{template.name}</p>
-                    <p className="text-xs capitalize text-slate-500">{template.category}</p>
-                  </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    disabled={usingBuiltin !== null}
-                    onClick={() => void handleUseBuiltin(template)}
-                  >
-                    {usingBuiltin === template.name ? "Copying…" : "Use template"}
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      </section>
-
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap gap-1">
           {categoryChips.map((item) => (
@@ -319,17 +177,14 @@ export default function TemplatesPage() {
           filteredTemplates.map((template, index) => (
             <Card key={template.id}>
               <CardContent className="p-4">
-                <TemplateThumb
-                  accent={accents[index % accents.length]}
-                  variant={variants[index % variants.length]}
-                />
-                <div className="mt-3 flex items-start justify-between gap-2">
+                <div className="flex min-h-32 flex-col justify-between rounded-lg border border-slate-100 bg-slate-50 p-4">
                   <div>
                     <p className="text-sm font-semibold text-slate-900">{template.name}</p>
-                    <p className="mt-0.5 text-xs text-slate-500">
+                    <p className="mt-1 text-xs text-slate-500">
                       Updated {formatDate(template.updated_at)} · {template.category}
                     </p>
                   </div>
+                  <p className="text-xs text-slate-400">Saved email design</p>
                 </div>
                 <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
                   <button
@@ -372,17 +227,6 @@ export default function TemplatesPage() {
             Create a blank template, then use it to build a campaign in the editor.
           </span>
         </button>
-      </div>
-
-      <div className="mt-5 flex items-center justify-between rounded-xl border border-slate-200 bg-white px-5 py-4">
-        <div className="flex items-center gap-3">
-          <Badge variant="indigo">
-            <Sparkles className="h-3 w-3" /> Tip
-          </Badge>
-          <p className="text-sm text-slate-600">
-            Templates use the same block format as campaigns, so previews stay consistent.
-          </p>
-        </div>
       </div>
 
       <Dialog open={isNewTemplateOpen} onOpenChange={closeNewTemplate}>

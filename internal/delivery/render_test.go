@@ -117,6 +117,43 @@ func TestRenderDesignSanitizesImportedHTML(t *testing.T) {
 	}
 }
 
+func TestRenderEmailBuilderDesignSanitizesAndPersonalizesHTML(t *testing.T) {
+	raw := json.RawMessage(`{
+		"version":2,
+		"editor":"grapesjs",
+		"editor_project":{"pages":[{"component":"saved project data"}]},
+		"html":"<table><tr><td><h1>Hi {{first_name}}</h1><p style=\"color:#123456\">Welcome to {{organization}}</p><img src=\"/api/v1/public/assets/6416c701-bb37-43ce-a0ff-dba04ec9e215\" alt=\"Logo\"><img src=\"https://tracker.example/pixel\"><script>alert(1)</script></td></tr></table>"
+	}`)
+	htmlBody, textBody, err := NewRenderer().RenderDesign(raw, map[string]string{
+		"first_name":   "Ada",
+		"organization": "Sendwise",
+		"app_base_url": "https://sendwise.example",
+	})
+	if err != nil {
+		t.Fatalf("RenderDesign() error = %v", err)
+	}
+	for _, expected := range []string{
+		"Hi Ada",
+		"Welcome to Sendwise",
+		"https://sendwise.example/api/v1/public/assets/6416c701-bb37-43ce-a0ff-dba04ec9e215",
+		"color: #123456",
+	} {
+		if !strings.Contains(htmlBody, expected) {
+			t.Fatalf("EmailBuilder HTML is missing %q: %q", expected, htmlBody)
+		}
+	}
+	for _, forbidden := range []string{"tracker.example", "<script", "alert(1)"} {
+		if strings.Contains(htmlBody, forbidden) || strings.Contains(textBody, forbidden) {
+			t.Fatalf("unsafe EmailBuilder markup %q was retained: HTML=%q text=%q", forbidden, htmlBody, textBody)
+		}
+	}
+	for _, expected := range []string{"Hi Ada", "Welcome to Sendwise"} {
+		if !strings.Contains(textBody, expected) {
+			t.Fatalf("plain-text version is missing %q: %q", expected, textBody)
+		}
+	}
+}
+
 func TestSafeImageURLRequiresSendwiseHost(t *testing.T) {
 	data := map[string]string{"app_base_url": "https://sendwise.example"}
 	if got, ok := safeImageURL("/template-assets/neutral-banner.svg", data); !ok || got != "https://sendwise.example/template-assets/neutral-banner.svg" {

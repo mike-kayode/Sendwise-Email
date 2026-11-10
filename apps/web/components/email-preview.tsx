@@ -38,7 +38,7 @@ const defaultTheme: EmailTheme = {
 const allowedHTMLTags = new Set([
   "a", "b", "blockquote", "br", "caption", "center", "col", "colgroup",
   "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "li",
-  "ol", "p", "span", "strong", "table", "tbody", "td", "th", "thead",
+  "img", "ol", "p", "span", "strong", "table", "tbody", "td", "th", "thead",
   "tr", "u", "ul",
 ]);
 const droppedHTMLTags = new Set([
@@ -46,7 +46,7 @@ const droppedHTMLTags = new Set([
   "meta", "object", "script", "style", "svg", "template", "video",
 ]);
 const allowedHTMLAttributes = new Set([
-  "align", "border", "cellpadding", "cellspacing", "colspan", "height",
+  "align", "alt", "border", "cellpadding", "cellspacing", "colspan", "height",
   "role", "rowspan", "valign", "width",
 ]);
 const allowedCSSProperties = new Set([
@@ -82,11 +82,19 @@ function renderableImportedHTML(source: string): string {
       }
 
       const isAnchorAttribute = tag === "a" && (attribute.name === "href" || attribute.name === "title");
-      if (!allowedHTMLAttributes.has(attribute.name) && !isAnchorAttribute) {
+      const isImageAttribute = tag === "img" && attribute.name === "src";
+      if (!allowedHTMLAttributes.has(attribute.name) && !isAnchorAttribute && !isImageAttribute) {
         node.removeAttribute(attribute.name);
       } else if (attribute.name === "href") {
         const href = attribute.value.trim();
         if (!/^(https?:|mailto:)/i.test(href)) node.removeAttribute(attribute.name);
+      } else if (isImageAttribute) {
+        const src = attribute.value.trim();
+        if (/^\/(?:api\/v1\/public\/assets\/[0-9a-f-]{36}|template-assets\/[a-z0-9._/-]+)$/i.test(src) && !src.includes("..")) {
+          node.setAttribute("src", apiUrl(src));
+        } else {
+          node.removeAttribute(attribute.name);
+        }
       }
     }
 
@@ -100,7 +108,12 @@ function renderableImportedHTML(source: string): string {
 
 function importedHTMLPreviewDocument(source: string): string {
   const safeHTML = renderableImportedHTML(source);
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; script-src 'none'"><meta name="viewport" content="width=device-width, initial-scale=1"><style>html,body{margin:0;padding:0;background:#fff;color:#334155;font:14px/1.6 Arial,sans-serif}body{box-sizing:border-box;padding:16px;overflow-wrap:anywhere}a{pointer-events:none}</style></head><body>${safeHTML}</body></html>`;
+  const imageOrigins = new Set([
+    window.location.origin,
+    new URL(apiUrl("/api/v1/public/assets/preview"), window.location.href).origin,
+  ]);
+  const imagePolicy = [...imageOrigins].join(" ");
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src ${imagePolicy}; font-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; script-src 'none'"><meta name="viewport" content="width=device-width, initial-scale=1"><style>html,body{margin:0;padding:0;background:#fff;color:#334155;font:14px/1.6 Arial,sans-serif}body{box-sizing:border-box;padding:16px;overflow-wrap:anywhere}a{pointer-events:none}img{max-width:100%;height:auto}</style></head><body>${safeHTML}</body></html>`;
 }
 
 const emptyPreviewDocument = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body></body></html>";
@@ -111,6 +124,7 @@ export function EmailPreview({
   preheader = "Automations, faster imports, and a refreshed template library.",
   theme = defaultTheme,
   textContent,
+  html,
   viewport = "desktop",
 }: {
   blocks?: EmailBlock[];
@@ -118,6 +132,7 @@ export function EmailPreview({
   preheader?: string;
   theme?: EmailTheme;
   textContent?: string;
+  html?: string;
   viewport?: "desktop" | "mobile";
 }) {
   const [customHTMLPreviews, setCustomHTMLPreviews] = useState<Record<string, string>>({});
@@ -139,7 +154,14 @@ export function EmailPreview({
         <p className="mt-0.5 truncate text-[11px] text-slate-400">{preheader}</p>
       </div>
       <div className="px-8 py-8" style={{ backgroundColor: theme.background }}>
-        <div className="email-canvas mx-auto max-w-md space-y-3 p-6 text-sm" style={{ backgroundColor: theme.content_background, color: theme.text }}>
+        {html !== undefined ? (
+          <iframe
+            title="Email HTML preview"
+            sandbox=""
+            srcDoc={importedHTMLPreviewDocument(html)}
+            className="mx-auto min-h-[480px] w-full max-w-2xl rounded border border-slate-200 bg-white"
+          />
+        ) : <div className="email-canvas mx-auto max-w-md space-y-3 p-6 text-sm" style={{ backgroundColor: theme.content_background, color: theme.text }}>
           {textContent !== undefined ? <p className="whitespace-pre-wrap">{textContent}</p> : null}
           {blocks.map((block) => {
             if (block.type === "heading") {
@@ -199,7 +221,7 @@ export function EmailPreview({
             }
             return null;
           })}
-        </div>
+        </div>}
       </div>
     </div>
   );

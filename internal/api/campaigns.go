@@ -451,10 +451,12 @@ func (s *Server) validateCampaign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var design delivery.Design
-	if err := json.Unmarshal(c.Content, &design); err == nil && len(design.Blocks) > 0 {
-		add("content", "pass", "Email content contains at least one block.")
+	if err := json.Unmarshal(c.Content, &design); err == nil &&
+		(len(design.Blocks) > 0 || strings.TrimSpace(design.HTML) != "" ||
+			(design.Mode == "plain" && strings.TrimSpace(design.TextContent) != "")) {
+		add("content", "pass", "Email content is ready.")
 	} else {
-		add("content", "error", "Add at least one content block to the email.")
+		add("content", "error", "Add content to the email before sending.")
 	}
 
 	switch {
