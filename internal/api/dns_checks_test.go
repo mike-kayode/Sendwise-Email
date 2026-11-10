@@ -5,7 +5,44 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 )
+
+func TestDNSResolverServersHonorConfiguredAddress(t *testing.T) {
+	defaults := dnsResolverServers("")
+	if len(defaults) != 2 || defaults[0] != "1.1.1.1:53" || defaults[1] != "8.8.8.8:53" {
+		t.Fatalf("dnsResolverServers(\"\") = %v, want the public defaults", defaults)
+	}
+	cases := map[string]string{
+		"10.0.0.53":      "10.0.0.53:53",
+		"10.0.0.53:5353": "10.0.0.53:5353",
+		"dns.internal":   "dns.internal:53",
+		"2001:db8::1":    "[2001:db8::1]:53",
+	}
+	for input, want := range cases {
+		got := dnsResolverServers(input)
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("dnsResolverServers(%q) = %v, want [%q]", input, got, want)
+		}
+	}
+}
+
+func TestNewDNSResolverCarriesConfiguredServerIntoVerification(t *testing.T) {
+	configured, ok := newDNSResolver("10.0.0.53", time.Second).(*netDNSResolver)
+	if !ok {
+		t.Fatal("newDNSResolver did not return a netDNSResolver")
+	}
+	if len(configured.servers) != 1 || configured.servers[0] != "10.0.0.53:53" {
+		t.Fatalf("configured resolver servers = %v, want [10.0.0.53:53]", configured.servers)
+	}
+	byDefault, ok := newDNSResolver("", time.Second).(*netDNSResolver)
+	if !ok {
+		t.Fatal("newDNSResolver did not return a netDNSResolver")
+	}
+	if len(byDefault.servers) != len(defaultDNSResolvers) {
+		t.Fatalf("default resolver servers = %v, want %v", byDefault.servers, defaultDNSResolvers)
+	}
+}
 
 type sourceRecordingResolver struct {
 	mu      sync.Mutex

@@ -1,7 +1,7 @@
 # Sendwise Status
 
-Evidence recorded 2026-11-09 from the local development stack and GitHub Actions
-run #69. This report does not describe production behavior.
+Local evidence below was recorded 2026-11-09 from the development stack and
+GitHub Actions run #69. Production and follow-up evidence is dated separately.
 
 ## Part 1 — transactional registration email
 
@@ -141,9 +141,9 @@ Running 12 tests using 1 worker
 11 passed (1.3m)
 ```
 
-The skipped test is the real insecure-origin clipboard test; no
-`E2E_INSECURE_ORIGIN` was configured. The separate fake-resolver timing test
-printed:
+The full suite's insecure-origin test was skipped because
+`E2E_INSECURE_ORIGIN` was not configured for that run. A separate real
+insecure-origin run is recorded below. The fake-resolver timing test printed:
 
 ```text
 === RUN   TestDomainDNSParallelLatencyComparedWithSequentialLookups
@@ -200,15 +200,43 @@ The browser suite and dedicated relay-recovery Playwright proof reported:
 The two skipped cases require optional E2E settings; the separate relay-recovery
 spec ran and passed.
 
+## Production and follow-up evidence — 2026-11-10
+
+- Production Stalwart is running and reports `healthy`. Its active platform
+  DKIM key is `v1-rsa-20261110`; the public record is available from the
+  provisioner output. External STARTTLS certificate validation succeeded.
+- An authenticated SMTP test using `hello@pipsleague.com` was accepted by
+  Stalwart (`SENT-OK`). This proves submission acceptance only; inbox delivery
+  and placement have not been confirmed.
+- Both authoritative DNS servers and Cloudflare's resolver still return the
+  existing SPF and DMARC values, with no platform DKIM TXT record and no
+  `bounces.pipsleague.com` MX record. The existing apex MX records remain
+  unchanged. The required DNS changes have not been published.
+- Hostinger's DNS-zone GET returns HTTP 403 with
+  `[DNS:4002] Customer does not own pipsleague.com domain`; its ownership
+  verifier reports `is_accessible=false`. The hPanel browser page is
+  unauthenticated, so the DNS records could not be changed from this session.
+- The dedicated clipboard fallback test passed on a real insecure HTTP origin:
+
+  ```text
+  E2E_INSECURE_ORIGIN=http://192.168.0.188:3000 npx playwright test clipboard-insecure-origin.spec.ts --reporter=line
+  1 passed (1.6s)
+  ```
+
+- Current local validation passed: `go vet ./...`, `go test ./...`,
+  `go build ./...`, web typecheck/lint/tests/build, Compose configuration,
+  shell syntax, and `git diff --check`. The web tests reported 10 passed and
+  0 failed.
+
 ## Not done / not independently verified
 
 - Production-provider delivery to an external inbox; local Mailpit is not that
   proof.
-- DNS verification against a domain under our control using public and
-  authoritative resolvers. The latency figure above is simulated.
-- Production Stalwart provisioning, external deliverability, and production
-  deployment. No production system was accessed.
-- Real non-HTTPS clipboard behavior; its browser test was skipped.
+- Publication and propagation of the required production DKIM, SPF, bounce MX,
+  and DMARC records. The API ownership error currently prevents programmatic
+  updates, and hPanel changes require an authenticated account session.
+- Production bounce collection. The Stalwart inbound route/collector is not
+  configured to forward real DSNs or ARFs to Sendwise.
 - Redistribution rights and user-provided Figma exports/images for any bundled
   artwork.
 - Any unrelated legacy module not demonstrated by the commands above. Prior

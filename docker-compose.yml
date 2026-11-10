@@ -139,6 +139,9 @@ services:
       MAIL_PROVIDER: ${MAIL_PROVIDER:-auto}
       DKIM_ENCRYPTION_KEY: ${DKIM_ENCRYPTION_KEY:-}
       SPF_INCLUDE: ${SPF_INCLUDE:-}
+      # The API validates VERP bounce return paths against this domain; it must
+      # match the worker's value or every feedback webhook fails with invalid_verp.
+      BOUNCE_DOMAIN: ${BOUNCE_DOMAIN:-bounces.sendwise.test}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       REQUIRE_VERIFIED_DOMAIN: ${REQUIRE_VERIFIED_DOMAIN:-true}
     depends_on:

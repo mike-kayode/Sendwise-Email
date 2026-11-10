@@ -57,6 +57,10 @@ case "$STALWART_URL" in
 esac
 [[ "$STALWART_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || fail "STALWART_DOMAIN must be a DNS domain"
 [[ "$STALWART_HOSTNAME" =~ ^[A-Za-z0-9.-]+$ ]] || fail "STALWART_HOSTNAME must be a DNS hostname"
+# Same default as internal/config/config.go: the API validates VERP bounce
+# return paths against this domain, so it must match the running app config.
+BOUNCE_DOMAIN="${BOUNCE_DOMAIN:-bounces.sendwise.test}"
+[[ "$BOUNCE_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || fail "BOUNCE_DOMAIN must be a DNS domain"
 [[ "$STALWART_SUBMIT_USERNAME" =~ ^[A-Za-z0-9._+-]+$ ]] || fail "STALWART_SUBMIT_USERNAME is invalid"
 password_is_strong() {
   local password="$1"
@@ -83,6 +87,7 @@ if [[ "$dry_run" -eq 1 ]]; then
   fi
   printf 'DNS to publish after provisioning:\n'
   printf '  %s MX 10 %s.\n' "$STALWART_DOMAIN" "$STALWART_HOSTNAME"
+  printf '  %s MX 10 %s.\n' "$BOUNCE_DOMAIN" "$STALWART_HOSTNAME"
   printf '  %s A <SERVER_PUBLIC_IP>\n' "$STALWART_HOSTNAME"
   printf '  %s TXT "v=spf1 mx -all"\n' "$STALWART_DOMAIN"
   printf '  <ACTIVE_SELECTOR>._domainkey.%s TXT <DKIM_RECORD_FROM_PROVISION_OUTPUT>\n' "$STALWART_DOMAIN"
@@ -447,6 +452,7 @@ printf 'Stalwart v1.0.3 provisioned: domain=%s submission=noreply@%s; 587 STARTT
   "$STALWART_DOMAIN" "$STALWART_DOMAIN"
 printf 'DNS records to publish:\n'
 printf '  %s MX 10 %s.\n' "$STALWART_DOMAIN" "$STALWART_HOSTNAME"
+printf '  %s MX 10 %s.\n' "$BOUNCE_DOMAIN" "$STALWART_HOSTNAME"
 printf '  %s A <SERVER_PUBLIC_IP>\n' "$STALWART_HOSTNAME"
 printf '  %s TXT "v=spf1 mx -all"\n' "$STALWART_DOMAIN"
 jq -r --arg domain "$domain_id" --arg name "$STALWART_DOMAIN" \
@@ -455,5 +461,6 @@ jq -r --arg domain "$domain_id" --arg name "$STALWART_DOMAIN" \
   <<<"$dkim_response"
 printf '  _dmarc.%s TXT "v=DMARC1; p=none; rua=mailto:dmarc@%s"\n' "$STALWART_DOMAIN" "$STALWART_DOMAIN"
 printf '  Request PTR: <SERVER_PUBLIC_IP> -> %s.\n' "$STALWART_HOSTNAME"
+printf 'Bounce note: bounces+<token>@%s also needs an inbound route and collector on the Stalwart host; this script does not create them.\n' "$BOUNCE_DOMAIN"
 printf 'Smoke: swaks --server %s --port 587 --tls --auth LOGIN --auth-user noreply@%s --auth-password "$STALWART_SUBMIT_PASSWORD" --from noreply@%s --to <TEST_RECIPIENT>\n' \
   "$STALWART_HOSTNAME" "$STALWART_DOMAIN" "$STALWART_DOMAIN"

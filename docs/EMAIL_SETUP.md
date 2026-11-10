@@ -154,7 +154,9 @@ publish port 8081 through a firewall or reverse proxy.
 ## Domain sending and DKIM ownership
 
 The Domains page checks each required record directly through Cloudflare
-(`1.1.1.1`), Google (`8.8.8.8`), and the authoritative nameservers. It resolves
+(`1.1.1.1`), Google (`8.8.8.8`), and the authoritative nameservers, or through
+`DNS_RESOLVER_ADDR` when that is configured (it replaces the two public
+resolvers and is also used for nameserver discovery). It resolves
 the closest authoritative zone for the sending domain (including delegated
 subdomains), discovers that zone's nameservers once per check, and runs the
 public-resolver queries concurrently. DNS responses are not cached by the
@@ -219,8 +221,10 @@ aligns.
 
 `BOUNCE_DOMAIN` also needs an MX record pointing to a Stalwart host and a
 configured mailbox/collector that accepts `bounces+<token>@<BOUNCE_DOMAIN>`.
-The current provisioner does not yet configure that inbound route or collector;
-publishing only the DNS record will not make campaign bounces flow into Sendwise.
+The provisioner prints that MX record alongside the platform records (using
+`BOUNCE_DOMAIN`, defaulting to the same value as the app config), but it does
+not configure the inbound route or collector; publishing only the DNS record
+will not make campaign bounces flow into Sendwise.
 
 Verify inbound port 25 is reachable when Stalwart is expected to receive mail.
 A successful SMTP acceptance test does not prove external delivery, inbox

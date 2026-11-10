@@ -194,7 +194,10 @@ func (r *netDNSResolver) lookupBySource(
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
-	publicResolvers := []string{"1.1.1.1:53", "8.8.8.8:53"}
+	publicResolvers := r.servers
+	if len(publicResolvers) == 0 {
+		publicResolvers = defaultDNSResolvers
+	}
 	authorityLookup, ok := ctx.Value(dnsAuthorityLookupKey{}).(*dnsAuthorityLookup)
 	if !ok {
 		authorityLookup = newDNSAuthorityLookup()

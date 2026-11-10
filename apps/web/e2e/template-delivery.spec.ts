@@ -316,6 +316,9 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await expect(page.getByLabel("Block content 5")).not.toHaveValue(/cloudfront\.net/);
   await expect(page.getByLabel("Block content 5")).toHaveValue(/neutral-banner\.svg/);
   await expect(page.getByLabel("Block content 6")).toHaveValue("Instagram");
+  const htmlPreview = page.frameLocator('iframe[title="HTML content preview"]');
+  await expect(htmlPreview.getByText("Custom panel", { exact: true })).toBeVisible();
+  await expect(htmlPreview.locator("body")).not.toContainText("<div");
   await page.getByLabel("Upload image 4").setInputFiles({
     name: "one-pixel.gif",
     mimeType: "image/gif",

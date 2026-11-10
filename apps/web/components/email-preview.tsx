@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { apiUrl } from "@/lib/api-url";
 
 type EmailBlock = {
@@ -32,6 +35,76 @@ const defaultTheme: EmailTheme = {
   link: "#4f46e5",
 };
 
+const allowedHTMLTags = new Set([
+  "a", "b", "blockquote", "br", "caption", "center", "col", "colgroup",
+  "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "li",
+  "ol", "p", "span", "strong", "table", "tbody", "td", "th", "thead",
+  "tr", "u", "ul",
+]);
+const droppedHTMLTags = new Set([
+  "audio", "base", "button", "embed", "form", "iframe", "input", "link",
+  "meta", "object", "script", "style", "svg", "template", "video",
+]);
+const allowedHTMLAttributes = new Set([
+  "align", "border", "cellpadding", "cellspacing", "colspan", "height",
+  "role", "rowspan", "valign", "width",
+]);
+const allowedCSSProperties = new Set([
+  "background-color", "border", "border-collapse", "border-radius", "color",
+  "display", "font-family", "font-size", "font-weight", "height", "line-height",
+  "margin", "max-width", "padding", "text-align", "text-decoration",
+  "vertical-align", "width",
+]);
+
+function renderableImportedHTML(source: string): string {
+  const parsed = new DOMParser().parseFromString(source, "text/html");
+  const sanitizeNode = (node: ChildNode) => {
+    if (!(node instanceof Element)) return;
+    const tag = node.tagName.toLowerCase();
+    if (droppedHTMLTags.has(tag)) {
+      node.remove();
+      return;
+    }
+
+    for (const attribute of Array.from(node.attributes)) {
+      if (attribute.name === "style") {
+        const style = document.createElement("span").style;
+        style.cssText = attribute.value;
+        const safeStyle = Array.from(style).flatMap((property) => {
+          const value = style.getPropertyValue(property);
+          return allowedCSSProperties.has(property) && !/url\s*\(|expression\s*\(|javascript:/i.test(value)
+            ? [`${property}: ${value}`]
+            : [];
+        }).join("; ");
+        if (safeStyle) node.setAttribute("style", safeStyle);
+        else node.removeAttribute("style");
+        continue;
+      }
+
+      const isAnchorAttribute = tag === "a" && (attribute.name === "href" || attribute.name === "title");
+      if (!allowedHTMLAttributes.has(attribute.name) && !isAnchorAttribute) {
+        node.removeAttribute(attribute.name);
+      } else if (attribute.name === "href") {
+        const href = attribute.value.trim();
+        if (!/^(https?:|mailto:)/i.test(href)) node.removeAttribute(attribute.name);
+      }
+    }
+
+    for (const child of Array.from(node.childNodes)) sanitizeNode(child);
+    if (!allowedHTMLTags.has(tag)) node.replaceWith(...Array.from(node.childNodes));
+  };
+
+  for (const child of Array.from(parsed.body.childNodes)) sanitizeNode(child);
+  return parsed.body.innerHTML;
+}
+
+function importedHTMLPreviewDocument(source: string): string {
+  const safeHTML = renderableImportedHTML(source);
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; script-src 'none'"><meta name="viewport" content="width=device-width, initial-scale=1"><style>html,body{margin:0;padding:0;background:#fff;color:#334155;font:14px/1.6 Arial,sans-serif}body{box-sizing:border-box;padding:16px;overflow-wrap:anywhere}a{pointer-events:none}</style></head><body>${safeHTML}</body></html>`;
+}
+
+const emptyPreviewDocument = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body></body></html>";
+
 export function EmailPreview({
   blocks = [],
   subject = "A better way to stay in touch",
@@ -47,6 +120,16 @@ export function EmailPreview({
   textContent?: string;
   viewport?: "desktop" | "mobile";
 }) {
+  const [customHTMLPreviews, setCustomHTMLPreviews] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setCustomHTMLPreviews(Object.fromEntries(
+      blocks
+        .filter((block) => block.type === "custom_html")
+        .map((block) => [block.id, importedHTMLPreviewDocument(block.content)]),
+    ));
+  }, [blocks]);
+
   return (
     <div className={`mx-auto overflow-hidden rounded-xl border border-slate-200 bg-white ${viewport === "mobile" ? "max-w-[360px]" : "max-w-[760px]"}`}>
       <div className="border-b border-slate-100 bg-slate-50 px-4 py-2.5">
@@ -103,7 +186,17 @@ export function EmailPreview({
               return <blockquote key={block.id} className="border-l-4 pl-4 italic" style={{ borderColor: theme.accent }}>{block.content}</blockquote>;
             }
             if (block.type === "social") return <p key={block.id} style={{ color: theme.link }}>{block.content} · social link</p>;
-            if (block.type === "custom_html") return <pre key={block.id} className="overflow-auto whitespace-pre-wrap rounded bg-slate-50 p-2 text-xs">{block.content}</pre>;
+            if (block.type === "custom_html") {
+              return (
+                <iframe
+                  key={block.id}
+                  title="HTML content preview"
+                  sandbox=""
+                  srcDoc={customHTMLPreviews[block.id] ?? emptyPreviewDocument}
+                  className="min-h-[320px] w-full rounded border border-slate-200 bg-white"
+                />
+              );
+            }
             return null;
           })}
         </div>

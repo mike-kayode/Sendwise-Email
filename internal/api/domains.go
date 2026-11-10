@@ -371,6 +371,41 @@ type DNSResolver interface {
 type netDNSResolver struct {
 	resolver *net.Resolver
 	timeout  time.Duration
+	// servers are the recursive resolvers used for record lookups and
+	// authoritative-nameserver discovery.
+	servers []string
+}
+
+// defaultDNSResolvers are the recursive resolvers used for sending-domain DNS
+// verification when DNS_RESOLVER_ADDR is not configured.
+var defaultDNSResolvers = []string{"1.1.1.1:53", "8.8.8.8:53"}
+
+// dnsResolverServers returns the recursive resolvers a check queries. A
+// configured DNS_RESOLVER_ADDR replaces the public defaults so an operator's
+// resolver (for example one that is the only reachable resolver in a locked-down
+// network) is actually consulted instead of being silently ignored.
+func dnsResolverServers(serverAddr string) []string {
+	if strings.TrimSpace(serverAddr) == "" {
+		return append([]string(nil), defaultDNSResolvers...)
+	}
+	return []string{dnsServerAddress(serverAddr)}
+}
+
+// dnsServerAddress normalizes a configured resolver address to the host:port
+// form resolverFor dials verbatim.
+func dnsServerAddress(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(addr); err == nil {
+		return addr
+	}
+	// Bare IP (including IPv6) or bare hostname: append the DNS port.
+	if !strings.Contains(addr, ":") || net.ParseIP(addr) != nil {
+		return net.JoinHostPort(addr, "53")
+	}
+	return addr
 }
 
 func newDNSResolver(serverAddr string, timeout time.Duration) DNSResolver {
@@ -384,7 +419,7 @@ func newDNSResolver(serverAddr string, timeout time.Duration) DNSResolver {
 			return dialer.DialContext(ctx, "udp", serverAddr)
 		}
 	}
-	return &netDNSResolver{resolver: resolver, timeout: timeout}
+	return &netDNSResolver{resolver: resolver, timeout: timeout, servers: dnsResolverServers(serverAddr)}
 }
 
 func (r *netDNSResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {

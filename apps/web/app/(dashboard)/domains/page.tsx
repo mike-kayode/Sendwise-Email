@@ -156,26 +156,40 @@ export default function DomainsPage() {
   };
 
   const copyText = async (text: string, label: string) => {
+    let copied = false;
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
-      } else {
-        throw new Error("Clipboard API unavailable");
+        copied = true;
       }
     } catch {
+      // Permission denials and insecure origins fall through to the fallback.
+    }
+
+    if (!copied) {
+      // navigator.clipboard is undefined on insecure (non-HTTPS) origins, so
+      // copy through a hidden textarea and execCommand instead.
       const textarea = document.createElement("textarea");
       textarea.value = text;
       textarea.setAttribute("readonly", "");
       textarea.style.position = "fixed";
       textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
-      textarea.select();
-      const copied = document.execCommand("copy");
-      textarea.remove();
-      if (!copied) {
-        toast({ title: "Copy failed", description: "Select the value and copy it manually.", variant: "destructive" });
-        return;
+      try {
+        document.body.appendChild(textarea);
+        textarea.select();
+        // iOS Safari does not select from .select() alone.
+        textarea.setSelectionRange(0, textarea.value.length);
+        copied = document.execCommand("copy");
+      } catch {
+        copied = false;
+      } finally {
+        textarea.remove();
       }
+    }
+
+    if (!copied) {
+      toast({ title: "Copy failed", description: "Select the value and copy it manually.", variant: "destructive" });
+      return;
     }
     toast({ title: "Copied", description: `${label} copied. Paste it at your DNS provider.` });
   };
