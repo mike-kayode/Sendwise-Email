@@ -261,6 +261,7 @@ export type DomainDNSRecord = {
   purpose: string;
   status: string;
   found_value?: string;
+  update_recommended?: boolean;
   last_checked?: string;
   resolvers?: Array<{
     resolver: string;

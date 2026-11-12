@@ -1,18 +1,24 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/emersion/go-msgauth/dkim"
 	"github.com/khayode/email-platform/internal/config"
+	"github.com/khayode/email-platform/internal/delivery"
 )
 
 type fakeDNSResolver struct {
@@ -335,12 +341,16 @@ func TestCheckDomainDNSNotFoundIsMissing(t *testing.T) {
 }
 
 func TestDNSRecordsForIncludesSendwiseVerificationRecord(t *testing.T) {
+	publicKey, _, err := generateDKIMKeyPair("dns-record-test-encryption-key")
+	if err != nil {
+		t.Fatal(err)
+	}
 	d := sendingDomain{
 		ID:                "d1",
 		Domain:            "news.example.com",
 		Status:            "pending",
 		DKIMSelector:      "mail",
-		DKIMPublicKey:     "MIIBIjANbgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQE",
+		DKIMPublicKey:     publicKey,
 		VerificationToken: "029be151-9ec4-4fa8-83b8-f8c02b289a96",
 		SPFStatus:         "missing",
 		DKIMStatus:        "missing",
@@ -360,13 +370,92 @@ func TestDNSRecordsForIncludesSendwiseVerificationRecord(t *testing.T) {
 	if records[3].Value != "v=sendwise-verification "+d.VerificationToken {
 		t.Fatalf("verification record value = %q, want generated token", records[3].Value)
 	}
-	if !strings.Contains(records[1].Value, "v=DKIM1; k=rsa; p=MIIBIjANbgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQE") {
-		t.Fatalf("expected generated DKIM key in DNS record, got %q", records[1].Value)
+	publishedKey := strings.TrimPrefix(records[1].Value, "v=DKIM1; k=rsa; p=")
+	publishedDER, err := base64.StdEncoding.DecodeString(publishedKey)
+	if err != nil {
+		t.Fatalf("decode generated DKIM DNS key: %v", err)
+	}
+	if _, err := x509.ParsePKIXPublicKey(publishedDER); err != nil {
+		t.Fatalf("generated DKIM DNS key is not SPKI: %v", err)
 	}
 	for _, record := range records {
 		if strings.Contains(record.Value, "yourplatform.com") || strings.Contains(record.Value, "PUBLIC_KEY_FROM_STALWART") {
 			t.Fatalf("unexpected placeholder DNS value: %+v", record)
 		}
+	}
+}
+
+func TestDNSRecordsForEmitsSPKIAndPreservesPublishedLegacyKey(t *testing.T) {
+	const encryptionKey = "domain-record-format-test"
+	pkcs1Key, encryptedPrivateKey, err := delivery.GenerateDKIMKeyPair(encryptionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey, err := delivery.DecryptDKIMPrivateKey(encryptionKey, encryptedPrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	domain := sendingDomain{
+		Domain: "news.example.com", DKIMSelector: "mail", DKIMPublicKey: pkcs1Key,
+		VerificationToken: "verify-token", DKIMStatus: "pending", Status: "pending",
+	}
+	pendingRecords := dnsRecordsFor(domain, "pending", "", "")
+	pendingDKIM := pendingRecords[1]
+	publishedSPKI := strings.TrimPrefix(pendingDKIM.Value, "v=DKIM1; k=rsa; p=")
+	der, err := base64.StdEncoding.DecodeString(publishedSPKI)
+	if err != nil {
+		t.Fatalf("decode emitted DKIM key: %v", err)
+	}
+	if _, err := x509.ParsePKIXPublicKey(der); err != nil {
+		t.Fatalf("emitted DNS key is not SubjectPublicKeyInfo: %v", err)
+	}
+
+	legacyTXT := "v=DKIM1; k=rsa; p=" + pkcs1Key
+	domain.Status = "verified"
+	domain.DKIMStatus = "verified"
+	domain.DNSCheckDetails, err = json.Marshal(dnsCheckDetails{
+		Records: map[string]dnsRecordResult{
+			"dkim": {Status: "found", FoundValue: legacyTXT},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedRecords := dnsRecordsFor(domain, "verified", "", "")
+	verifiedDKIM := verifiedRecords[1]
+	if verifiedDKIM.Value != legacyTXT {
+		t.Fatalf("verified domain DKIM value = %q, want currently published %q", verifiedDKIM.Value, legacyTXT)
+	}
+	if !verifiedDKIM.UpdateRecommended {
+		t.Fatal("verified legacy PKCS#1 record should recommend an SPKI update")
+	}
+
+	config := &delivery.DKIMConfig{
+		Domain: "news.example.com", Selector: "mail", PublicKey: pkcs1Key, PrivateKey: privateKey,
+	}
+	signed, err := delivery.SignMessage([]byte(
+		"From: sender@news.example.com\r\nTo: receiver@example.net\r\nSubject: DKIM SPKI test\r\n\r\nSigned body.\r\n",
+	), config)
+	if err != nil {
+		t.Fatalf("sign test message: %v", err)
+	}
+	verified, err := dkim.VerifyWithOptions(bytes.NewReader(signed), &dkim.VerifyOptions{
+		LookupTXT: func(name string) ([]string, error) {
+			if name != "mail._domainkey.news.example.com" {
+				return nil, fmt.Errorf("unexpected DKIM lookup name %q", name)
+			}
+			return []string{pendingDKIM.Value}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("verify SPKI-signed test message: %v", err)
+	}
+	if len(verified) != 1 || verified[0].Err != nil {
+		if len(verified) == 0 {
+			t.Fatal("signed message has no DKIM signature")
+		}
+		t.Fatalf("standard DKIM verifier rejected generated SPKI record: %v", verified[0].Err)
 	}
 }
 
@@ -395,6 +484,38 @@ func TestNormalizeDkimTXTValuePreservesCaseAndJoinsChunks(t *testing.T) {
 	}
 	if got := normalizeDkimTXTValue(`v=DKIM1; p=abcdef0123456789`); got == publicKey {
 		t.Fatal("DKIM key comparison must preserve case")
+	}
+}
+
+func TestNormalizeDkimKeyAcceptsPKIXAndPKCS1AndRejectsMismatch(t *testing.T) {
+	first, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkcs1 := base64.StdEncoding.EncodeToString(x509.MarshalPKCS1PublicKey(&first.PublicKey))
+	pkixDER, err := x509.MarshalPKIXPublicKey(&first.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkix := base64.StdEncoding.EncodeToString(pkixDER)
+	otherPKIXDER, err := x509.MarshalPKIXPublicKey(&second.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPKIX := base64.StdEncoding.EncodeToString(otherPKIXDER)
+
+	if normalizeDkimKey(pkix) != normalizeDkimKey(pkcs1) {
+		t.Fatal("SPKI and PKCS#1 encodings of the same key did not normalize equally")
+	}
+	if normalizeDkimTXTValue("v=DKIM1; k=rsa; p="+pkix) != normalizeDkimKey(pkcs1) {
+		t.Fatal("SPKI DKIM TXT record did not match a stored PKCS#1 key")
+	}
+	if normalizeDkimTXTValue("v=DKIM1; k=rsa; p="+otherPKIX) == normalizeDkimKey(pkcs1) {
+		t.Fatal("a different public key normalized as the stored key")
 	}
 }
 

@@ -1303,8 +1303,8 @@ func TestDomainsIntegration(t *testing.T) {
 	if verificationRecord.Value != "v=sendwise-verification "+verificationToken {
 		t.Fatalf("verification TXT record does not contain its unique token: %+v", verificationRecord)
 	}
-	if !strings.Contains(recordsResp.DNSRecords[1].Value, created.DKIMPublicKey) {
-		t.Fatalf("DKIM record does not contain generated public key: %+v", recordsResp.DNSRecords[1])
+	if normalizeDkimTXTValue(recordsResp.DNSRecords[1].Value) != normalizeDkimKey(created.DKIMPublicKey) {
+		t.Fatalf("DKIM record does not match generated public key: %+v", recordsResp.DNSRecords[1])
 	}
 
 	s.dnsResolver = &fakeDNSResolver{records: map[string][]string{

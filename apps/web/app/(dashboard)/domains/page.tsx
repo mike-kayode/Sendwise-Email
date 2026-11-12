@@ -542,6 +542,11 @@ export default function DomainsPage() {
                                   <Copy className="h-3.5 w-3.5" />
                                 </button>
                               </div>
+                              {record.update_recommended ? (
+                                <p role="status" className="mt-2 rounded-md bg-amber-50 px-2 py-1.5 font-sans text-xs text-amber-900">
+                                  Update your DKIM record to the new SPKI format. The currently published key remains valid.
+                                </p>
+                              ) : null}
                               {record.found_value ? (
                                 <p className="mt-1 break-all whitespace-pre-wrap text-[11px] text-slate-600">
                                   Found: {record.found_value}

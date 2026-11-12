@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -403,15 +406,16 @@ func (s *Server) updateDomainWarmupProfile(w http.ResponseWriter, r *http.Reques
 }
 
 type dnsRecord struct {
-	Type        string             `json:"type"`
-	Name        string             `json:"name"`
-	Value       string             `json:"value"`
-	TTL         string             `json:"ttl"`
-	Purpose     string             `json:"purpose"`
-	Status      string             `json:"status"`
-	FoundValue  string             `json:"found_value,omitempty"`
-	Resolvers   []dnsResolverCheck `json:"resolvers,omitempty"`
-	LastChecked *time.Time         `json:"last_checked,omitempty"`
+	Type              string             `json:"type"`
+	Name              string             `json:"name"`
+	Value             string             `json:"value"`
+	TTL               string             `json:"ttl"`
+	Purpose           string             `json:"purpose"`
+	Status            string             `json:"status"`
+	FoundValue        string             `json:"found_value,omitempty"`
+	UpdateRecommended bool               `json:"update_recommended,omitempty"`
+	Resolvers         []dnsResolverCheck `json:"resolvers,omitempty"`
+	LastChecked       *time.Time         `json:"last_checked,omitempty"`
 }
 
 type DNSResolver interface {
@@ -527,6 +531,15 @@ func dnsRecordsFor(d sendingDomain, verification string, trackingBase, spfInclud
 	}
 	spfRecord := record("spf", d.SPFStatus)
 	dkimRecord := record("dkim", d.DKIMStatus)
+	dkimValue := dkimRecordValue(d.DKIMPublicKey)
+	if d.Status == "verified" &&
+		normalizeDkimTXTValue(dkimRecord.FoundValue) == normalizeDkimKey(d.DKIMPublicKey) {
+		publishedKey := dkimTXTKeyValue(dkimRecord.FoundValue)
+		if publishedKey != "" {
+			dkimValue = "v=DKIM1; k=rsa; p=" + publishedKey
+			dkimRecord.UpdateRecommended = isPKCS1DkimKey(publishedKey)
+		}
+	}
 	dmarcRecord := record("dmarc", d.DMARCStatus)
 	verificationRecord := record("verification", verification)
 	mxRecord := record("mx", "warning")
@@ -543,15 +556,16 @@ func dnsRecordsFor(d sendingDomain, verification string, trackingBase, spfInclud
 			LastChecked: spfRecord.LastChecked,
 		},
 		{
-			Type:        "TXT",
-			Name:        d.DKIMSelector + "._domainkey." + d.Domain,
-			Value:       dkimRecordValue(d.DKIMPublicKey),
-			TTL:         dkimRecord.TTL,
-			Purpose:     "DKIM cryptographically signs outbound messages. Copy the public key from your DNS provider.",
-			Status:      dkimRecord.Status,
-			FoundValue:  dkimRecord.FoundValue,
-			Resolvers:   dkimRecord.Resolvers,
-			LastChecked: dkimRecord.LastChecked,
+			Type:              "TXT",
+			Name:              d.DKIMSelector + "._domainkey." + d.Domain,
+			Value:             dkimValue,
+			TTL:               dkimRecord.TTL,
+			Purpose:           "DKIM cryptographically signs outbound messages. Copy the public key from your DNS provider.",
+			Status:            dkimRecord.Status,
+			FoundValue:        dkimRecord.FoundValue,
+			UpdateRecommended: dkimRecord.UpdateRecommended,
+			Resolvers:         dkimRecord.Resolvers,
+			LastChecked:       dkimRecord.LastChecked,
 		},
 		{
 			Type:        "TXT",
@@ -607,6 +621,15 @@ func dkimRecordValue(publicKeyB64 string) string {
 	if publicKeyB64 == "" {
 		return ""
 	}
+	publicKey, err := parseDkimPublicKey(publicKeyB64)
+	if err != nil {
+		return ""
+	}
+	der, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		return ""
+	}
+	publicKeyB64 = base64.StdEncoding.EncodeToString(der)
 	return "v=DKIM1; k=rsa; p=" + publicKeyB64
 }
 
@@ -762,20 +785,62 @@ func normalizeDkimKey(key string) string {
 	key = strings.ReplaceAll(key, "-----END PUBLIC KEY-----", "")
 	key = strings.ReplaceAll(key, "\\n", "")
 	key = strings.ReplaceAll(key, "\n", "")
-	return strings.Join(strings.Fields(key), "")
+	key = strings.Join(strings.Fields(key), "")
+	publicKey, err := parseDkimPublicKey(key)
+	if err != nil {
+		return key
+	}
+	der, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		return key
+	}
+	return base64.StdEncoding.EncodeToString(der)
 }
 
 // normalizeDkimTXTValue normalizes a DKIM TXT record value: strips quotes and
-// whitespace, takes the "p=" tag, and returns the normalized public key for
-// exact comparison.
+// whitespace, extracts its "p=" tag, and returns the key in canonical SPKI
+// form. Both current SPKI and legacy PKCS#1 public keys are accepted.
 func normalizeDkimTXTValue(txt string) string {
+	return normalizeDkimKey(dkimTXTKeyValue(txt))
+}
+
+func dkimTXTKeyValue(txt string) string {
 	value := strings.ReplaceAll(strings.TrimSpace(txt), "\"", "")
 	value = strings.ReplaceAll(value, "'", "")
 	for _, part := range strings.Split(value, ";") {
 		part = strings.TrimSpace(part)
 		if strings.HasPrefix(part, "p=") {
-			return normalizeDkimKey(strings.TrimSpace(strings.TrimPrefix(part, "p=")))
+			return normalizeDkimKeyMaterial(strings.TrimSpace(strings.TrimPrefix(part, "p=")))
 		}
 	}
 	return ""
+}
+
+func normalizeDkimKeyMaterial(key string) string {
+	return strings.Join(strings.Fields(strings.ReplaceAll(key, "\n", "")), "")
+}
+
+func parseDkimPublicKey(key string) (*rsa.PublicKey, error) {
+	der, err := base64.StdEncoding.DecodeString(normalizeDkimKeyMaterial(key))
+	if err != nil {
+		return nil, err
+	}
+	if parsed, err := x509.ParsePKIXPublicKey(der); err == nil {
+		if publicKey, ok := parsed.(*rsa.PublicKey); ok {
+			return publicKey, nil
+		}
+	}
+	return x509.ParsePKCS1PublicKey(der)
+}
+
+func isPKCS1DkimKey(key string) bool {
+	der, err := base64.StdEncoding.DecodeString(normalizeDkimKeyMaterial(key))
+	if err != nil {
+		return false
+	}
+	if _, err := x509.ParsePKIXPublicKey(der); err == nil {
+		return false
+	}
+	_, err = x509.ParsePKCS1PublicKey(der)
+	return err == nil
 }
