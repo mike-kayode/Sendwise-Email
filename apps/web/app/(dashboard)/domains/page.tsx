@@ -489,24 +489,23 @@ export default function DomainsPage() {
                 <Table className="min-w-[1100px] table-fixed">
                   <Thead>
                     <Tr>
-                      <Th className="w-[7%]">Type</Th>
-                      <Th className="w-[20%]">Name</Th>
-                      <Th className="w-[34%]">Value</Th>
-                      <Th className="w-[6%]">TTL</Th>
-                      <Th className="w-[22%]">Purpose</Th>
-                      <Th className="w-[11%]">Status</Th>
+                      <Th className="w-[8%]">Type</Th>
+                      <Th className="w-[22%]">Name</Th>
+                      <Th className="w-[46%]">Value</Th>
+                      <Th className="w-[8%]">TTL</Th>
+                      <Th className="w-[16%]">Status</Th>
                     </Tr>
                   </Thead>
                   <Tbody>
                     {dnsRecordsQuery.error ? (
                       <Tr>
-                        <Td colSpan={6} className="p-6 text-center text-sm text-red-600">
+                        <Td colSpan={5} className="p-6 text-center text-sm text-red-600">
                           Could not load DNS records: {dnsRecordsQuery.error.message}
                         </Td>
                       </Tr>
                     ) : dnsRecordsQuery.isLoading ? (
                       <Tr>
-                        <Td colSpan={6} className="p-6 text-center text-sm text-slate-500">
+                        <Td colSpan={5} className="p-6 text-center text-sm text-slate-500">
                           Loading DNS records...
                         </Td>
                       </Tr>
@@ -562,7 +561,6 @@ export default function DomainsPage() {
                               ) : null}
                             </Td>
                             <Td className="text-xs text-slate-600">{record.ttl}</Td>
-                            <Td className="whitespace-normal text-xs text-slate-600">{record.purpose}</Td>
                             <Td>
                               <div>
                                 <StatusBadge status={recordStatusText(record.status)} />

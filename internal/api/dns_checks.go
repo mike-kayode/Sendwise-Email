@@ -75,11 +75,15 @@ func lookupDNSRecord(ctx context.Context, resolver DNSResolver, spec dnsRecordSp
 		answers = []dnsAnswer{{resolver: "configured resolver", values: values, err: err}}
 	}
 
+	return aggregateDNSAnswers(spec, answers, matches)
+}
+
+func aggregateDNSAnswers(spec dnsRecordSpec, answers []dnsAnswer, matches func(string) bool) dnsRecordResult {
 	result := dnsRecordResult{Status: "lookup_failed", Resolvers: make([]dnsResolverCheck, 0, len(answers))}
-	allFound := len(answers) > 0
+	hasFound := false
 	hasWrongValue := false
 	hasMissing := false
-	hasLookupFailure := false
+	hasMultipleSPFRecords := false
 	for _, answer := range answers {
 		check := dnsResolverCheck{Resolver: answer.resolver}
 		switch {
@@ -87,16 +91,18 @@ func lookupDNSRecord(ctx context.Context, resolver DNSResolver, spec dnsRecordSp
 			if isDNSLookupFailure(answer.err) {
 				check.Status = "lookup_failed"
 				check.Error = answer.err.Error()
-				hasLookupFailure = true
 			} else {
 				check.Status = "missing"
 				hasMissing = true
 			}
-			allFound = false
 		case len(answer.values) == 0:
 			check.Status = "missing"
 			hasMissing = true
-			allFound = false
+		case spec.Key == "spf" && countSPFRecords(answer.values) > 1:
+			check.Status = "wrong_value"
+			check.FoundValue = "Multiple SPF records; merge them into one."
+			hasWrongValue = true
+			hasMultipleSPFRecords = true
 		default:
 			check.Status = "wrong_value"
 			wrongValue := true
@@ -110,14 +116,17 @@ func lookupDNSRecord(ctx context.Context, resolver DNSResolver, spec dnsRecordSp
 				}
 			}
 			hasWrongValue = hasWrongValue || wrongValue
-			if check.Status != "found" {
-				allFound = false
+			if check.Status == "found" {
+				hasFound = true
 			}
 		}
 		result.Resolvers = append(result.Resolvers, check)
 	}
 	switch {
-	case allFound:
+	case hasMultipleSPFRecords:
+		result.Status = "wrong_value"
+		result.FoundValue = "Multiple SPF records; merge them into one."
+	case hasFound:
 		result.Status = "found"
 		for _, check := range result.Resolvers {
 			if result.FoundValue == "" && check.Status == "found" {
@@ -134,10 +143,23 @@ func lookupDNSRecord(ctx context.Context, resolver DNSResolver, spec dnsRecordSp
 		}
 	case hasMissing:
 		result.Status = "missing"
-	case hasLookupFailure:
-		result.Status = "lookup_failed"
 	}
 	return result
+}
+
+func countSPFRecords(values []string) int {
+	count := 0
+	for _, value := range values {
+		if isSPFRecord(value) {
+			count++
+		}
+	}
+	return count
+}
+
+func isSPFRecord(value string) bool {
+	fields := strings.Fields(value)
+	return len(fields) > 0 && strings.EqualFold(fields[0], "v=spf1")
 }
 
 func mxValues(records []*net.MX) []string {
@@ -328,7 +350,7 @@ func lookupAuthoritativeNameservers(ctx context.Context, zone string, publicReso
 
 	type ipResult struct {
 		name string
-		ips  []net.IPAddr
+		ips  []net.IP
 	}
 	ipResults := make(chan ipResult, len(hostnames)*len(publicResolvers))
 	for _, host := range hostnames {
@@ -337,7 +359,7 @@ func lookupAuthoritativeNameservers(ctx context.Context, zone string, publicReso
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				ips, _ := resolverFor(server, timeout).LookupIPAddr(ctx, host)
+				ips, _ := resolverFor(server, timeout).LookupIP(ctx, "ip4", host)
 				ipResults <- ipResult{name: host, ips: ips}
 			}()
 		}
@@ -348,10 +370,10 @@ func lookupAuthoritativeNameservers(ctx context.Context, zone string, publicReso
 	found := make(map[string]authoritativeNameserver)
 	for result := range ipResults {
 		for _, ip := range result.ips {
-			if ip.IP == nil {
+			if ip == nil || ip.To4() == nil {
 				continue
 			}
-			address := ip.IP.String()
+			address := ip.String()
 			found[result.name+"|"+address] = authoritativeNameserver{name: result.name, address: address}
 		}
 	}

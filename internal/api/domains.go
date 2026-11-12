@@ -673,8 +673,7 @@ func (s *Server) checkDomainDNSDetails(ctx context.Context, domain, selector, ex
 			record := lookupDNSRecord(ctx, resolver, spec, func(value string) bool {
 				switch spec.Key {
 				case "spf":
-					lower := strings.ToLower(strings.TrimSpace(value))
-					return strings.HasPrefix(lower, "v=spf1") && spfHasAuthMechanism(lower, s.cfg.SPFInclude)
+					return isSPFRecord(value) && spfHasAuthMechanism(value, s.cfg.SPFInclude)
 				case "dkim":
 					return normalizeDkimTXTValue(value) == normalizeDkimKey(expectedPublicKey)
 				case "dmarc":
@@ -741,8 +740,11 @@ func spfRecordValue(spfInclude string) string {
 
 func spfHasAuthMechanism(spfRecord, configuredInclude string) bool {
 	configuredInclude = strings.ToLower(strings.TrimSpace(configuredInclude))
-	mechanisms := strings.Fields(spfRecord)
-	for _, mechanism := range mechanisms {
+	fields := strings.Fields(spfRecord)
+	if len(fields) == 0 || !strings.EqualFold(fields[0], "v=spf1") {
+		return false
+	}
+	for _, mechanism := range fields[1:] {
 		mechanism = strings.TrimLeft(strings.ToLower(mechanism), "+-~?")
 		if (configuredInclude == "" && mechanism == "mx") ||
 			(configuredInclude != "" && mechanism == "include:"+configuredInclude) {

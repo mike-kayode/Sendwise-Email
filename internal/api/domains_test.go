@@ -19,6 +19,22 @@ type fakeDNSResolver struct {
 	records map[string][]string
 }
 
+type sourceDNSResolver struct {
+	answers map[string][]dnsAnswer
+}
+
+func (r sourceDNSResolver) LookupTXT(context.Context, string) ([]string, error) {
+	return nil, nil
+}
+
+func (r sourceDNSResolver) LookupTXTBySource(_ context.Context, name, _ string) []dnsAnswer {
+	return r.answers[strings.ToLower(name)]
+}
+
+func (r sourceDNSResolver) LookupMXBySource(_ context.Context, name, _ string) []dnsAnswer {
+	return r.answers[strings.ToLower(name)]
+}
+
 type delayedDNSResolver struct {
 	delay time.Duration
 }
@@ -68,7 +84,7 @@ func TestCheckDomainDNSVerified(t *testing.T) {
 	server := &Server{
 		cfg: config.Config{SPFInclude: "_spf.example.com"},
 		dnsResolver: &fakeDNSResolver{records: map[string][]string{
-			"example.com":                        {"v=spf1 include:_spf.example.com ~all"},
+			"example.com":                        {"v=spf1 include:_spf.example.com include:_spf.mail.hostinger.com ~all"},
 			"mail._domainkey.example.com":        {`"v=DKIM1; k=rsa; p=MIIBIjANbgkqhkiG9w0BAQE" "FAAOCAQ8AMIIBCgKCAQE"`},
 			"_dmarc.example.com":                 {"v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"},
 			"_sendwise-verification.example.com": {"v=sendwise-verification 029be151-9ec4-4fa8-83b8-f8c02b289a96"},
@@ -188,6 +204,104 @@ func TestCheckDomainDNSRequiresConfiguredSPFIncludeInsteadOfMX(t *testing.T) {
 	spf, _, _, _ := server.checkDomainDNS(context.Background(), "example.com", "mail", "expected-key", "expected-token")
 	if spf != "mismatched" {
 		t.Fatalf("SPF status = %q, want mismatched when configured SPF include is absent", spf)
+	}
+}
+
+func TestCheckDomainDNSIgnoresFailedResolverWhenOthersFindRecords(t *testing.T) {
+	const domain = "example.com"
+	records := map[string]string{
+		domain:                             "v=spf1 include:_spf.example.com include:_spf.mail.hostinger.com ~all",
+		"mail._domainkey." + domain:        "v=DKIM1; k=rsa; p=expectedkey",
+		"_dmarc." + domain:                 "v=DMARC1; p=none",
+		"_sendwise-verification." + domain: "v=sendwise-verification expected-token",
+	}
+	answers := make(map[string][]dnsAnswer, len(records))
+	for name, value := range records {
+		answers[name] = []dnsAnswer{
+			{resolver: "1.1.1.1", values: []string{value}},
+			{resolver: "8.8.8.8", values: []string{value}},
+			{resolver: "authoritative IPv4", values: []string{value}},
+			{resolver: "authoritative IPv6", err: errors.New("network is unreachable")},
+		}
+	}
+	server := &Server{
+		cfg:         config.Config{SPFInclude: "_spf.example.com"},
+		dnsResolver: sourceDNSResolver{answers: answers},
+	}
+
+	checks := server.checkDomainDNSDetails(context.Background(), domain, "mail", "expectedkey", "expected-token")
+	spf, dkim, dmarc, verification := checks.Statuses()
+	if spf != "verified" || dkim != "verified" || dmarc != "verified" || verification != "verified" {
+		t.Fatalf("DNS statuses = (%q, %q, %q, %q), want all verified", spf, dkim, dmarc, verification)
+	}
+	for name, record := range checks.Records {
+		if name == "mx" {
+			continue
+		}
+		if record.Status != "found" || len(record.Resolvers) != 4 {
+			t.Fatalf("%s result = %+v, want found with four resolver details", name, record)
+		}
+		if record.Resolvers[3].Status != "lookup_failed" {
+			t.Fatalf("%s final resolver = %+v, want lookup_failed detail retained", name, record.Resolvers[3])
+		}
+	}
+}
+
+func TestCheckDomainDNSReportsLookupFailedWhenEveryResolverFails(t *testing.T) {
+	failure := errors.New("network is unreachable")
+	answers := map[string][]dnsAnswer{
+		"example.com": {
+			{resolver: "1.1.1.1", err: failure},
+			{resolver: "8.8.8.8", err: failure},
+			{resolver: "authoritative IPv4", err: failure},
+			{resolver: "authoritative IPv6", err: failure},
+		},
+		"mail._domainkey.example.com": {
+			{resolver: "1.1.1.1", err: failure},
+			{resolver: "8.8.8.8", err: failure},
+			{resolver: "authoritative IPv4", err: failure},
+			{resolver: "authoritative IPv6", err: failure},
+		},
+		"_dmarc.example.com": {
+			{resolver: "1.1.1.1", err: failure},
+			{resolver: "8.8.8.8", err: failure},
+			{resolver: "authoritative IPv4", err: failure},
+			{resolver: "authoritative IPv6", err: failure},
+		},
+		"_sendwise-verification.example.com": {
+			{resolver: "1.1.1.1", err: failure},
+			{resolver: "8.8.8.8", err: failure},
+			{resolver: "authoritative IPv4", err: failure},
+			{resolver: "authoritative IPv6", err: failure},
+		},
+	}
+	server := &Server{dnsResolver: sourceDNSResolver{answers: answers}}
+
+	checks := server.checkDomainDNSDetails(context.Background(), "example.com", "mail", "expectedkey", "expected-token")
+	spf, dkim, dmarc, verification := checks.Statuses()
+	if spf != "lookup_failed" || dkim != "lookup_failed" ||
+		dmarc != "lookup_failed" || verification != "lookup_failed" {
+		t.Fatalf("DNS statuses = (%q, %q, %q, %q), want all lookup_failed", spf, dkim, dmarc, verification)
+	}
+}
+
+func TestCheckDomainDNSRejectsMultipleSPFRecords(t *testing.T) {
+	server := &Server{
+		cfg: config.Config{SPFInclude: "_spf.example.com"},
+		dnsResolver: &fakeDNSResolver{records: map[string][]string{
+			"example.com": {
+				"v=spf1 include:_spf.example.com ~all",
+				"v=spf1 include:_spf.mail.hostinger.com ~all",
+			},
+		}},
+	}
+
+	checks := server.checkDomainDNSDetails(context.Background(), "example.com", "mail", "expectedkey", "expected-token")
+	if got := dnsStatus(checks.Records["spf"].Status); got != "mismatched" {
+		t.Fatalf("SPF status = %q, want mismatched for multiple SPF records", got)
+	}
+	if checks.Records["spf"].FoundValue != "Multiple SPF records; merge them into one." {
+		t.Fatalf("SPF explanation = %q", checks.Records["spf"].FoundValue)
 	}
 }
 
