@@ -75,6 +75,7 @@ export function PlanCard({
   name,
   description,
   price,
+  pricePrefix = "₦",
   period,
   features,
   href,
@@ -84,6 +85,7 @@ export function PlanCard({
   name: string;
   description: string;
   price: string;
+  pricePrefix?: string;
   period: string;
   features: string[];
   href: string;
@@ -97,7 +99,7 @@ export function PlanCard({
         <h2 className="h3">{name}</h2>
         <p className="small plan-description">{description}</p>
       </div>
-      <p className="price">₦{price}<span className="small"> {period}</span></p>
+      <p className="price">{pricePrefix}{price}<span className="small"> {period}</span></p>
       <CheckList>{features.map((feature) => <li key={feature}>{feature}</li>)}</CheckList>
       <ButtonLink href={href} variant={featured ? "accent" : "ghost-light"}>{action}</ButtonLink>
     </article>

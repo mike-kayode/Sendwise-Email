@@ -2,9 +2,9 @@
 
 The public marketing site is implemented in `apps/web` using the App Router.
 Routes in the `(marketing)` group share the marketing header, footer, responsive
-navigation, skip link, and the required Nefxbie Tech footer credit. The
-dashboard remains under `/dashboard`; authenticated visitors to `/` are sent
-there by the home-page client redirect.
+navigation, persistent light/dark theme toggle, and skip link. The dashboard
+remains under `/dashboard`; authenticated visitors to `/` are sent there by the
+home-page client redirect.
 
 ## Routes
 
@@ -20,14 +20,15 @@ there by the home-page client redirect.
 
 - Shared design tokens, responsive styles, and components are under
   `apps/web/components/marketing/`.
-- The sign-in page's local Unsplash stock image is
-  `apps/web/public/images/email-performance-dashboard.jpg`; replace it only
-  with an image the project has permission to use.
+- The login and registration pages use the supplied local Sendwise dashboard
+  illustration at `apps/web/public/images/sendwise-dashboard.png`.
 - Marketing page copy and page layouts are in
   `apps/web/components/marketing/pages.tsx`.
 - Change plan prices, limits, and features in
-  `apps/web/lib/marketing/pricing.ts`; monthly/yearly selection is a display
-  toggle and does not change billing.
+  `apps/web/lib/marketing/pricing.ts`. The current monthly prices and email
+  volumes are Free (3,000/month, 100/day), Starter (10,000/month, ₦5,000),
+  Business (50,000/month, ₦15,000), and Enterprise (200,000/month, ₦50,000).
+  Monthly/yearly selection is a display toggle and does not change billing.
 - Replace legal section text and metadata in
   `apps/web/content/legal/documents.ts`. Legal copy is intentionally a
   placeholder and must be reviewed by counsel before launch.
@@ -40,15 +41,17 @@ there by the home-page client redirect.
 
 ## Owner TODOs before public launch
 
-- Replace all monthly and yearly `[PRICE]` values.
-- Set each `[X]` monthly email, sending-domain, sender-address, and log-retention
-  limit in the plans and comparison table.
-- Replace `[WHO IT IS FOR]` with plan audiences and confirm every plan feature.
-- Replace the home-page `[FREE TIER LINE, ...]` with an accurate offer.
-- Replace the pricing `[PAY-AS-YOU-GO NOTE: ...]` with the actual overage
-  policy, or remove it if the service does not offer pay-as-you-go sending.
-- Answer the pricing FAQs: recipient counting, overage/pausing, plan changes and
-  accepted payment methods.
+- Confirm yearly billing prices and any discount; no annual discount is
+  currently applied or advertised. The yearly selector asks users to contact
+  Sendwise instead of assuming an annual rate.
+- Confirm daily caps for paid tiers and any sending-domain, sender-address, and
+  log-retention limits before publishing them.
+- Confirm plan audiences and included features before treating them as contract
+  terms.
+- Set the pay-as-you-go rate and usage terms. The current callout directs
+  customers to contact Sendwise and does not promise a rate.
+- Confirm operational policies and payment methods referenced in the pricing
+  FAQs before offering definitive answers.
 - Replace the About page `[YOUR STORY]`, `[YOUR MISSION]`, `[CITY, COUNTRY]`,
   `[NAME]`, and `[ROLE]` placeholders with approved company and team details.
 - Replace `[EMAIL ADDRESS]`, `[SUPPORT EMAIL]`, `[RESPONSE TIME]`, and

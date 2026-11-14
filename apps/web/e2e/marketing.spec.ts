@@ -20,7 +20,7 @@ const publicPages = [
   "/auth/reset-password",
 ];
 
-test("public and auth pages render, include the required credit, and have no accessibility violations", async ({ page }, testInfo) => {
+test("public and auth pages render without the removed footer credit and have no accessibility violations", async ({ page }, testInfo) => {
   const browserErrors: string[] = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
   page.on("console", (message) => {
@@ -33,10 +33,8 @@ test("public and auth pages render, include the required credit, and have no acc
       await page.setViewportSize({ width, height: 900 });
       await page.goto(path);
       await expect(page.locator("main h1")).toHaveCount(1);
-      const credit = page.getByRole("link", { name: "NEFXBIE TECH" });
-      await expect(credit).toHaveAttribute("href", "https://mike-kayode.vercel.app");
-      await expect(credit).toHaveAttribute("target", "_blank");
-      await expect(credit).toHaveAttribute("rel", "noopener noreferrer");
+      await expect(page.locator(".marketing-footer")).toBeVisible();
+      await expect(page.getByText("Developed by")).toHaveCount(0);
 
       if (width === 390) {
         const documentWidth = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -59,7 +57,7 @@ test("public and auth pages render, include the required credit, and have no acc
   expect(browserErrors).toEqual([]);
 });
 
-test("marketing typography, full-width layout, and login imagery match the updated design", async ({ page }) => {
+test("marketing typography, full-width layout, and auth imagery match the updated design", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   const styles = await page.locator("main").evaluate((main) => {
@@ -80,11 +78,32 @@ test("marketing typography, full-width layout, and login imagery match the updat
   });
 
   await page.goto("/login");
-  const image = page.getByRole("img", {
-    name: "Laptop displaying performance charts in an analytics dashboard",
-  });
-  await expect(image).toBeVisible();
-  await expect(image).toHaveAttribute("src", /email-performance-dashboard/);
+  const loginImage = page.getByRole("img", { name: "Sendwise email marketing dashboard illustration" });
+  await expect(loginImage).toBeVisible();
+  await expect(loginImage).toHaveAttribute("src", /sendwise-dashboard/);
+
+  await page.goto("/register");
+  const registerImage = page.getByRole("img", { name: "Sendwise email marketing dashboard illustration" });
+  await expect(registerImage).toBeVisible();
+  await expect(registerImage).toHaveAttribute("src", /sendwise-dashboard/);
+});
+
+test("light and dark themes toggle and persist, with white default page surfaces", async ({ page }) => {
+  await page.goto("/pricing");
+  const marketing = page.locator(".marketing");
+  await expect(marketing).toHaveAttribute("data-theme", "light");
+  const lightSurfaces = await page.locator(".marketing-header, .marketing-page-hero, .marketing-footer").evaluateAll((elements) =>
+    elements.map((element) => getComputedStyle(element).backgroundColor),
+  );
+  expect(lightSurfaces).toEqual(["rgb(255, 255, 255)", "rgb(255, 255, 255)", "rgb(255, 255, 255)"]);
+
+  const toggle = page.getByRole("button", { name: "Switch to dark mode" });
+  await toggle.click();
+  await expect(marketing).toHaveAttribute("data-theme", "dark");
+  await page.reload();
+  await expect(marketing).toHaveAttribute("data-theme", "dark");
+  await page.getByRole("button", { name: "Switch to light mode" }).click();
+  await expect(marketing).toHaveAttribute("data-theme", "light");
 });
 
 test("mobile navigation opens, receives focus, and closes on Escape", async ({ page }) => {
@@ -126,13 +145,29 @@ test("code tabs copy the selected example and FAQ accordions toggle", async ({ p
 
 test("pricing billing period toggles", async ({ page }) => {
   await page.goto("/pricing");
+  const plans = page.locator(".pricing-plans .plan");
+  await expect(plans).toHaveCount(4);
+  const expectedPlans = [
+    ["Free", "₦0", "3,000 emails per month", "100 emails per day"],
+    ["Starter", "₦5,000", "10,000 emails per month"],
+    ["Business", "₦15,000", "50,000 emails per month"],
+    ["Enterprise", "₦50,000", "200,000 emails per month"],
+  ];
+  for (const [index, expected] of expectedPlans.entries()) {
+    const plan = plans.nth(index);
+    for (const text of expected) await expect(plan).toContainText(text);
+  }
+  await expect(page.getByRole("heading", { name: "Pay as you go" })).toBeVisible();
+
   const monthly = page.getByRole("button", { name: "Monthly", exact: true });
   const yearly = page.getByRole("button", { name: "Yearly", exact: true });
   await expect(monthly).toHaveAttribute("aria-pressed", "true");
   await yearly.click();
   await expect(yearly).toHaveAttribute("aria-pressed", "true");
   await expect(monthly).toHaveAttribute("aria-pressed", "false");
-  const question = page.getByRole("button", { name: "What counts as one email?" });
+  await expect(plans.nth(1).locator(".price")).toContainText("Contact us for annual pricing");
+  await expect(plans.nth(1).locator(".price")).not.toContainText("₦");
+  const question = page.getByRole("button", { name: "What is included in the Free plan?" });
   await expect(question).toHaveAttribute("aria-expanded", "true");
   await question.click();
   await expect(question).toHaveAttribute("aria-expanded", "false");

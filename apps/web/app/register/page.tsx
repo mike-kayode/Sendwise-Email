@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -69,6 +70,16 @@ export default function RegisterPage() {
             <h1 className="display">Create your workspace and send your first email.</h1>
             <p className="lead">You will add a domain, verify it with DNS, and get an API key or SMTP credentials.</p>
           </div>
+          <figure className="auth-image">
+            <Image
+              src="/images/sendwise-dashboard.png"
+              alt="Sendwise email marketing dashboard illustration"
+              width={1365}
+              height={768}
+              sizes="(max-width: 900px) 100vw, 48vw"
+              priority
+            />
+          </figure>
           <ol className="auth-steps">
             <li><span className="step-n step-accent">1</span><span>Create your account</span></li>
             <li><span className="step-n step-accent">2</span><span>Verify your email address</span></li>

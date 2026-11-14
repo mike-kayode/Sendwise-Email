@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { Moon, Sun } from "lucide-react";
 
 const navigation = [
   { href: "/platform", label: "Platform", key: "platform" },
@@ -24,7 +25,13 @@ function Logo() {
   );
 }
 
-export function SiteHeader() {
+export function SiteHeader({
+  theme,
+  onToggleTheme,
+}: {
+  theme: "light" | "dark";
+  onToggleTheme: () => void;
+}) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
@@ -46,9 +53,19 @@ export function SiteHeader() {
   const closeMenu = () => setMenuOpen(false);
 
   return (
-    <header className="marketing-header dark">
+    <header className="marketing-header">
       <div className="wrap marketing-header-inner">
         <Logo />
+        <button
+          type="button"
+          className="marketing-theme-toggle"
+          aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+          aria-pressed={theme === "dark"}
+          onClick={onToggleTheme}
+        >
+          {theme === "light" ? <Moon size={16} aria-hidden="true" /> : <Sun size={16} aria-hidden="true" />}
+          <span>{theme === "light" ? "Dark" : "Light"}</span>
+        </button>
         <button
           ref={menuButton}
           type="button"
@@ -136,7 +153,7 @@ const footerColumns = [
 export function SiteFooter() {
   const year = new Date().getFullYear();
   return (
-    <footer className="dark marketing-footer">
+    <footer className="marketing-footer">
       <div className="wrap marketing-footer-inner">
         <div className="foot-grid">
           <div>
@@ -156,12 +173,6 @@ export function SiteFooter() {
         </div>
         <div className="marketing-footer-bottom">
           <span>© {year} Sendwise. All rights reserved.</span>
-          <span>
-            Developed by{" "}
-            <a href="https://mike-kayode.vercel.app" target="_blank" rel="noopener noreferrer">
-              NEFXBIE TECH
-            </a>
-          </span>
         </div>
       </div>
     </footer>
@@ -175,10 +186,25 @@ export function PublicFrame({
   children: React.ReactNode;
   active?: string;
 }) {
+  const [theme, setTheme] = useState<"light" | "dark">("light");
+
+  useEffect(() => {
+    const storedTheme = window.localStorage.getItem("sendwise-marketing-theme");
+    if (storedTheme === "light" || storedTheme === "dark") setTheme(storedTheme);
+  }, []);
+
+  const toggleTheme = () => {
+    setTheme((currentTheme) => {
+      const nextTheme = currentTheme === "light" ? "dark" : "light";
+      window.localStorage.setItem("sendwise-marketing-theme", nextTheme);
+      return nextTheme;
+    });
+  };
+
   return (
-    <div className="marketing">
+    <div className="marketing" data-theme={theme}>
       <a className="marketing-skip-link" href="#main-content">Skip to content</a>
-      <SiteHeader />
+      <SiteHeader theme={theme} onToggleTheme={toggleTheme} />
       <main id="main-content" tabIndex={-1} data-active-page={active}>
         {children}
       </main>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { PlanCard, Wrap } from "@/components/marketing/primitives";
+import { ButtonLink, PlanCard, Wrap } from "@/components/marketing/primitives";
 import { plans, type BillingPeriod } from "@/lib/marketing/pricing";
 
 export function PricingExperience() {
@@ -31,14 +31,19 @@ export function PricingExperience() {
       </section>
       <section className="sec pricing-plans">
         <Wrap>
-          <div className="grid-3">
+          <div className="grid-4">
             {plans.map((plan) => (
               <PlanCard
                 key={plan.name}
                 name={plan.name}
                 description={plan.audience}
-                price={period === "Monthly" ? plan.monthlyPrice : plan.yearlyPrice}
-                period={periodLabel}
+                price={period === "Monthly" ? plan.monthlyPrice : plan.yearlyPrice ?? "Contact us"}
+                pricePrefix={period === "Yearly" && !plan.yearlyPrice ? "" : "₦"}
+                period={
+                  period === "Monthly" || plan.yearlyPrice
+                    ? periodLabel
+                    : "for annual pricing"
+                }
                 features={plan.features}
                 href={plan.href}
                 action={plan.action}
@@ -46,7 +51,14 @@ export function PricingExperience() {
               />
             ))}
           </div>
-          <p className="small pay-note">[PAY-AS-YOU-GO NOTE: price per 1,000 emails beyond plan, if offered]</p>
+          <aside className="payg-card" aria-labelledby="payg-heading">
+            <div>
+              <span className="eyebrow">Flexible billing</span>
+              <h2 id="payg-heading" className="h3">Pay as you go</h2>
+              <p className="small">Need a usage-based option? Talk to us about billing that fits your sending volume.</p>
+            </div>
+            <ButtonLink href="/contact" variant="ghost-light">Ask about pay as you go</ButtonLink>
+          </aside>
         </Wrap>
       </section>
     </>

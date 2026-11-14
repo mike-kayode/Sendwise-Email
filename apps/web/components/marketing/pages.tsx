@@ -309,7 +309,7 @@ export function HomePage() {
               <ButtonLink href="/register" variant="accent">Start sending</ButtonLink>
               <ButtonLink href="/developers" variant="ghost-dark">Read the docs</ButtonLink>
             </div>
-            <p className="small home-free-tier">[FREE TIER LINE, e.g. start free, no card required]</p>
+            <p className="small home-free-tier">Free plan: 3,000 emails per month, up to 100 per day.</p>
           </div>
           <div>
             <CopyCodeTabs examples={homeExamples} ariaLabel="Integration language" />
@@ -441,7 +441,7 @@ export function HomePage() {
           <div className="section-intro">
             <span className="eyebrow">Pricing</span>
             <h2 className="title">Simple plans that grow with your volume.</h2>
-            <p className="lead">Final prices are set on the pricing page.</p>
+            <p className="lead">Choose from Free, Starter, Business, and Enterprise plans with clear monthly sending volumes.</p>
           </div>
           <Grid>
             {plans.map((plan) => (
@@ -685,8 +685,8 @@ export function PricingPage() {
           <h2 className="title table-title">Compare plans</h2>
           <div className="table-scroll">
             <table className="tbl">
-              <thead><tr><th>Feature</th><th>Starter</th><th>Growth</th><th>Scale</th></tr></thead>
-              <tbody>{planComparison.map(([feature, starter, growth, scale]) => <tr key={feature}><td>{feature}</td><td>{starter}</td><td>{growth}</td><td>{scale}</td></tr>)}</tbody>
+              <thead><tr><th>Feature</th><th>Free</th><th>Starter</th><th>Business</th><th>Enterprise</th></tr></thead>
+              <tbody>{planComparison.map(([feature, free, starter, business, enterprise]) => <tr key={feature}><td>{feature}</td><td>{free}</td><td>{starter}</td><td>{business}</td><td>{enterprise}</td></tr>)}</tbody>
             </table>
           </div>
         </Wrap>

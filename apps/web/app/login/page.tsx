@@ -65,10 +65,10 @@ export default function LoginPage() {
           </div>
           <figure className="auth-image">
             <Image
-              src="/images/email-performance-dashboard.jpg"
-              alt="Laptop displaying performance charts in an analytics dashboard"
-              width={1400}
-              height={933}
+              src="/images/sendwise-dashboard.png"
+              alt="Sendwise email marketing dashboard illustration"
+              width={1365}
+              height={768}
               sizes="(max-width: 900px) 100vw, 48vw"
               priority
             />
