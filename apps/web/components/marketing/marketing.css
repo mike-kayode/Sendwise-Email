@@ -144,8 +144,8 @@
 .marketing-theme-toggle:hover { background: var(--ink2); }
 .marketing-menu-button,
 .marketing-nav-mobile-actions { display: none; }
-.marketing-footer { border-top: 1px solid var(--line); background: var(--paper); color: var(--text); }
-.marketing-footer-inner { padding-top: 96px; padding-bottom: 40px; }
+.marketing-footer { margin-top: 48px; border-top: 1px solid var(--line); background: var(--paper); color: var(--text); }
+.marketing-footer-inner { padding-top: 64px; padding-bottom: 40px; }
 .marketing-footer-description { max-width: 340px; margin: 22px 0 0; color: var(--muted); font-size: 13px; line-height: 1.8; }
 .marketing-footer-bottom { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 16px; margin-top: 72px; padding-top: 32px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
 .marketing-footer-bottom a { color: var(--text); font-weight: 800; text-decoration: underline; }

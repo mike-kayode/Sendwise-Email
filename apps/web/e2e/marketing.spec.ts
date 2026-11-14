@@ -88,6 +88,37 @@ test("marketing typography, full-width layout, and auth imagery match the update
   await expect(registerImage).toHaveAttribute("src", /sendwise-dashboard/);
 });
 
+test("obsolete auth slogans are absent from sign-in and create-account pages", async ({ page }) => {
+  const removedCopy = [
+    "Your campaigns and delivery logs are waiting",
+    "Create your workspace and send your first email",
+  ];
+
+  for (const [path, heading] of [["/login", "Sign in"], ["/register", "Create account"]]) {
+    await page.goto(path);
+    await expect(page.locator("main h1")).toHaveText(heading);
+    for (const text of removedCopy) {
+      await expect(page.getByText(text, { exact: false })).toHaveCount(0);
+    }
+  }
+});
+
+test("footer has clear spacing after the page content on desktop and mobile", async ({ page }) => {
+  for (const path of ["/login", "/register", "/pricing"]) {
+    for (const width of [390, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(path);
+      const gap = await page.evaluate(() => {
+        const main = document.querySelector("main");
+        const footer = document.querySelector("footer");
+        if (!main || !footer) throw new Error("Page content or footer is missing");
+        return footer.getBoundingClientRect().top - main.getBoundingClientRect().bottom;
+      });
+      expect(gap, `${path} footer gap at ${width}px`).toBeGreaterThanOrEqual(40);
+    }
+  }
+});
+
 test("light and dark themes toggle and persist, with white default page surfaces", async ({ page }) => {
   await page.goto("/pricing");
   const marketing = page.locator(".marketing");

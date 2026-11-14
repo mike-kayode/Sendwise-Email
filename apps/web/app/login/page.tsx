@@ -59,8 +59,7 @@ export default function LoginPage() {
       <div className="wrap split auth-columns">
         <aside className="dark auth-pitch">
           <div>
-            <span className="eyebrow eyebrow-dark">Welcome back</span>
-            <h1 className="display">Your campaigns and delivery logs are waiting.</h1>
+            <span className="eyebrow eyebrow-dark">Sign in to your account</span>
             <p className="lead">Sign in to send, check domain status and see what happened to every message.</p>
           </div>
           <figure className="auth-image">
@@ -80,7 +79,7 @@ export default function LoginPage() {
           </ul>
         </aside>
         <section className="card auth-form">
-          <h2 className="title auth-form-title">Sign in</h2>
+          <h1 className="title auth-form-title">Sign in</h1>
           <p className="small auth-form-description">New to Sendwise? <Link href="/register">Create an account</Link></p>
           <form onSubmit={form.handleSubmit(onSubmit)} className="form-stack">
             <div>

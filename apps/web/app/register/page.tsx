@@ -67,7 +67,6 @@ export default function RegisterPage() {
         <aside className="dark auth-pitch">
           <div>
             <span className="eyebrow eyebrow-dark">Get started</span>
-            <h1 className="display">Create your workspace and send your first email.</h1>
             <p className="lead">You will add a domain, verify it with DNS, and get an API key or SMTP credentials.</p>
           </div>
           <figure className="auth-image">
@@ -87,7 +86,7 @@ export default function RegisterPage() {
           </ol>
         </aside>
         <section className="card auth-form">
-          <h2 className="title auth-form-title">Create account</h2>
+          <h1 className="title auth-form-title">Create account</h1>
           <p className="small auth-form-description">Already have an account? <Link href="/login">Sign in</Link></p>
           <form onSubmit={form.handleSubmit(onSubmit)} className="form-stack">
             <div>
