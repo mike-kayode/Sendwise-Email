@@ -75,7 +75,6 @@ export default function RegisterPage() {
         </aside>
         <section className="card auth-form">
           <h1 className="title auth-form-title">Create account</h1>
-          <p className="small auth-form-description">Already have an account? <Link href="/login">Sign in</Link></p>
           <form onSubmit={form.handleSubmit(onSubmit)} className="form-stack">
             <div>
               <label className="label" htmlFor="register-organization">Organization name</label>
@@ -104,6 +103,7 @@ export default function RegisterPage() {
             <button type="submit" className="btn btn-ink auth-submit" disabled={form.formState.isSubmitting}>
               {form.formState.isSubmitting ? "Creating workspace..." : "Create account"}
             </button>
+            <p className="small auth-bottom-link">Already have an account? <Link href="/login">Sign in</Link></p>
           </form>
         </section>
       </div>

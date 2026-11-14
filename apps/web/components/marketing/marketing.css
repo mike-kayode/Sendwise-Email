@@ -159,6 +159,7 @@
 .marketing .auth-steps { display: flex; flex-direction: column; gap: 16px; margin: 0; padding: 0; list-style: none; }
 .marketing .auth-steps li { display: flex; align-items: center; gap: 12px; }
 .marketing .auth-form { display: flex; flex-direction: column; justify-content: center; padding: 40px; }
+.marketing .auth-form-title-standalone { margin-bottom: 28px; }
 .marketing .form-stack { display: flex; flex-direction: column; gap: 20px; }
 .marketing .form-error { color: #8b2318; font-size: 13px; }
 .marketing .auth-card { max-width: 560px; margin: 72px auto; }

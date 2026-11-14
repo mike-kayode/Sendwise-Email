@@ -67,8 +67,7 @@ export default function LoginPage() {
           </figure>
         </aside>
         <section className="card auth-form">
-          <h1 className="title auth-form-title">Sign in</h1>
-          <p className="small auth-form-description">New to Sendwise? <Link href="/register">Create an account</Link></p>
+          <h1 className="title auth-form-title auth-form-title-standalone">Sign in</h1>
           <form onSubmit={form.handleSubmit(onSubmit)} className="form-stack">
             <div>
               <label className="label" htmlFor="login-email">Email</label>
@@ -102,7 +101,7 @@ export default function LoginPage() {
             <button type="submit" className="btn btn-ink auth-submit" disabled={form.formState.isSubmitting}>
               {form.formState.isSubmitting ? "Signing in..." : "Sign in"}
             </button>
-            <p className="small auth-bottom-link">Don't have an account? <Link href="/register">Create workspace</Link></p>
+            <p className="small auth-bottom-link">Don't have an account? <Link href="/register">Create account</Link></p>
           </form>
         </section>
       </div>
