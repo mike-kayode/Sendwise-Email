@@ -324,7 +324,31 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await page.getByRole("button", { name: "Save template" }).click();
   await expect(page.getByText("Your design is ready to use in a campaign.")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Sanitized send preview" })).toBeVisible();
+  const sanitizedEmailFrame = page.locator('iframe[title="Email HTML preview"]');
+  await expect.poll(async () => sanitizedEmailFrame.evaluate((frame) => {
+    const doc = (frame as HTMLIFrameElement).contentDocument;
+    const heading = doc?.querySelector("h1");
+    const contentCell = doc?.querySelector("h1")?.closest("td");
+    const emailShell = doc?.querySelector(".email-shell");
+    const previewWindow = doc?.defaultView;
+    if (!heading || !contentCell || !emailShell || !previewWindow) return null;
+    return {
+      marginBottom: previewWindow.getComputedStyle(heading).marginBottom,
+      paddingTop: previewWindow.getComputedStyle(contentCell).paddingTop,
+      borderTopLeftRadius: previewWindow.getComputedStyle(emailShell).borderTopLeftRadius,
+    };
+  })).toEqual({ marginBottom: "16px", paddingTop: "16px", borderTopLeftRadius: "12px" });
+  await expect.poll(async () => sanitizedEmailFrame.evaluate((frame) => {
+    const emailFrame = frame as HTMLIFrameElement;
+    const contentHeight = emailFrame.contentDocument?.documentElement.scrollHeight ?? 0;
+    return contentHeight > 0 && emailFrame.clientHeight >= contentHeight;
+  })).toBe(true);
   await page.getByRole("button", { name: "Mobile" }).click();
+  await expect.poll(async () => sanitizedEmailFrame.evaluate((frame) => {
+    const emailFrame = frame as HTMLIFrameElement;
+    const contentHeight = emailFrame.contentDocument?.documentElement.scrollHeight ?? 0;
+    return contentHeight > 0 && emailFrame.clientHeight >= contentHeight;
+  })).toBe(true);
   await expect(page.frameLocator('iframe[title="Email HTML preview"]').locator("body")).toContainText(/unsubscribe/i);
   const templateID = page.url().split("/").at(-1);
   expect(templateID).toBeTruthy();

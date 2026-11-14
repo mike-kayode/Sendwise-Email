@@ -25,6 +25,35 @@ var unsafeCSSValue = regexp.MustCompile(`(?i)url\s*\(|expression\s*\(|javascript
 var fixedEmailWidth = regexp.MustCompile(`(?i)(?:max-)?width\s*:\s*(?:5[6-9]\d|[6-9]\d\d|[1-9]\d{3,})px`)
 var importedHTMLPolicy = newImportedHTMLPolicy()
 
+var allowedImportedCSSProperties = []string{
+	"background", "background-color", "background-position", "background-repeat",
+	"background-size", "border", "border-bottom", "border-bottom-color",
+	"border-bottom-left-radius", "border-bottom-right-radius", "border-bottom-style",
+	"border-bottom-width", "border-collapse", "border-image-outset", "border-image-repeat",
+	"border-image-slice", "border-image-source", "border-image-width", "border-left", "border-left-color",
+	"border-left-style", "border-left-width", "border-radius", "border-right",
+	"border-right-color", "border-right-style", "border-right-width", "border-spacing",
+	"border-style", "border-top", "border-top-color", "border-top-left-radius",
+	"border-top-right-radius", "border-top-style", "border-top-width", "border-width",
+	"box-sizing", "color", "direction", "display", "font-family", "font-size",
+	"font-style", "font-weight", "height", "letter-spacing", "line-height", "margin",
+	"margin-bottom", "margin-left", "margin-right", "margin-top", "max-height",
+	"max-width", "min-height", "min-width", "opacity", "outline", "outline-color",
+	"outline-style", "outline-width", "overflow", "overflow-x", "overflow-y", "padding",
+	"padding-bottom", "padding-left", "padding-right", "padding-top", "text-align",
+	"text-decoration", "text-decoration-color", "text-decoration-line",
+	"text-decoration-style", "text-decoration-thickness", "text-transform",
+	"vertical-align", "white-space", "width", "word-break", "word-wrap",
+}
+
+var allowedImportedCSSPropertySet = func() map[string]struct{} {
+	properties := make(map[string]struct{}, len(allowedImportedCSSProperties))
+	for _, property := range allowedImportedCSSProperties {
+		properties[property] = struct{}{}
+	}
+	return properties
+}()
+
 func newImportedHTMLPolicy() *bluemonday.Policy {
 	policy := bluemonday.NewPolicy()
 	policy.AllowElements(
@@ -41,15 +70,10 @@ func newImportedHTMLPolicy() *bluemonday.Policy {
 	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^[a-zA-Z0-9 _-]{1,256}$`)).Globally()
 	policy.AllowAttrs("target").Matching(regexp.MustCompile(`^_(blank|self|top|parent)$`)).OnElements("a")
 	policy.AllowAttrs("rel").OnElements("a")
+	policy.AllowStyles(allowedImportedCSSProperties...).Globally()
 	policy.AllowStyles(
-		"background", "background-color", "background-position", "background-repeat",
-		"background-size", "border", "border-bottom", "border-collapse", "border-left",
-		"border-radius", "border-right", "border-top", "color", "direction", "display",
-		"font-family", "font-size", "font-style", "font-weight", "height", "letter-spacing",
-		"line-height", "margin", "max-width", "min-height", "padding", "text-align",
-		"text-decoration", "text-transform", "vertical-align", "white-space", "width",
-		"word-break", "mso-border-alt", "mso-hide", "mso-line-height-rule",
-		"mso-padding-alt", "mso-table-lspace", "mso-table-rspace",
+		"mso-border-alt", "mso-hide", "mso-line-height-rule", "mso-padding-alt",
+		"mso-table-lspace", "mso-table-rspace",
 	).Globally()
 	policy.AllowAttrs("src", "alt", "title", "width", "height").OnElements("img")
 	policy.AllowAttrs("href", "title").OnElements("a")
@@ -386,7 +410,7 @@ func sanitizeImportedDocument(source string, data map[string]string) (string, st
 	}
 	sanitizeImages(bodyNode)
 
-	msoStyles := preserveMSOInlineStyles(bodyNode)
+	specialStyles := preserveSpecialInlineStyles(bodyNode)
 	var markup strings.Builder
 	for child := bodyNode.FirstChild; child != nil; child = child.NextSibling {
 		if err := xhtml.Render(&markup, child); err != nil {
@@ -395,14 +419,14 @@ func sanitizeImportedDocument(source string, data map[string]string) (string, st
 	}
 	safeHTML := importedHTMLPolicy.Sanitize(markup.String())
 	safeHTML = addNoopenerToBlankTargets(safeHTML)
-	safeHTML = restoreMSOInlineStyles(safeHTML, msoStyles)
+	safeHTML = restoreSpecialInlineStyles(safeHTML, specialStyles)
 	for marker, comment := range conditionalComments {
 		safeHTML = strings.ReplaceAll(safeHTML, marker, comment)
 	}
 	return safeHTML, styles.String()
 }
 
-func preserveMSOInlineStyles(root *xhtml.Node) map[string]string {
+func preserveSpecialInlineStyles(root *xhtml.Node) map[string]string {
 	styles := make(map[string]string)
 	index := 0
 	var visit func(*xhtml.Node)
@@ -417,9 +441,9 @@ func preserveMSOInlineStyles(root *xhtml.Node) map[string]string {
 					property, value, ok := strings.Cut(declaration, ":")
 					property = strings.ToLower(strings.TrimSpace(property))
 					value = strings.TrimSpace(value)
-					if ok && safeMSOProperty.MatchString(property) && value != "" &&
+					if ok && (safeMSOProperty.MatchString(property) || property == "text-size-adjust") && value != "" &&
 						!unsafeCSSValue.MatchString(value) && safeMSOValue.MatchString(value) {
-						declarations = append(declarations, property+":"+value)
+						declarations = append(declarations, property+": "+value)
 					}
 				}
 				if len(declarations) == 0 {
@@ -449,7 +473,7 @@ func preserveMSOInlineStyles(root *xhtml.Node) map[string]string {
 	return styles
 }
 
-func restoreMSOInlineStyles(source string, styles map[string]string) string {
+func restoreSpecialInlineStyles(source string, styles map[string]string) string {
 	if len(styles) == 0 {
 		return source
 	}
@@ -593,23 +617,10 @@ func sanitizeCSSRules(rules []*css.Rule) []*css.Rule {
 }
 
 func sanitizeCSSDeclarations(declarations []*css.Declaration) []*css.Declaration {
-	allowed := map[string]bool{
-		"background": true, "background-color": true, "background-position": true,
-		"background-repeat": true, "background-size": true, "border": true,
-		"border-bottom": true, "border-collapse": true, "border-left": true,
-		"border-radius": true, "border-right": true, "border-top": true,
-		"box-sizing": true, "color": true, "direction": true, "display": true,
-		"font-family": true, "font-size": true, "font-style": true, "font-weight": true,
-		"height": true, "letter-spacing": true, "line-height": true, "margin": true,
-		"max-height": true, "max-width": true, "min-height": true, "min-width": true,
-		"opacity": true, "overflow": true, "padding": true, "text-align": true,
-		"text-decoration": true, "text-transform": true, "vertical-align": true,
-		"white-space": true, "width": true, "word-break": true, "word-wrap": true,
-	}
 	var safe []*css.Declaration
 	for _, declaration := range declarations {
 		property := strings.ToLower(strings.TrimSpace(declaration.Property))
-		if !allowed[property] && !safeMSOProperty.MatchString(property) {
+		if _, ok := allowedImportedCSSPropertySet[property]; !ok && !safeMSOProperty.MatchString(property) {
 			continue
 		}
 		value := strings.TrimSpace(declaration.Value)

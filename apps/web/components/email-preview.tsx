@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiUrl } from "@/lib/api-url";
 
 type EmailBlock = {
@@ -140,7 +140,31 @@ export function EmailPreview({
   viewport?: "desktop" | "mobile";
 }) {
   const [customHTMLPreviews, setCustomHTMLPreviews] = useState<Record<string, string>>({});
+  const [renderedPreviewHeight, setRenderedPreviewHeight] = useState(480);
+  const renderedPreviewRef = useRef<HTMLIFrameElement>(null);
   const hasRenderedHTML = sanitizedDocument !== undefined || html !== undefined;
+
+  const resizeRenderedPreview = () => {
+    const frameDocument = renderedPreviewRef.current?.contentDocument;
+    if (!frameDocument) return;
+    const contentHeight = Math.max(
+      frameDocument.documentElement.scrollHeight,
+      frameDocument.body?.scrollHeight ?? 0,
+    );
+    const nextHeight = Math.min(12000, Math.max(480, contentHeight));
+    setRenderedPreviewHeight((currentHeight) => currentHeight === nextHeight ? currentHeight : nextHeight);
+  };
+
+  useEffect(() => {
+    const frame = renderedPreviewRef.current;
+    if (!frame) return;
+    const observer = new ResizeObserver(() => {
+      requestAnimationFrame(resizeRenderedPreview);
+    });
+    observer.observe(frame);
+    requestAnimationFrame(resizeRenderedPreview);
+    return () => observer.disconnect();
+  }, [viewport, sanitizedDocument, html]);
 
   useEffect(() => {
     const nextPreviews = Object.fromEntries(
@@ -169,9 +193,12 @@ export function EmailPreview({
       <div className={hasRenderedHTML ? "p-0" : "px-8 py-8"} style={{ backgroundColor: theme.background }}>
         {hasRenderedHTML ? (
           <iframe
+            ref={renderedPreviewRef}
             title="Email HTML preview"
-            sandbox=""
+            sandbox="allow-same-origin"
             srcDoc={sanitizedDocument ?? importedHTMLPreviewDocument(html ?? "")}
+            onLoad={() => requestAnimationFrame(resizeRenderedPreview)}
+            style={{ height: `${renderedPreviewHeight}px` }}
             className="mx-auto min-h-[480px] w-full max-w-2xl rounded border border-slate-200 bg-white"
           />
         ) : <div className="email-canvas mx-auto max-w-md space-y-3 p-6 text-sm" style={{ backgroundColor: theme.content_background, color: theme.text }}>

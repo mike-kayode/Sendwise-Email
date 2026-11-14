@@ -249,6 +249,32 @@ func TestRenderImportedFullDocumentPreservesLayoutAndStyles(t *testing.T) {
 	}
 }
 
+func TestRenderPreservesGrapesJSExpandedInlineStyles(t *testing.T) {
+	raw := json.RawMessage(`{
+		"version":2,
+		"mode":"html",
+		"html_mode":"original",
+		"html":"<!doctype html><html><head><style>@media only screen and (max-width: 600px) { .hero-h1 { font-size: 32px !important; line-height: 40px !important; } }</style></head><body><table class=\"wrapper\" style=\"box-sizing:border-box;margin-top:0px;margin-right:auto;margin-bottom:0px;margin-left:auto;width:100%;max-width:600px;border-top-left-radius:12px;border-top-right-radius:12px;border-image-outset:0;border-image-repeat:stretch;border-image-slice:100%;border-image-source:none;border-image-width:1;overflow-x:hidden\"><tr><td class=\"hero\" style=\"padding-top:40px;padding-right:30px;padding-bottom:30px;padding-left:30px;text-size-adjust:100%\"><h1 class=\"hero-h1\" style=\"margin-top:0px;margin-right:0px;margin-bottom:16px;margin-left:0px;font-size:42px\">Hello</h1><a style=\"display:inline-block;padding-top:12px;padding-right:20px;padding-bottom:12px;padding-left:20px;background-color:#c98a00;color:#ffffff;text-decoration-line:none\">Continue</a></td></tr></table></body></html>"
+	}`)
+	rendered, _, err := NewRenderer().RenderDesign(raw, nil)
+	if err != nil {
+		t.Fatalf("RenderDesign() error = %v", err)
+	}
+	for _, expected := range []string{
+		"margin-top: 0px", "margin-bottom: 16px", "padding-top: 40px",
+		"padding-left: 30px", "border-top-left-radius: 12px", "box-sizing: border-box",
+		"border-image-outset: 0", "border-image-repeat: stretch", "border-image-slice: 100%",
+		"border-image-source: none", "border-image-width: 1", "text-size-adjust: 100%",
+		"overflow-x: hidden", "text-decoration-line: none",
+		"@media only screen and (max-width: 600px)", "font-size: 32px !important",
+		"background-color: #c98a00", "color: #ffffff",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Errorf("render lost GrapesJS email style %q: %s", expected, rendered)
+		}
+	}
+}
+
 func hasPricingRowWithThreeCells(source string) bool {
 	document, err := xhtml.Parse(strings.NewReader(source))
 	if err != nil {
