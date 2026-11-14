@@ -135,6 +135,7 @@ func TestLoadRejectsInvalidRuntimeLimits(t *testing.T) {
 		value string
 	}{
 		{name: "zero sending rate", key: "SENDING_RATE_PER_SECOND", value: "0"},
+		{name: "zero platform domain rate", key: "PLATFORM_MAX_DOMAIN_RATE", value: "0"},
 		{name: "zero delivery attempts", key: "MAX_DELIVERY_ATTEMPTS", value: "0"},
 		{name: "zero scheduler interval", key: "SCHEDULER_INTERVAL", value: "0s"},
 		{name: "zero access token ttl", key: "ACCESS_TOKEN_TTL", value: "0s"},

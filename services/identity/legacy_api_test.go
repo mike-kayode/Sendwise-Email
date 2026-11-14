@@ -34,7 +34,7 @@ func TestHTTPAdminDomainClientUsesServiceAuthAndPagination(t *testing.T) {
 	defer server.Close()
 
 	client := NewHTTPLegacyAPIAdminClient(server.URL, "service-token")
-	domains, total, err := client.AdminDomains(context.Background(), "client mail", "verified", 2, 4)
+	domains, total, err := client.AdminDomains(context.Background(), "client mail", "verified", false, 2, 4)
 	if err != nil {
 		t.Fatalf("AdminDomains() error = %v", err)
 	}

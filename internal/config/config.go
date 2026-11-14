@@ -46,6 +46,7 @@ type Config struct {
 	DNSResolverAddr                string
 	DNSResolverTimeout             time.Duration
 	SendingRate                    int
+	PlatformMaxDomainRate          int
 	MaxDeliveryAttempts            int
 	SchedulerInterval              time.Duration
 	MaxMessageAge                  time.Duration
@@ -107,6 +108,10 @@ func load(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	sendingRate, err := getenvInt(lookup, "SENDING_RATE_PER_SECOND", 20)
+	if err != nil {
+		return Config{}, err
+	}
+	platformMaxDomainRate, err := getenvInt(lookup, "PLATFORM_MAX_DOMAIN_RATE", 1000)
 	if err != nil {
 		return Config{}, err
 	}
@@ -254,6 +259,7 @@ func load(lookup func(string) string) (Config, error) {
 		DNSResolverAddr:                getenv(lookup, "DNS_RESOLVER_ADDR", ""),
 		DNSResolverTimeout:             dnsResolverTimeout,
 		SendingRate:                    sendingRate,
+		PlatformMaxDomainRate:          platformMaxDomainRate,
 		MaxDeliveryAttempts:            maxDeliveryAttempts,
 		SchedulerInterval:              schedulerInterval,
 		MaxMessageAge:                  maxMessageAge,
@@ -342,6 +348,9 @@ func load(lookup func(string) string) (Config, error) {
 	}
 	if cfg.SendingRate < 1 {
 		return cfg, fmt.Errorf("SENDING_RATE_PER_SECOND must be at least 1")
+	}
+	if cfg.PlatformMaxDomainRate < 1 {
+		return cfg, fmt.Errorf("PLATFORM_MAX_DOMAIN_RATE must be at least 1")
 	}
 	if cfg.MaxDeliveryAttempts < 1 {
 		return cfg, fmt.Errorf("MAX_DELIVERY_ATTEMPTS must be at least 1")

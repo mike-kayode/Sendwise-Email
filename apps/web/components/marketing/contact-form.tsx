@@ -8,6 +8,7 @@ const topics = [
   "Migrating my sending",
   "Domain verification help",
   "Transactional email and API",
+  "Report abuse or safety concern",
   "Something else",
 ];
 
@@ -50,7 +51,7 @@ export function ContactForm() {
       <div className="card contact-form-card contact-success" role="status">
         <div className="ico contact-success-icon" aria-hidden="true">✓</div>
         <h2 className="h3">Message sent</h2>
-        <p className="small">Thanks for reaching out. We will reply to the email address you gave us.</p>
+        <p className="small">Your message has been recorded. Thank you for reaching out.</p>
         <button type="button" className="btn btn-ghost-light" onClick={() => setState("editing")}>Send another message</button>
       </div>
     );
@@ -84,7 +85,7 @@ export function ContactForm() {
       <button type="submit" className="btn btn-ink contact-submit" disabled={state === "sending"}>
         {state === "sending" ? "Sending..." : "Send message"}
       </button>
-      <p className="small">By sending this form you agree to our <a href="/legal/privacy">privacy policy</a>.</p>
+      <p className="small">Do not include passwords, API keys, or other sensitive account credentials.</p>
     </form>
   );
 }

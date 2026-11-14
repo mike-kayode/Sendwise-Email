@@ -1,7 +1,6 @@
 import type { MetadataRoute } from "next";
-import { legalSlugs } from "@/content/legal/documents";
 
-const siteURL = process.env.NEXT_PUBLIC_SITE_URL || "https://sendwise.ng";
+const siteURL = process.env.NEXT_PUBLIC_SITE_URL || "https://campaign.pipsleague.com";
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const paths = [
@@ -11,7 +10,6 @@ export default function sitemap(): MetadataRoute.Sitemap {
     "/pricing",
     "/about",
     "/contact",
-    ...legalSlugs.map((slug) => `/legal/${slug}`),
   ];
   return paths.map((path) => ({
     url: new URL(path, siteURL).toString(),

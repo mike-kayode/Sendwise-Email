@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "@/lib/api-errors";
 import { apiFetch } from "@/lib/auth";
@@ -30,6 +30,7 @@ type AdminDomain = {
   admin_disabled_at?: string | null;
   last_checked_at?: string | null;
   created_at: string;
+  quota_usage: Record<string, number>;
 };
 
 type AdminDomainResponse = {
@@ -57,7 +58,11 @@ export default function AdminDomainsPage() {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
+  const [nearLimit, setNearLimit] = useState(false);
   const [offset, setOffset] = useState(0);
+  useEffect(() => {
+    setNearLimit(new URLSearchParams(window.location.search).get("near_limit") === "true");
+  }, []);
   const sessionQuery = useQuery({
     queryKey: ["admin-session"],
     queryFn: () => apiFetch<AdminSession>("/admin/session"),
@@ -67,10 +72,11 @@ export default function AdminDomainsPage() {
     const query = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
     if (search) query.set("search", search);
     if (status) query.set("status", status);
+    if (nearLimit) query.set("near_limit", "true");
     return query.toString();
-  }, [offset, search, status]);
+  }, [nearLimit, offset, search, status]);
   const domainsQuery = useQuery({
-    queryKey: ["admin-domains", search, status, offset],
+    queryKey: ["admin-domains", search, status, nearLimit, offset],
     queryFn: () => apiFetch<AdminDomainResponse>(`/admin/domains?${params}`),
     enabled: Boolean(sessionQuery.data?.mfa_verified),
     retry: false,
@@ -97,7 +103,7 @@ export default function AdminDomainsPage() {
     <div>
       <PageHeader eyebrow={`Platform admin · ${session.platform_role.replace("_", " ")}`} title="Sending domains" description="Global domain ownership and DNS verification metadata from the sending API." />
       <form
-        className="mb-4 grid gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:grid-cols-[1fr_200px_auto]"
+        className="mb-4 grid gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:grid-cols-[1fr_200px_1fr_auto]"
         onSubmit={(event) => {
           event.preventDefault();
           setOffset(0);
@@ -118,6 +124,10 @@ export default function AdminDomainsPage() {
             <option value="misconfigured">Misconfigured</option>
           </select>
         </label>
+        <label className="flex items-center gap-2 self-end pb-2 text-sm text-slate-700">
+          <input type="checkbox" checked={nearLimit} onChange={(event) => { setNearLimit(event.target.checked); setOffset(0); }} />
+          Near quota limit (&gt;80%)
+        </label>
         <button type="submit" className="self-end rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-semibold text-white">Search</button>
       </form>
       {domainsQuery.error ? <div role="alert" className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">Unable to load domains: {domainsQuery.error.message}</div> : null}
@@ -135,11 +145,13 @@ export default function AdminDomainsPage() {
                   <th className="px-4 py-3 font-medium">DKIM</th>
                   <th className="px-4 py-3 font-medium">DMARC</th>
                   <th className="px-4 py-3 font-medium">Ownership</th>
+                  <th className="px-4 py-3 font-medium">Marketing quota</th>
+                  <th className="px-4 py-3 font-medium">Transactional quota</th>
                   <th className="px-4 py-3 font-medium">Last checked</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {result.data.length === 0 ? <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-500">No sending domains match these filters.</td></tr> : null}
+                {result.data.length === 0 ? <tr><td colSpan={9} className="px-4 py-12 text-center text-slate-500">No sending domains match these filters.</td></tr> : null}
                 {result.data.map((domain) => (
                   <tr key={domain.id}>
                     <td className="px-4 py-3">
@@ -159,6 +171,8 @@ export default function AdminDomainsPage() {
                       {domain.owner_conflict ? <span className="text-xs font-semibold text-rose-700">Owner conflict</span> : <span className="text-xs text-slate-600">Workspace-owned</span>}
                       {domain.transactional_enabled ? <p className="mt-1 text-xs text-slate-500">Transactional enabled</p> : null}
                     </td>
+                    <td className="px-4 py-3 text-xs font-medium text-slate-700">{(domain.quota_usage?.marketing ?? 0).toFixed(0)}%</td>
+                    <td className="px-4 py-3 text-xs font-medium text-slate-700">{(domain.quota_usage?.transactional ?? 0).toFixed(0)}%</td>
                     <td className="px-4 py-3 text-xs text-slate-600">{timeLabel(domain.last_checked_at)}</td>
                   </tr>
                 ))}

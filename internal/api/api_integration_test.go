@@ -28,6 +28,7 @@ import (
 	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/kit"
 	"github.com/khayode/email-platform/internal/observability"
+	"github.com/khayode/email-platform/internal/quota"
 	"github.com/khayode/email-platform/internal/transactional"
 	"github.com/khayode/email-platform/services/gateway"
 )
@@ -317,6 +318,102 @@ func TestInternalAdminDomainDirectoryRequiresServiceTokenAndReturnsMetadataOnly(
 	}
 	if checkedAfterConflict == nil || !checkedAfterConflict.Equal(*checkedAt) {
 		t.Fatalf("owner-conflict re-check changed last_checked_at: before %v, after %v", checkedAt, checkedAfterConflict)
+	}
+}
+
+func TestInternalAdminDomainQuotaUpdateChangesAtomicEnforcement(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	organizationID, domainID, adminID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	domain := "quota-admin-" + strings.ReplaceAll(domainID, "-", "") + ".example.test"
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO organizations (id, name, slug)
+		VALUES ($1, 'Quota admin workspace', $2)
+	`, organizationID, "quota-admin-"+strings.ReplaceAll(organizationID, "-", "")); err != nil {
+		t.Fatalf("insert quota admin workspace: %v", err)
+	}
+	defer integrationPool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1`, organizationID)
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO sending_domains (id, organization_id, domain, status)
+		VALUES ($1, $2, $3, 'verified')
+	`, domainID, organizationID, domain); err != nil {
+		t.Fatalf("insert quota admin domain: %v", err)
+	}
+
+	apiServer := newIntegrationServer(t)
+	apiServer.cfg.PlatformMaxDomainRate = 1000
+	handler := apiServer.Handler()
+	doInternal := func(method, path, body string, authenticated bool) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		if authenticated {
+			kit.WithServiceToken(request, integrationCfg.ServiceToken)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	unauthorized := doInternal(http.MethodGet, "/internal/admin/domains/"+domainID+"/quotas", "", false)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated domain quota read = %d, want 401", unauthorized.Code)
+	}
+	payload := fmt.Sprintf(`{
+		"updated_by":%q,"reason":"Approved domain quota change","streams":[
+			{"stream":"marketing","daily_limit":2,"monthly_limit":10,"per_second_limit":100,"unlimited":false},
+			{"stream":"transactional","daily_limit":2,"monthly_limit":10,"per_second_limit":100,"unlimited":false}
+		]
+	}`, adminID)
+	updated := doInternal(http.MethodPut, "/internal/admin/domains/"+domainID+"/quotas", payload, true)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update domain quotas = %d, want 200: %s", updated.Code, updated.Body.String())
+	}
+	var result struct {
+		Data struct {
+			Streams map[string]quota.Snapshot `json:"streams"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(updated.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode updated domain quotas: %v", err)
+	}
+	if result.Data.Streams[quota.StreamTransactional].DailyLimit == nil ||
+		*result.Data.Streams[quota.StreamTransactional].DailyLimit != 2 ||
+		result.Data.Streams[quota.StreamTransactional].DailyOverride == nil ||
+		*result.Data.Streams[quota.StreamTransactional].DailyOverride != 2 {
+		t.Fatalf("updated transactional quota snapshot = %+v", result.Data.Streams[quota.StreamTransactional])
+	}
+
+	for i := 0; i < 2; i++ {
+		tx, err := integrationPool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin accepted quota reservation: %v", err)
+		}
+		if _, err := quota.Reserve(ctx, tx, domainID, quota.StreamTransactional,
+			quota.SourceTransactionalRecipient, uuid.NewString(), 1, 1000); err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatalf("reserve message %d under updated quota: %v", i+1, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit accepted quota reservation: %v", err)
+		}
+	}
+	tx, err := integrationPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin quota-exceeded reservation: %v", err)
+	}
+	_, reserveErr := quota.Reserve(ctx, tx, domainID, quota.StreamTransactional,
+		quota.SourceTransactionalRecipient, uuid.NewString(), 1, 1000)
+	_ = tx.Rollback(ctx)
+	var exceeded *quota.ExceededError
+	if !errors.As(reserveErr, &exceeded) || exceeded.Window != quota.WindowDaily {
+		t.Fatalf("reservation after reaching updated limit = %v; want daily quota exceeded", reserveErr)
+	}
+
+	nearLimit := doInternal(http.MethodGet, "/internal/admin/quotas/near-limit", "", true)
+	if nearLimit.Code != http.StatusOK || !strings.Contains(nearLimit.Body.String(), domainID) {
+		t.Fatalf("near-limit results = %d, want updated domain: %s", nearLimit.Code, nearLimit.Body.String())
 	}
 }
 
@@ -2150,10 +2247,27 @@ func TestTransactionalAPIKeySendReadRotateAndRevoke(t *testing.T) {
 	server.cfg.TransactionalEnabled = true
 	if _, err := integrationPool.Exec(context.Background(), `
 		UPDATE transactional_settings
-		SET enabled = true, status = 'active', daily_limit = 1, monthly_limit = 10
+		SET enabled = true, status = 'active'
 		WHERE organization_id = $1
 	`, owner.Organization.ID); err != nil {
 		t.Fatalf("enable transactional workspace: %v", err)
+	}
+	var quotaDomainID string
+	quotaDomain := "transactional-" + uuid.NewString() + ".example.test"
+	if err := integrationPool.QueryRow(context.Background(), `
+		INSERT INTO sending_domains
+			(organization_id, domain, status, spf_status, dkim_status, transactional_enabled)
+		VALUES ($1, $2, 'verified', 'verified', 'verified', true)
+		RETURNING id::text
+	`, owner.Organization.ID, quotaDomain).Scan(&quotaDomainID); err != nil {
+		t.Fatalf("create verified transactional quota domain: %v", err)
+	}
+	if _, err := integrationPool.Exec(context.Background(), `
+		INSERT INTO domain_quotas
+			(domain_id, stream, daily_limit, monthly_limit, per_second_limit)
+		VALUES ($1, 'transactional', 1, 10, 100)
+	`, quotaDomainID); err != nil {
+		t.Fatalf("set transactional domain quota: %v", err)
 	}
 
 	createKeyBody := `{"name":"integration key","scopes":["send","read"],"test_mode":true}`
@@ -2169,7 +2283,7 @@ func TestTransactionalAPIKeySendReadRotateAndRevoke(t *testing.T) {
 	}
 
 	messageBody, err := json.Marshal(transactional.MessageInput{
-		From: "receipts@example.test", To: []string{"recipient@example.test"},
+		From: "receipts@" + quotaDomain, To: []string{"recipient@example.test"},
 		Subject: "Test receipt", Text: "This must not be delivered",
 	})
 	if err != nil {
@@ -2215,8 +2329,8 @@ func TestTransactionalAPIKeySendReadRotateAndRevoke(t *testing.T) {
 	if err := json.Unmarshal(usageResponse.Body.Bytes(), &usage); err != nil {
 		t.Fatalf("decode transactional usage: %v", err)
 	}
-	if _, ok := usage["daily_limit"]; !ok {
-		t.Fatalf("transactional usage omitted daily_limit: %+v", usage)
+	if _, ok := usage["daily_limit"]; ok {
+		t.Fatalf("transactional usage still exposes a workspace quota: %+v", usage)
 	}
 
 	liveKeyResponse := doRequest(t, server, http.MethodPost,
@@ -2228,8 +2342,24 @@ func TestTransactionalAPIKeySendReadRotateAndRevoke(t *testing.T) {
 	}
 	assertStatus(t, doRequest(t, server, http.MethodPost,
 		"/api/v1/transactional/messages", string(messageBody), liveKey.PlainKey), http.StatusAccepted)
-	assertStatus(t, doRequest(t, server, http.MethodPost,
-		"/api/v1/transactional/messages", string(messageBody), liveKey.PlainKey), http.StatusTooManyRequests)
+	quotaResponse := doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/messages", string(messageBody), liveKey.PlainKey)
+	assertStatus(t, quotaResponse, http.StatusTooManyRequests)
+	var quotaBody struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+		Window string `json:"window"`
+		Reset  string `json:"reset_at"`
+	}
+	if err := json.Unmarshal(quotaResponse.Body.Bytes(), &quotaBody); err != nil {
+		t.Fatalf("decode quota-exceeded response: %v", err)
+	}
+	if quotaBody.Error.Code != "quota_exceeded" || quotaBody.Window == "" ||
+		quotaBody.Reset == "" || quotaResponse.Result().Header.Get("Retry-After") == "" {
+		t.Fatalf("quota response missing code/window/reset/Retry-After: body=%s headers=%v",
+			quotaResponse.Body.String(), quotaResponse.Result().Header)
+	}
 	assertStatus(t, doRequest(t, server, http.MethodGet,
 		"/api/v1/transactional/messages/"+receipt.ID, "", liveKey.PlainKey), http.StatusForbidden)
 

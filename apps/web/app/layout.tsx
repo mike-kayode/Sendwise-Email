@@ -19,7 +19,7 @@ const jetBrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "https://sendwise.ng"),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "https://campaign.pipsleague.com"),
   title: {
     default: "Sendwise",
     template: "%s · Sendwise",

@@ -18,6 +18,8 @@ platform role.
 | Disable or re-enable sending domains | No | Yes, reasoned, recent-MFA protected, audited, and enforced at send time |
 | Remove a sending domain and its sender identities from Sendwise | No | Yes, reasoned, recent-MFA protected, and audited |
 | Resolve duplicate sending-domain ownership | No | Yes; selects one existing workspace record, with reason, recent MFA, and audit |
+| Read domain quotas and platform quota defaults | Yes | Yes |
+| Change per-domain quotas and platform defaults | No | Yes; requires a typed reason, recent MFA, and before/after audit state |
 | View, add, or remove global suppression records | No | Yes; writes are reasoned, recent-MFA protected, and audited |
 | Stop a running campaign | No | Yes, reasoned, recent-MFA protected, and audited |
 | Manage platform settings, roles, and customer operations | No | Yes |
@@ -142,6 +144,8 @@ Currently implemented security endpoints are:
   sending-domain metadata across workspaces, fetched from the API service over
   a service-token-protected internal endpoint. The response omits DKIM keys,
   verification tokens, DNS resolver details, and customer message/contact data.
+  Add `near_limit=true` to filter to domains using at least 80% of any effective
+  daily, monthly, or per-second quota.
 - `GET /api/v1/admin/domains/{domainID}` — the same privacy-safe metadata plus
   the recorded per-resolver DNS check results for that domain.
 - `POST /api/v1/admin/domains/{domainID}/verify` — super_admin-only DNS
@@ -166,6 +170,21 @@ Currently implemented security endpoints are:
   records are marked conflicted before the selected record becomes the sole
   owner. Requires reason and fresh MFA; audit captures prior owner/conflict IDs
   and the selected workspace.
+- `GET /api/v1/admin/domains/{domainID}/quotas` — effective marketing and
+  transactional limits, domain overrides, current usage, UTC reset times,
+  recent reputation signals, and customer quota requests.
+- `PUT /api/v1/admin/domains/{domainID}/quotas` — super_admin-only update of
+  both stream overrides. A `null` daily/monthly/per-second override inherits
+  the platform default; `unlimited` disables only daily and monthly caps. The
+  per-second hard ceiling and all other sending safeguards still apply. The
+  request requires a reason and MFA re-verification within five minutes; the
+  audit record captures before/after quota state.
+- `GET /api/v1/admin/quota-defaults` and `PUT /api/v1/admin/quota-defaults` —
+  read or change the marketing and transactional platform defaults. Writes are
+  super_admin-only and require fresh MFA, a reason, and before/after audit
+  state. Updated database values supersede environment seed defaults.
+- `GET /api/v1/admin/quotas/near-limit` — domains currently at or above 80% of
+  an effective quota, including the usage snapshot for each stream.
 - `GET /api/v1/admin/campaigns?search=&status=&workspace_id=&limit=50&offset=0`
   — paginated campaign metadata and delivery counts across workspaces. This
   route is available to support_admin and super_admin; it never returns
@@ -218,6 +237,15 @@ role-protected metadata endpoints. An account that is not a platform
 administrator receives the app's not-found view; the API still independently
 checks the role on every request.
 
+The admin overview links domains above 80% of an effective quota. The domain
+directory includes per-stream peak usage percentages and a near-limit filter.
+Domain details show daily, monthly, and per-second usage, UTC reset times,
+customer increase requests, and super_admin override controls. The quota
+defaults screen is available under `/admin/settings`; support_admin can review
+the current values but cannot change them. Sharp quota increases on domains
+verified less than 14 days ago or with a high recent bounce rate display a
+reputation warning.
+
 Admin audit rows are append-only. A database trigger rejects row updates,
 deletes, and truncation in addition to revoking those privileges from `PUBLIC`.
 Bootstrap, MFA setup, and successful MFA verification are audited with actor,
@@ -236,12 +264,12 @@ workspace metadata search/list and membership detail, super_admin append-only
 workspace notes, filtered/reasoned audit export, and global sending-domain
 metadata listing/details/re-check plus the privacy-safe campaign directory and
 audited campaign cancellation, reasoned global suppression management, and
-audited domain disable/enable/removal/owner-conflict resolution. It
-does **not** yet provide a complete operational admin overview or full workspace
-management (suspension, sending controls, quotas, plan changes, ownership
+audited domain disable/enable/removal/owner-conflict resolution, per-domain
+quota controls, quota-default management, and near-limit reporting. It
+does **not** yet provide full workspace management (plan changes, ownership
 transfer, or deletion), campaign controls beyond cancellation, delivery operations
 beyond campaign aggregate counts, impersonation,
-or Playwright admin journeys. Those capabilities must be
+or a Playwright quota-admin journey. Those capabilities must be
 delivered in subsequent phases; this partial implementation is not evidence
 that the full Super Admin console is complete.
 

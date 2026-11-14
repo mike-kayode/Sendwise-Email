@@ -109,9 +109,15 @@ test("sending domains load from the real API without browser errors", async ({
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   const domainAPIResponses: number[] = [];
+  const dnsRecordRequests: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(`${error.message}\n${error.stack ?? ""}`));
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/dns-records")) {
+      dnsRecordRequests.push(request.url());
+    }
   });
   page.on("response", (response) => {
     if (new URL(response.url()).pathname.includes("/api/v1/domains")) {
@@ -187,7 +193,23 @@ test("sending domains load from the real API without browser errors", async ({
     data: Array<{ id: string; domain: string }>;
   };
   const pendingDomain = domainList.data.find((item) => item.domain === `pending-${stamp}.example.test`);
+  const verifiedDomain = domainList.data.find((item) => item.domain === `verified-${stamp}.example.test`);
   expect(pendingDomain?.id).toBeTruthy();
+  expect(verifiedDomain?.id).toBeTruthy();
+  await expect.poll(() =>
+    dnsRecordRequests.some((url) => url.includes(`/domains/${pendingDomain!.id}/dns-records`)),
+  ).toBe(true);
+  expect(
+    dnsRecordRequests.some((url) => url.includes(`/domains/${verifiedDomain!.id}/dns-records`)),
+  ).toBe(false);
+  await expect(page.getByText("Pending verification", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: `View records for ${verifiedDomain!.domain}` }).click();
+  await expect(page.getByText(`Showing records for ${verifiedDomain!.domain}`, { exact: false })).toBeVisible();
+  await expect.poll(() =>
+    dnsRecordRequests.some((url) => url.includes(`/domains/${verifiedDomain!.id}/dns-records`)),
+  ).toBe(true);
+  await page.getByRole("button", { name: "Show pending records" }).click();
+
   const dnsResponse = await request.get(
     `${API_ORIGIN}/api/v1/domains/${pendingDomain!.id}/dns-records`,
     { headers: { Authorization: ["Bearer", accessToken].join(" ") } },

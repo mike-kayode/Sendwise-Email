@@ -8,11 +8,6 @@ const publicPages = [
   "/pricing",
   "/about",
   "/contact",
-  "/legal",
-  "/legal/privacy",
-  "/legal/terms",
-  "/legal/acceptable-use",
-  "/legal/data-protection",
   "/login",
   "/register",
   "/forgot-password",
@@ -108,15 +103,43 @@ test("footer has clear spacing after the page content on desktop and mobile", as
     for (const width of [390, 1440]) {
       await page.setViewportSize({ width, height: 900 });
       await page.goto(path);
-      const gap = await page.evaluate(() => {
+      const layout = await page.evaluate(() => {
         const main = document.querySelector("main");
         const footer = document.querySelector("footer");
-        if (!main || !footer) throw new Error("Page content or footer is missing");
-        return footer.getBoundingClientRect().top - main.getBoundingClientRect().bottom;
+        const content = main?.lastElementChild;
+        const footerContent = footer?.firstElementChild;
+        const marketing = document.querySelector(".marketing");
+        if (!main || !footer || !content || !footerContent || !marketing) throw new Error("Page content or footer is missing");
+        return {
+          gap: footer.getBoundingClientRect().top - content.getBoundingClientRect().bottom,
+          layout: getComputedStyle(marketing).display,
+          footerTopPadding: Number.parseFloat(getComputedStyle(footerContent).paddingTop),
+        };
       });
-      expect(gap, `${path} footer gap at ${width}px`).toBeGreaterThanOrEqual(40);
+      expect(layout.layout).toBe("flex");
+      expect(layout.gap, `${path} footer gap at ${width}px`).toBeGreaterThanOrEqual(40);
+      expect(layout.footerTopPadding, `${path} footer top padding at ${width}px`).toBeGreaterThanOrEqual(40);
     }
   }
+});
+
+test("short public pages keep the footer at the bottom of the viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1400 });
+  await page.goto("/auth/verify");
+  const layout = await page.evaluate(() => {
+    const marketing = document.querySelector(".marketing");
+    const footer = document.querySelector(".marketing-footer");
+    if (!marketing || !footer) throw new Error("The public frame or footer is missing");
+    return {
+      direction: getComputedStyle(marketing).flexDirection,
+      footerBottom: footer.getBoundingClientRect().bottom,
+      viewportHeight: window.innerHeight,
+      documentHeight: document.documentElement.scrollHeight,
+    };
+  });
+  expect(layout.direction).toBe("column");
+  expect(layout.documentHeight).toBeLessThanOrEqual(layout.viewportHeight + 1);
+  expect(layout.footerBottom).toBeGreaterThanOrEqual(layout.viewportHeight - 1);
 });
 
 test("light and dark themes toggle and persist, with white default page surfaces", async ({ page }) => {
@@ -135,6 +158,26 @@ test("light and dark themes toggle and persist, with white default page surfaces
   await expect(marketing).toHaveAttribute("data-theme", "dark");
   await page.getByRole("button", { name: "Switch to light mode" }).click();
   await expect(marketing).toHaveAttribute("data-theme", "light");
+});
+
+test("desktop theme toggle sits beside sign-in and remains available on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  const desktopToggle = page.getByRole("button", { name: "Switch to dark mode" });
+  const signIn = page.locator(".marketing-header-actions").getByRole("link", { name: "Sign in" });
+  const toggleBox = await desktopToggle.boundingBox();
+  const signInBox = await signIn.boundingBox();
+  expect(toggleBox).not.toBeNull();
+  expect(signInBox).not.toBeNull();
+  expect(toggleBox!.x + toggleBox!.width).toBeLessThanOrEqual(signInBox!.x);
+  expect(signInBox!.x - toggleBox!.x - toggleBox!.width).toBeLessThan(20);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  const mobileToggle = page.getByRole("button", { name: "Switch to dark mode" });
+  await expect(mobileToggle).toBeVisible();
+  await mobileToggle.click();
+  await expect(page.locator(".marketing")).toHaveAttribute("data-theme", "dark");
 });
 
 test("mobile navigation opens, receives focus, and closes on Escape", async ({ page }) => {
@@ -174,7 +217,7 @@ test("code tabs copy the selected example and FAQ accordions toggle", async ({ p
   await expect(question).toHaveAttribute("aria-expanded", "false");
 });
 
-test("pricing billing period toggles", async ({ page }) => {
+test("pricing shows the published monthly plans without an unpriced annual option", async ({ page }) => {
   await page.goto("/pricing");
   const plans = page.locator(".pricing-plans .plan");
   await expect(plans).toHaveCount(4);
@@ -188,16 +231,9 @@ test("pricing billing period toggles", async ({ page }) => {
     const plan = plans.nth(index);
     for (const text of expected) await expect(plan).toContainText(text);
   }
-  await expect(page.getByRole("heading", { name: "Pay as you go" })).toBeVisible();
-
-  const monthly = page.getByRole("button", { name: "Monthly", exact: true });
-  const yearly = page.getByRole("button", { name: "Yearly", exact: true });
-  await expect(monthly).toHaveAttribute("aria-pressed", "true");
-  await yearly.click();
-  await expect(yearly).toHaveAttribute("aria-pressed", "true");
-  await expect(monthly).toHaveAttribute("aria-pressed", "false");
-  await expect(plans.nth(1).locator(".price")).toContainText("Contact us for annual pricing");
-  await expect(plans.nth(1).locator(".price")).not.toContainText("₦");
+  await expect(page.getByRole("heading", { name: "Questions about plan setup?" })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Billing period" })).toHaveCount(0);
+  await expect(page.getByText("billed yearly", { exact: false })).toHaveCount(0);
   const question = page.getByRole("button", { name: "What is included in the Free plan?" });
   await expect(question).toHaveAttribute("aria-expanded", "true");
   await question.click();
@@ -206,13 +242,27 @@ test("pricing billing period toggles", async ({ page }) => {
   await expect(question).toHaveAttribute("aria-expanded", "true");
 });
 
-test("legal tabs support deep links and arrow-key navigation", async ({ page }) => {
-  await page.goto("/legal/privacy");
-  const privacy = page.getByRole("tab", { name: "Privacy" });
-  await privacy.focus();
-  await page.keyboard.press("ArrowRight");
-  await expect(page).toHaveURL(/\/legal\/terms$/);
-  await expect(page.getByRole("tab", { name: "Terms" })).toHaveAttribute("aria-selected", "true");
+test("unapproved legal placeholder pages are not published", async ({ page }) => {
+  for (const path of ["/legal", "/legal/privacy", "/legal/terms", "/legal/acceptable-use", "/legal/data-protection"]) {
+    const response = await page.goto(path);
+    expect(response?.status(), path).toBe(404);
+  }
+});
+
+test("About, Contact, and Developer pages contain no template copy or unsupported API paths", async ({ page }) => {
+  await page.goto("/about");
+  await expect(page.getByText(/\[(YOUR STORY|YOUR MISSION|CITY, COUNTRY|NAME|ROLE)\]/)).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "The people behind Sendwise." })).toHaveCount(0);
+
+  await page.goto("/contact");
+  await expect(page.getByText(/\[(EMAIL ADDRESS|SUPPORT EMAIL|RESPONSE TIME|ABUSE EMAIL)\]/)).toHaveCount(0);
+  await expect(page.getByLabel("What is this about?")).toContainText("Report abuse or safety concern");
+
+  await page.goto("/developers");
+  await expect(page.getByText("/api/v1/transactional/send", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("/api/v1/transactional/messages/batch", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("/api/v1/transactional/suppressions", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("POST /api/v1/transactional/messages", { exact: false })).toBeVisible();
 });
 
 test("contact form shows success and error states", async ({ page }) => {

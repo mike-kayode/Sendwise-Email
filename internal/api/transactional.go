@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/khayode/email-platform/internal/auth"
 	"github.com/khayode/email-platform/internal/httpx"
+	"github.com/khayode/email-platform/internal/quota"
 	"github.com/khayode/email-platform/internal/transactional"
 )
 
@@ -429,6 +432,7 @@ func (s *Server) sendTransactionalMessage(w http.ResponseWriter, r *http.Request
 		IdempotencyKey: r.Header.Get("Idempotency-Key"),
 		Mode:           key.TestMode,
 		EnforceLimits:  true,
+		HardRate:       int64(s.cfg.PlatformMaxDomainRate),
 	}, input)
 	if err != nil {
 		switch {
@@ -436,11 +440,22 @@ func (s *Server) sendTransactionalMessage(w http.ResponseWriter, r *http.Request
 			httpx.Error(w, http.StatusForbidden, "transactional_disabled", err.Error())
 		case errors.Is(err, transactional.ErrWorkspacePaused):
 			httpx.Error(w, http.StatusForbidden, "transactional_paused", err.Error())
-		case errors.Is(err, transactional.ErrDailyLimit):
-			httpx.Error(w, http.StatusTooManyRequests, "daily_limit_exceeded", err.Error())
-		case errors.Is(err, transactional.ErrMonthlyLimit):
-			httpx.Error(w, http.StatusTooManyRequests, "monthly_limit_exceeded", err.Error())
+		case errors.Is(err, transactional.ErrSenderDomainNotAllowed):
+			httpx.Error(w, http.StatusForbidden, "sender_domain_not_allowed", err.Error())
 		default:
+			var exceeded *quota.ExceededError
+			if errors.As(err, &exceeded) {
+				retryAfter := max(1, int(math.Ceil(time.Until(exceeded.ResetAt).Seconds())))
+				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+				httpx.JSON(w, http.StatusTooManyRequests, map[string]any{
+					"error":    map[string]string{"code": "quota_exceeded", "message": exceeded.Error()},
+					"window":   exceeded.Window,
+					"reset_at": exceeded.ResetAt.UTC(),
+					"limit":    exceeded.Limit,
+					"used":     exceeded.Used,
+				})
+				return
+			}
 			httpx.Error(w, http.StatusBadRequest, "invalid_message", err.Error())
 		}
 		return
@@ -580,19 +595,10 @@ func (s *Server) getTransactionalUsage(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load transactional usage.")
 		return
 	}
-	var dailyLimit, monthlyLimit int
-	if err := s.pool.QueryRow(r.Context(), `
-		SELECT daily_limit, monthly_limit FROM transactional_settings WHERE organization_id = $1
-	`, orgID).Scan(&dailyLimit, &monthlyLimit); err != nil {
-		s.logger.Error("load transactional usage limits", "error", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load transactional usage limits.")
-		return
-	}
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"accepted_today": acceptedToday, "accepted_this_month": acceptedThisMonth,
 		"delivered_this_month": deliveredThisMonth, "bounced_this_month": bouncedThisMonth,
 		"complained_this_month": complainedThisMonth,
-		"daily_limit":           dailyLimit, "monthly_limit": monthlyLimit,
 	})
 }
 
@@ -1113,15 +1119,15 @@ func (s *Server) getTransactionalSettings(w http.ResponseWriter, r *http.Request
 	var settings map[string]any
 	var enabled bool
 	var status, pauseReason string
-	var requestsPerSecond, dailyLimit, monthlyLimit, maxRecipients, minimumSampleSize int
+	var requestsPerSecond, maxRecipients, minimumSampleSize int
 	var maxMessageBytes int64
 	var maxBounceRate, maxComplaintRate float32
 	err := s.pool.QueryRow(r.Context(), `
-		SELECT enabled, status, pause_reason, requests_per_second, daily_limit, monthly_limit,
+		SELECT enabled, status, pause_reason, requests_per_second,
 		       max_recipients, max_message_bytes, max_bounce_rate, max_complaint_rate, minimum_sample_size
 		FROM transactional_settings WHERE organization_id = $1
 	`, s.organizationID(r)).Scan(
-		&enabled, &status, &pauseReason, &requestsPerSecond, &dailyLimit, &monthlyLimit,
+		&enabled, &status, &pauseReason, &requestsPerSecond,
 		&maxRecipients, &maxMessageBytes, &maxBounceRate, &maxComplaintRate, &minimumSampleSize,
 	)
 	if err != nil {
@@ -1131,8 +1137,7 @@ func (s *Server) getTransactionalSettings(w http.ResponseWriter, r *http.Request
 	}
 	settings = map[string]any{
 		"enabled": enabled, "status": status, "pause_reason": pauseReason,
-		"requests_per_second": requestsPerSecond, "daily_limit": dailyLimit,
-		"monthly_limit": monthlyLimit, "max_recipients": maxRecipients,
+		"requests_per_second": requestsPerSecond, "max_recipients": maxRecipients,
 		"max_message_bytes": maxMessageBytes, "max_bounce_rate": maxBounceRate,
 		"max_complaint_rate": maxComplaintRate, "minimum_sample_size": minimumSampleSize,
 	}

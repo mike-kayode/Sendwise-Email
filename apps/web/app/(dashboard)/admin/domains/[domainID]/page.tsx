@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { notFound, useParams, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "@/lib/api-errors";
 import { apiFetch } from "@/lib/auth";
@@ -53,6 +53,215 @@ type DomainCandidatesResponse = {
   data: AdminDomain[];
   pagination: { total: number; limit: number; offset: number };
 };
+
+type QuotaSnapshot = {
+  daily_limit: number | null;
+  monthly_limit: number | null;
+  per_second_limit: number;
+  daily_override: number | null;
+  monthly_override: number | null;
+  per_second_override: number | null;
+  unlimited: boolean;
+  daily_used: number;
+  monthly_used: number;
+  per_second_used: number;
+  daily_reset_at: string;
+  monthly_reset_at: string;
+  per_second_reset_at: string;
+  daily_usage_percent: number;
+  monthly_usage_percent: number;
+};
+
+type QuotaData = {
+  streams: Record<"marketing" | "transactional", QuotaSnapshot>;
+  risk: {
+    young_domain: boolean;
+    verified_days: number;
+    high_bounce_rate: boolean;
+    bounce_rate_7_days: number;
+  };
+  requests: Array<{
+    id: string;
+    stream: "marketing" | "transactional";
+    daily_limit: number | null;
+    monthly_limit: number | null;
+    per_second_limit: number | null;
+    reason: string;
+    status: string;
+    created_at: string;
+  }>;
+};
+
+type QuotaDraft = {
+  daily_limit: string;
+  monthly_limit: string;
+  per_second_limit: string;
+  unlimited: boolean;
+};
+
+function AdminDomainQuotaPanel({ domainID, role }: { domainID: string; role: AdminSession["platform_role"] }) {
+  const [drafts, setDrafts] = useState<Record<string, QuotaDraft>>({});
+  const [reason, setReason] = useState("");
+  const [mfaCode, setMfaCode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const quotaQuery = useQuery({
+    queryKey: ["admin-domain-quotas", domainID],
+    queryFn: () => apiFetch<{ data: QuotaData }>(`/admin/domains/${encodeURIComponent(domainID)}/quotas`),
+    retry: false,
+  });
+
+  useEffect(() => {
+    const streams = quotaQuery.data?.data.streams;
+    if (!streams) return;
+    setDrafts(Object.fromEntries((["marketing", "transactional"] as const).map((stream) => {
+      const quota = streams[stream];
+      return [stream, {
+        daily_limit: quota.daily_override?.toString() ?? "",
+        monthly_limit: quota.monthly_override?.toString() ?? "",
+        per_second_limit: quota.per_second_override?.toString() ?? "",
+        unlimited: quota.unlimited,
+      }];
+    })));
+  }, [quotaQuery.data]);
+
+  const updateDraft = (stream: "marketing" | "transactional", key: keyof QuotaDraft, value: string | boolean) => {
+    setDrafts((current) => ({ ...current, [stream]: { ...current[stream], [key]: value } }));
+  };
+  const updateQuotas = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (role !== "super_admin" || !reason.trim() || !mfaCode.trim() || busy) return;
+    if (!window.confirm("Apply these quota overrides? The change will be recorded in the immutable admin audit log.")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiFetch("/admin/mfa/verify", { method: "POST", body: JSON.stringify({ code: mfaCode.trim() }) });
+      await apiFetch(`/admin/domains/${encodeURIComponent(domainID)}/quotas`, {
+        method: "PUT",
+        body: JSON.stringify({
+          streams: (["marketing", "transactional"] as const).map((stream) => ({
+            stream,
+            daily_limit: drafts[stream]?.daily_limit ? Number(drafts[stream].daily_limit) : null,
+            monthly_limit: drafts[stream]?.monthly_limit ? Number(drafts[stream].monthly_limit) : null,
+            per_second_limit: drafts[stream]?.per_second_limit ? Number(drafts[stream].per_second_limit) : null,
+            unlimited: drafts[stream]?.unlimited ?? false,
+          })),
+          reason: reason.trim(),
+        }),
+      });
+      setReason("");
+      setMfaCode("");
+      await quotaQuery.refetch();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The domain quotas could not be updated.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const timeLabel = (value: string) => new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(new Date(value)) + " UTC";
+  const limitLabel = (value: number | null, unlimited: boolean) => unlimited || value === null ? "No cap" : value.toLocaleString();
+  const riskyDomain = Boolean(quotaQuery.data?.data.risk.young_domain || quotaQuery.data?.data.risk.high_bounce_rate);
+  const sharplyRaised = (["marketing", "transactional"] as const).some((stream) => {
+    const snapshot = quotaQuery.data?.data.streams[stream];
+    const draft = drafts[stream];
+    if (!snapshot || !draft) return false;
+    if (draft.unlimited && !snapshot.unlimited) return true;
+    return (
+      (snapshot.daily_limit !== null && draft.daily_limit !== "" && Number(draft.daily_limit) > snapshot.daily_limit * 2) ||
+      (snapshot.monthly_limit !== null && draft.monthly_limit !== "" && Number(draft.monthly_limit) > snapshot.monthly_limit * 2) ||
+      (draft.per_second_limit !== "" && Number(draft.per_second_limit) > snapshot.per_second_limit * 2)
+    );
+  });
+
+  return (
+    <section aria-labelledby="domain-quota-heading" className="mt-5 rounded-xl border border-slate-200 bg-white">
+      <div className="border-b border-slate-100 p-4">
+        <h2 id="domain-quota-heading" className="text-sm font-semibold text-slate-900">Domain quotas</h2>
+        <p className="mt-1 text-xs text-slate-500">Usage and effective limits for each sending stream. Blank override fields inherit the platform default.</p>
+      </div>
+      {quotaQuery.isLoading ? <p className="p-4 text-sm text-slate-500">Loading domain quotas...</p> : null}
+      {quotaQuery.error ? <p role="alert" className="p-4 text-sm text-rose-700">Domain quotas could not be loaded: {quotaQuery.error.message}</p> : null}
+      {quotaQuery.data ? (
+        <div className="space-y-4 p-4">
+          {(["marketing", "transactional"] as const).map((stream) => {
+            const quota = quotaQuery.data.data.streams[stream];
+            const draft = drafts[stream];
+            return (
+              <article key={stream} className="rounded-lg border border-slate-200 p-4">
+                <h3 className="text-sm font-semibold capitalize text-slate-900">{stream}</h3>
+                <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                  {[
+                    ["Daily", quota.daily_used, limitLabel(quota.daily_limit, quota.unlimited), quota.daily_usage_percent, quota.daily_reset_at],
+                    ["Monthly", quota.monthly_used, limitLabel(quota.monthly_limit, quota.unlimited), quota.monthly_usage_percent, quota.monthly_reset_at],
+                    ["Per second", quota.per_second_used, `${quota.per_second_limit.toLocaleString()}`, Math.min(100, 100 * quota.per_second_used / Math.max(1, quota.per_second_limit)), quota.per_second_reset_at],
+                  ].map(([label, used, limit, percent, reset]) => (
+                    <div key={String(label)} className="rounded-md bg-slate-50 p-3">
+                      <div className="flex justify-between gap-2 text-xs"><span className="font-medium text-slate-700">{label}</span><span className="text-slate-600">{Number(used).toLocaleString()} / {limit}</span></div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-emerald-600" style={{ width: `${Math.min(100, Number(percent))}%` }} /></div>
+                      <p className="mt-2 text-[11px] text-slate-500">Resets {timeLabel(String(reset))}</p>
+                    </div>
+                  ))}
+                </div>
+                {role === "super_admin" && draft ? (
+                  <div className="mt-4 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-3">
+                    {([
+                      ["daily_limit", "Daily override"],
+                      ["monthly_limit", "Monthly override"],
+                      ["per_second_limit", "Per-second override"],
+                    ] as const).map(([key, label]) => (
+                      <label key={key} className="text-xs font-medium text-slate-700">
+                        {label}
+                        <input type="number" min="1" value={draft[key]} onChange={(event) => updateDraft(stream, key, event.target.value)} placeholder="Inherit default" className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" />
+                      </label>
+                    ))}
+                    <label className="flex items-center gap-2 text-sm text-slate-700 sm:col-span-3">
+                      <input type="checkbox" checked={draft.unlimited} onChange={(event) => updateDraft(stream, "unlimited", event.target.checked)} />
+                      Unlimited daily and monthly quotas (per-second safety limit still applies)
+                    </label>
+                    {riskyDomain && sharplyRaised && (
+                      <p className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950 sm:col-span-3">
+                        Risk warning: this domain is {quotaQuery.data.data.risk.young_domain ? `only ${quotaQuery.data.data.risk.verified_days} days past verification` : `showing a ${(quotaQuery.data.data.risk.bounce_rate_7_days * 100).toFixed(2)}% bounce rate over seven days`}. Review reputation before substantially raising its limits; proceeding requires a reason.
+                      </p>
+                    )}
+                  </div>
+                ) : null}
+              </article>
+            );
+          })}
+          {role === "super_admin" ? (
+            <form onSubmit={(event) => void updateQuotas(event)} className="grid gap-3 rounded-lg bg-slate-50 p-4 sm:grid-cols-2">
+              <label className="text-sm font-medium text-slate-700">
+                Required reason
+                <textarea required maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} className="mt-1 min-h-20 w-full rounded-lg border border-slate-200 bg-white p-3 text-sm" />
+              </label>
+              <label className="text-sm font-medium text-slate-700">
+                Authenticator or recovery code
+                <input required autoComplete="one-time-code" value={mfaCode} onChange={(event) => setMfaCode(event.target.value)} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" />
+              </label>
+              {error ? <p role="alert" className="text-sm text-rose-700 sm:col-span-2">{error}</p> : null}
+              <button type="submit" disabled={busy || quotaQuery.isLoading} className="justify-self-start rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 sm:col-span-2">{busy ? "Updating quotas..." : "Review and save quotas"}</button>
+            </form>
+          ) : null}
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Customer increase requests</h3>
+            {quotaQuery.data.data.requests.length === 0 ? <p className="mt-2 text-sm text-slate-500">No increase requests recorded.</p> : (
+              <ul className="mt-2 divide-y divide-slate-100">
+                {quotaQuery.data.data.requests.map((request) => (
+                  <li key={request.id} className="grid gap-1 py-3 text-sm sm:grid-cols-[140px_1fr_auto]">
+                    <span className="capitalize text-slate-700">{request.stream} · {request.status}</span>
+                    <span className="text-slate-600">{request.reason}</span>
+                    <time className="text-xs text-slate-500">{timeLabel(request.created_at)}</time>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
 
 function timeLabel(value?: string | null) {
   if (!value) return "Never";
@@ -317,6 +526,7 @@ export default function AdminDomainDetailsPage() {
               </form>
             </section>
           ) : null}
+          <AdminDomainQuotaPanel domainID={domainID} role={session.platform_role} />
           <section className="mt-5 rounded-xl border border-slate-200 bg-white">
             <div className="border-b border-slate-100 p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">

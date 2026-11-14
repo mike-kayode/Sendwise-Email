@@ -9,7 +9,10 @@
   --accent: #e7f9eb;
   --accent-d: #136a4f;
   --amber: #f6c560;
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
+  min-height: 100svh;
   color: var(--text);
   background: var(--paper);
   font-family: var(--font-manrope), system-ui, sans-serif;
@@ -36,7 +39,7 @@
 .marketing .sec { padding: 104px 0; }
 .marketing .dark { background: var(--paper); color: var(--text); }
 .marketing .dark2 { background: var(--paper); color: var(--text); }
-.marketing main { padding-bottom: 32px; }
+.marketing > main { flex: 1 0 auto; width: 100%; padding-bottom: clamp(48px, 6vw, 72px); }
 .marketing .dark .lead,
 .marketing .dark2 .lead { color: var(--muted); }
 .marketing .eyebrow {
@@ -124,7 +127,7 @@
 .marketing .plan-description { margin-top: 6px; }
 .marketing .price { margin: 0; font-size: 44px; font-weight: 800; line-height: 1; letter-spacing: -.03em; }
 .marketing .price .small { font-size: 13px; font-weight: 600; }
-.marketing .foot-grid { display: grid; grid-template-columns: 1.6fr repeat(4, minmax(0, 1fr)); column-gap: 30px; row-gap: 34px; }
+.marketing .foot-grid { display: grid; grid-template-columns: 1.6fr repeat(3, minmax(0, 1fr)); column-gap: 30px; row-gap: 34px; }
 .marketing .foot-grid h2 { margin: 0 0 16px; color: var(--text); font-size: 13px; letter-spacing: .1em; text-transform: uppercase; }
 .marketing .foot-grid > div > a:not(.marketing-logo) { display: block; padding: 8px 0; color: var(--muted); font-size: 15px; line-height: 1.5; text-decoration: none; }
 .marketing .foot-grid > div > a:not(.marketing-logo):hover { color: var(--text); }
@@ -143,16 +146,17 @@
 .marketing-header-actions { display: flex; gap: 10px; }
 .marketing-theme-toggle { display: inline-flex; min-height: 42px; align-items: center; justify-content: center; gap: 8px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--text); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
 .marketing-theme-toggle:hover { background: var(--ink2); }
+.marketing-theme-toggle-mobile { display: none; }
 .marketing-menu-button,
 .marketing-nav-mobile-actions { display: none; }
-.marketing-footer { margin-top: 32px; border-top: 1px solid var(--line); background: var(--paper); color: var(--text); }
-.marketing-footer-inner { padding-top: 64px; padding-bottom: 56px; }
+.marketing-footer { flex: 0 0 auto; margin-top: 0; border-top: 1px solid var(--line); background: var(--paper); color: var(--text); }
+.marketing .marketing-footer-inner { padding-top: clamp(40px, 5vw, 64px); padding-bottom: clamp(36px, 4vw, 56px); }
 .marketing-footer-description { max-width: 340px; margin: 22px 0 0; color: var(--muted); font-size: 13px; line-height: 1.8; }
 .marketing-footer-bottom { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 16px; margin-top: 72px; padding-top: 30px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
 .marketing-footer-bottom a { color: var(--text); font-weight: 800; text-decoration: underline; }
 .marketing-skip-link { position: absolute; z-index: 20; top: 8px; left: -10000px; padding: 12px 16px; border-radius: 8px; background: #fff; color: var(--text); }
 .marketing-skip-link:focus { left: 8px; }
-.marketing .auth-columns { align-items: stretch; padding-top: 88px; padding-bottom: 88px; }
+.marketing .auth-columns { align-items: stretch; padding-top: 88px; padding-bottom: 0; }
 .marketing .auth-pitch { display: flex; flex-direction: column; justify-content: space-between; gap: 40px; padding: 48px; border-radius: 24px; }
 .marketing .auth-image { width: 100%; aspect-ratio: 1.65; overflow: hidden; margin: 0; border: 1px solid var(--line); border-radius: 16px; background: var(--ink2); }
 .marketing .auth-image img { width: 100%; height: 100%; object-fit: cover; }
@@ -188,7 +192,6 @@
 .marketing .marketing-page-hero-centered { max-width: none !important; text-align: center; }
 .marketing .marketing-page-hero-centered .lead { margin-right: auto; margin-left: auto; }
 .marketing .marketing-page-hero-centered .marketing-button-row { justify-content: center; }
-.marketing .marketing-page-hero-centered .billing-toggle { justify-content: center; }
 .marketing .marketing-button-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
 .marketing .home-hero { padding-top: 88px; padding-bottom: 96px; }
 .marketing .home-hero .display { margin: 18px 0 20px; }
@@ -228,14 +231,7 @@
 .marketing .faq-sign { font-size: 24px; line-height: 1; }
 .marketing .faq-contact { margin-top: 24px; }
 .marketing .faq-contact a,
-.marketing .legal-contact a,
 .marketing .contact-form-card a { font-weight: 700; }
-.marketing .billing-toggle { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 32px; }
-.marketing .tl {
-  min-height: 44px; padding: 10px 16px; border: 1px solid var(--line); border-radius: 999px;
-  background: var(--card); color: var(--text); font: inherit; font-size: 15px; font-weight: 700; cursor: pointer;
-}
-.marketing .tl.on { border-color: var(--accent-d); background: var(--accent); color: #17321e; }
 .marketing .pricing-plans { padding-top: 64px; }
 .marketing .payg-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 24px; margin-top: 32px; padding: 28px 32px; border: 1px solid var(--line); border-radius: 20px; background: var(--card); }
 .marketing .payg-card .h3 { margin: 8px 0; }
@@ -273,16 +269,6 @@
 .marketing .contact-success { align-items: center; justify-content: center; min-height: 460px; text-align: center; }
 .marketing .contact-success-icon { width: 56px; height: 56px; margin: 0 auto; border-radius: 50%; font-size: 28px; font-weight: 800; }
 .marketing .contact-success .btn { margin-top: 16px; }
-.marketing .legal-section { padding-top: 56px; }
-.marketing .legal-wrap { max-width: 1200px; }
-.marketing .legal-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 32px; }
-.marketing .legal-card { padding: 36px; }
-.marketing .legal-card .title { margin-bottom: 8px; font-size: 32px; }
-.marketing .legal-intro { margin-bottom: 28px; }
-.marketing .legal-subsection { padding: 22px 0; border-top: 1px solid var(--line); }
-.marketing .legal-subsection .h3 { margin-bottom: 10px; }
-.marketing .legal-copy { font-size: 13px; }
-.marketing .legal-contact { margin-top: 20px; }
 
 .marketing[data-theme="dark"] {
   --ink: #101210;
@@ -316,6 +302,7 @@
   .marketing-menu-button { display: inline-flex; width: 44px; height: 44px; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 10px; background: transparent; color: var(--text); font: inherit; font-size: 22px; cursor: pointer; }
   .marketing-header-inner { position: relative; }
   .marketing-header-actions { display: none; }
+  .marketing-theme-toggle-mobile { display: inline-flex; margin-left: auto; }
   .marketing-nav-mobile-actions { display: flex; gap: 10px; padding-top: 12px; }
 }
 
@@ -323,6 +310,7 @@
   .marketing .foot-grid { grid-template-columns: 1fr; }
   .marketing .btn { width: 100%; }
   .marketing .price { font-size: 38px; }
+  .marketing .auth-columns { padding-top: 48px; }
   .marketing .auth-pitch,
   .marketing .auth-form { padding: 28px; }
   .marketing .auth-image { aspect-ratio: 1.5; }

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khayode/email-platform/internal/config"
 	"github.com/khayode/email-platform/internal/delivery"
+	"github.com/khayode/email-platform/internal/quota"
 	"golang.org/x/time/rate"
 )
 
@@ -162,6 +163,20 @@ func (w *DeliveryWorker) process(ctx context.Context, job *Job) error {
 		RequestDSN:   true,
 	}
 
+	if err := w.store.ReserveRecipientQuota(ctx, job, int64(w.cfg.PlatformMaxDomainRate)); err != nil {
+		var exceeded *quota.ExceededError
+		if errors.As(err, &exceeded) {
+			return w.store.TransitionRecipient(
+				ctx, job.RecipientID, StatusDeferred, "system", 0, "4.5.3",
+				err.Error(), exceeded.ResetAt, map[string]any{"quota_window": exceeded.Window},
+			)
+		}
+		if errors.Is(err, ErrSenderDomainNotAllowed) {
+			return w.reject(ctx, job, err.Error())
+		}
+		return err
+	}
+
 	sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	result, err := w.transport.Send(sendCtx, message)
@@ -183,26 +198,40 @@ func (w *DeliveryWorker) validateWorkspaceAndDomain(ctx context.Context, job *Jo
 		return fmt.Errorf("sender address is invalid")
 	}
 	domain := strings.ToLower(address.Address[strings.LastIndexByte(address.Address, '@')+1:])
-	var allowed bool
+	var organizationStatus, settingsStatus string
+	var enabled bool
 	err = w.pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM transactional_settings ts
-			JOIN organizations o ON o.id = ts.organization_id
-			JOIN sending_domains sd ON sd.organization_id = ts.organization_id
-			WHERE ts.organization_id = $1 AND ts.enabled AND ts.status = 'active'
-			  AND o.status = 'active'
-			  AND lower(sd.domain) = $2 AND sd.transactional_enabled
-			  AND sd.status = 'verified' AND sd.spf_status = 'verified'
-			  AND sd.dkim_status = 'verified' AND NOT sd.owner_conflict
-			  AND sd.admin_disabled_at IS NULL
-		)
-	`, job.Organization, domain).Scan(&allowed)
+		SELECT o.status, ts.enabled, ts.status
+		FROM transactional_settings ts
+		JOIN organizations o ON o.id = ts.organization_id
+		WHERE ts.organization_id = $1
+	`, job.Organization).Scan(&organizationStatus, &enabled, &settingsStatus)
 	if err != nil {
 		return fmt.Errorf("validate transactional workspace and sending domain: %w", err)
 	}
+	if organizationStatus != "active" || settingsStatus == "paused" {
+		return ErrWorkspacePaused
+	}
+	if !enabled || settingsStatus == "disabled" {
+		return ErrWorkspaceDisabled
+	}
+	if settingsStatus != "active" {
+		return ErrWorkspacePaused
+	}
+	var allowed bool
+	if err := w.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM sending_domains sd
+			WHERE sd.organization_id = $1 AND lower(sd.domain) = $2
+			  AND sd.transactional_enabled AND sd.status = 'verified'
+			  AND sd.spf_status = 'verified' AND sd.dkim_status = 'verified'
+			  AND NOT sd.owner_conflict AND sd.admin_disabled_at IS NULL
+		)
+	`, job.Organization, domain).Scan(&allowed); err != nil {
+		return fmt.Errorf("validate transactional sender domain: %w", err)
+	}
 	if !allowed {
-		return errors.New("transactional sending requires an active workspace and a fully verified, enabled sending domain")
+		return ErrSenderDomainNotAllowed
 	}
 	return nil
 }

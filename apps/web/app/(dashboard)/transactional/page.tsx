@@ -14,8 +14,6 @@ type Settings = {
   enabled: boolean;
   status: string;
   pause_reason: string;
-  daily_limit: number;
-  monthly_limit: number;
   max_recipients: number;
   max_message_bytes: number;
 };
@@ -71,8 +69,6 @@ type Usage = {
   delivered_this_month: number;
   bounced_this_month: number;
   complained_this_month: number;
-  daily_limit: number;
-  monthly_limit: number;
 };
 
 const webhookEventOptions = [
@@ -330,8 +326,8 @@ export default function TransactionalPage() {
 
       <div className="grid gap-4 md:grid-cols-4">
         {[
-          ["Accepted today", usage?.accepted_today, settings?.daily_limit],
-          ["Accepted this month", usage?.accepted_this_month, settings?.monthly_limit],
+          ["Accepted today", usage?.accepted_today, undefined],
+          ["Accepted this month", usage?.accepted_this_month, undefined],
           ["Delivered this month", usage?.delivered_this_month, undefined],
           ["Bounced / complaints", `${usage?.bounced_this_month ?? 0} / ${usage?.complained_this_month ?? 0}`, undefined],
         ].map(([label, value, limit]) => (
@@ -352,7 +348,7 @@ export default function TransactionalPage() {
           <div>
             <CardTitle>Workspace sending</CardTitle>
             <CardDescription>
-              Sending is opt-in. Messages require a verified transactional sending domain.
+              Sending is opt-in. Messages require a verified transactional sending domain. Domain quotas and reset windows are shown on the Sending domains page.
               {settings?.pause_reason ? ` ${settings.pause_reason}` : ""}
             </CardDescription>
           </div>

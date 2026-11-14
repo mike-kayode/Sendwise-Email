@@ -1,6 +1,6 @@
 import type { MetadataRoute } from "next";
 
-const siteURL = process.env.NEXT_PUBLIC_SITE_URL || "https://sendwise.ng";
+const siteURL = process.env.NEXT_PUBLIC_SITE_URL || "https://campaign.pipsleague.com";
 
 export default function robots(): MetadataRoute.Robots {
   return {

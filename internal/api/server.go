@@ -78,6 +78,21 @@ func (s *Server) Handler() http.Handler {
 	internalAdmin := kit.Chain(http.HandlerFunc(s.internalAdmin), kit.ServiceAuth(s.cfg.ServiceToken))
 	mux.Handle("GET /internal/admin/domains", internalAdmin)
 	mux.Handle("GET /internal/admin/domains/{id}", internalAdmin)
+	mux.Handle("GET /internal/admin/domains/{id}/quotas", kit.Chain(
+		http.HandlerFunc(s.getAdminDomainQuotas), kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("PUT /internal/admin/domains/{id}/quotas", kit.Chain(
+		http.HandlerFunc(s.updateAdminDomainQuotas), kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("GET /internal/admin/quota-defaults", kit.Chain(
+		http.HandlerFunc(s.getAdminQuotaDefaults), kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("PUT /internal/admin/quota-defaults", kit.Chain(
+		http.HandlerFunc(s.updateAdminQuotaDefaults), kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("GET /internal/admin/quotas/near-limit", kit.Chain(
+		http.HandlerFunc(s.getAdminQuotasNearLimit), kit.ServiceAuth(s.cfg.ServiceToken),
+	))
 	mux.Handle("POST /internal/admin/domains/{id}/verify", kit.Chain(
 		http.HandlerFunc(s.recheckAdminDomain),
 		kit.ServiceAuth(s.cfg.ServiceToken),
@@ -301,6 +316,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/domains", protect(s.listDomains))
 	mux.Handle("POST /api/v1/domains", protect(s.createDomain, domainManagers...))
+	mux.Handle("GET /api/v1/domains/{id}/quotas", protect(s.getCustomerDomainQuotas))
+	mux.Handle("POST /api/v1/domains/{id}/quota-requests", protect(s.createCustomerQuotaRequest, domainManagers...))
 	mux.Handle("DELETE /api/v1/domains/{id}", protect(s.deleteDomain, domainManagers...))
 	mux.Handle("PUT /api/v1/domains/{id}/transactional", protect(s.setDomainTransactionalEnabled, domainManagers...))
 	mux.Handle("POST /api/v1/domains/{id}/verify", protect(s.verifyDomain, domainManagers...))

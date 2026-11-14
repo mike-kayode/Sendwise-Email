@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,26 +12,28 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/khayode/email-platform/internal/httpx"
+	"github.com/khayode/email-platform/internal/quota"
 )
 
 type adminSendingDomain struct {
-	ID                    string          `json:"id"`
-	WorkspaceID           string          `json:"workspace_id"`
-	WorkspaceName         string          `json:"workspace_name"`
-	WorkspaceSlug         string          `json:"workspace_slug"`
-	Domain                string          `json:"domain"`
-	Status                string          `json:"status"`
-	SPFStatus             string          `json:"spf_status"`
-	DKIMStatus            string          `json:"dkim_status"`
-	DMARCStatus           string          `json:"dmarc_status"`
-	VerificationStatus    string          `json:"verification_status"`
-	OwnerConflict         bool            `json:"owner_conflict"`
-	StalwartAuthenticated bool            `json:"stalwart_authenticated"`
-	TransactionalEnabled  bool            `json:"transactional_enabled"`
-	AdminDisabledAt       *time.Time      `json:"admin_disabled_at"`
-	LastCheckedAt         *time.Time      `json:"last_checked_at"`
-	CreatedAt             time.Time       `json:"created_at"`
-	DNSCheckDetails       json.RawMessage `json:"dns_check_details,omitempty"`
+	ID                    string             `json:"id"`
+	WorkspaceID           string             `json:"workspace_id"`
+	WorkspaceName         string             `json:"workspace_name"`
+	WorkspaceSlug         string             `json:"workspace_slug"`
+	Domain                string             `json:"domain"`
+	Status                string             `json:"status"`
+	SPFStatus             string             `json:"spf_status"`
+	DKIMStatus            string             `json:"dkim_status"`
+	DMARCStatus           string             `json:"dmarc_status"`
+	VerificationStatus    string             `json:"verification_status"`
+	OwnerConflict         bool               `json:"owner_conflict"`
+	StalwartAuthenticated bool               `json:"stalwart_authenticated"`
+	TransactionalEnabled  bool               `json:"transactional_enabled"`
+	AdminDisabledAt       *time.Time         `json:"admin_disabled_at"`
+	LastCheckedAt         *time.Time         `json:"last_checked_at"`
+	CreatedAt             time.Time          `json:"created_at"`
+	DNSCheckDetails       json.RawMessage    `json:"dns_check_details,omitempty"`
+	QuotaUsage            map[string]float64 `json:"quota_usage,omitempty"`
 }
 
 func (s *Server) internalAdmin(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +47,15 @@ func (s *Server) internalAdmin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listAllAdminDomains(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("search"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	nearLimit := false
+	if raw := strings.TrimSpace(r.URL.Query().Get("near_limit")); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			httpx.Error(w, http.StatusBadRequest, "invalid_near_limit", "near_limit must be true or false.")
+			return
+		}
+		nearLimit = value
+	}
 	if len(query) > 100 || len(status) > 32 {
 		httpx.Error(w, http.StatusBadRequest, "invalid_filter", "Domain filters are too long.")
 		return
@@ -70,13 +82,44 @@ func (s *Server) listAllAdminDomains(w http.ResponseWriter, r *http.Request) {
 			OR o.id::text ILIKE '%' || $1 || '%'
 			OR o.name ILIKE '%' || $1 || '%' OR o.slug ILIKE '%' || $1 || '%')
 		  AND ($2 = '' OR d.status = $2)
+		  AND (NOT $3::boolean OR EXISTS (
+			SELECT 1
+			FROM (
+				SELECT domain_id, stream, 'daily'::text AS window_name, sent_count::numeric AS used
+				FROM domain_usage
+				WHERE period = 'day' AND period_start = (now() AT TIME ZONE 'UTC')::date
+				UNION ALL
+				SELECT domain_id, stream, 'monthly', sent_count::numeric
+				FROM domain_usage
+				WHERE period = 'month'
+				  AND period_start = date_trunc('month', now() AT TIME ZONE 'UTC')::date
+				UNION ALL
+				SELECT domain_id, stream, 'per_second', sent_count::numeric
+				FROM domain_rate_usage
+				WHERE second_start = date_trunc('second', now())
+			) usage
+			JOIN platform_quota_defaults pd ON pd.stream = usage.stream
+			LEFT JOIN domain_quotas dq ON dq.domain_id = usage.domain_id AND dq.stream = usage.stream
+			WHERE usage.domain_id = d.id
+			  AND CASE usage.window_name
+			        WHEN 'daily' THEN COALESCE(dq.daily_limit, pd.daily_limit)
+			        WHEN 'monthly' THEN COALESCE(dq.monthly_limit, pd.monthly_limit)
+			        ELSE COALESCE(dq.per_second_limit, pd.per_second_limit)
+			      END > 0
+			  AND (usage.window_name = 'per_second' OR NOT COALESCE(dq.unlimited, false))
+			  AND 100.0 * usage.used / CASE usage.window_name
+			        WHEN 'daily' THEN COALESCE(dq.daily_limit, pd.daily_limit)::numeric
+			        WHEN 'monthly' THEN COALESCE(dq.monthly_limit, pd.monthly_limit)::numeric
+			        ELSE COALESCE(dq.per_second_limit, pd.per_second_limit)::numeric
+			      END >= 80
+		  ))
 	`
 	var total int
 	if err := s.pool.QueryRow(r.Context(), `
 		SELECT count(*)
 		FROM sending_domains d
 		JOIN organizations o ON o.id = d.organization_id
-	`+filter, query, status).Scan(&total); err != nil {
+	`+filter, query, status, nearLimit).Scan(&total); err != nil {
 		s.logger.Error("count admin sending domains", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load sending domains.")
 		return
@@ -90,8 +133,8 @@ func (s *Server) listAllAdminDomains(w http.ResponseWriter, r *http.Request) {
 		JOIN organizations o ON o.id = d.organization_id
 	`+filter+`
 		ORDER BY d.created_at DESC, d.id DESC
-		LIMIT $3 OFFSET $4
-	`, query, status, limit, offset)
+		LIMIT $4 OFFSET $5
+	`, query, status, nearLimit, limit, offset)
 	if err != nil {
 		s.logger.Error("list admin sending domains", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load sending domains.")
@@ -111,6 +154,28 @@ func (s *Server) listAllAdminDomains(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("scan admin sending domain", "error", err)
 			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load sending domains.")
 			return
+		}
+		domain.QuotaUsage = make(map[string]float64, 2)
+		for _, stream := range []string{quota.StreamMarketing, quota.StreamTransactional} {
+			snapshot, err := quota.GetSnapshot(
+				r.Context(), s.pool, domain.ID, stream, int64(s.cfg.PlatformMaxDomainRate),
+			)
+			if err != nil {
+				s.logger.Error("load admin domain quota usage", "error", err, "domain_id", domain.ID, "stream", stream)
+				httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load domain quota usage.")
+				return
+			}
+			percent := snapshot.DailyUsagePercent
+			if snapshot.MonthlyUsagePercent > percent {
+				percent = snapshot.MonthlyUsagePercent
+			}
+			if snapshot.PerSecondLimit > 0 {
+				ratePercent := 100 * float64(snapshot.PerSecondUsed) / float64(snapshot.PerSecondLimit)
+				if ratePercent > percent {
+					percent = math.Min(100, ratePercent)
+				}
+			}
+			domain.QuotaUsage[stream] = percent
 		}
 		domains = append(domains, domain)
 	}

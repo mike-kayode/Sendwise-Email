@@ -1,0 +1,59 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "Sendwise",
+  "theme": "mint",
+  "colors": {
+    "primary": "#0b8064",
+    "light": "#48a98e",
+    "dark": "#075b49"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Product",
+        "pages": [
+          "WEBSITE",
+          "API_SPECIFICATION",
+          "ADMIN",
+          "TRANSACTIONAL",
+          "DELIVERABILITY",
+          "EMAIL_SETUP"
+        ]
+      },
+      {
+        "group": "Architecture",
+        "pages": [
+          "MASTER_ARCHITECTURE",
+          "MICROSERVICE_CATALOG",
+          "SERVICE_DEPENDENCY_GRAPH",
+          "DATA_OWNERSHIP_MATRIX",
+          "DATABASE_ARCHITECTURE",
+          "EMAIL_DELIVERY_ARCHITECTURE",
+          "SECURITY_ARCHITECTURE"
+        ]
+      },
+      {
+        "group": "Operations",
+        "pages": [
+          "INFRASTRUCTURE_AND_DEPLOYMENT",
+          "BACKFILL_RUNBOOK",
+          "EVENT_CATALOG",
+          "SCALABILITY_AND_PERFORMANCE",
+          "PRODUCTION_READINESS",
+          "TESTING_STRATEGY"
+        ]
+      },
+      {
+        "group": "Project status",
+        "pages": [
+          "STATUS",
+          "DEVELOPMENT_STATUS",
+          "DEVELOPMENT_PROGRESS",
+          "DEVELOPMENT_ROADMAP",
+          "SYSTEM_STATE",
+          "SYSTEM_ARCHITECTURE_AND_DEVELOPMENT_AUDIT"
+        ]
+      }
+    ]
+  }
+}

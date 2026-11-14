@@ -50,6 +50,7 @@ const (
 	AdminManageCampaigns    AdminPermission = "manage_campaigns"
 	AdminReadDelivery       AdminPermission = "read_delivery"
 	AdminReadAudit          AdminPermission = "read_audit"
+	AdminReadSettings       AdminPermission = "read_settings"
 	AdminExportAudit        AdminPermission = "export_audit"
 	AdminManageWorkspaces   AdminPermission = "manage_workspaces"
 	AdminManageSettings     AdminPermission = "manage_settings"
@@ -69,6 +70,7 @@ var adminPermissions = map[string]map[AdminPermission]struct{}{
 		AdminReadCampaigns:      {},
 		AdminReadDelivery:       {},
 		AdminReadAudit:          {},
+		AdminReadSettings:       {},
 	},
 	PlatformRoleSuperAdmin: {
 		AdminViewOverview:       {},
@@ -84,6 +86,7 @@ var adminPermissions = map[string]map[AdminPermission]struct{}{
 		AdminManageDomains:      {},
 		AdminManageCampaigns:    {},
 		AdminManageSettings:     {},
+		AdminReadSettings:       {},
 		AdminManageSuppressions: {},
 		AdminManagePlatformRole: {},
 		AdminInspectMessage:     {},
@@ -188,10 +191,15 @@ func (h *Handler) adminRoutes() http.Handler {
 	mux.Handle("PATCH /admin/workspaces/{workspaceID}/status", h.requireAdminMFA(AdminManageWorkspaces, http.HandlerFunc(h.setAdminWorkspaceStatus)))
 	mux.Handle("GET /admin/domains", h.requireAdminMFA(AdminReadDomains, http.HandlerFunc(h.getAdminDomains)))
 	mux.Handle("GET /admin/domains/{domainID}", h.requireAdminMFA(AdminReadDomains, http.HandlerFunc(h.getAdminDomain)))
+	mux.Handle("GET /admin/domains/{domainID}/quotas", h.requireAdminMFA(AdminReadDomains, http.HandlerFunc(h.getAdminDomainQuotas)))
+	mux.Handle("PUT /admin/domains/{domainID}/quotas", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.setAdminDomainQuotas)))
 	mux.Handle("POST /admin/domains/{domainID}/verify", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.recheckAdminDomain)))
 	mux.Handle("PATCH /admin/domains/{domainID}/disabled", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.setAdminDomainDisabled)))
 	mux.Handle("DELETE /admin/domains/{domainID}", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.deleteAdminDomain)))
 	mux.Handle("POST /admin/domains/{domainID}/resolve-conflict", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.resolveAdminDomainConflict)))
+	mux.Handle("GET /admin/quota-defaults", h.requireAdminMFA(AdminReadSettings, http.HandlerFunc(h.getAdminQuotaDefaults)))
+	mux.Handle("PUT /admin/quota-defaults", h.requireAdminMFA(AdminManageSettings, http.HandlerFunc(h.setAdminQuotaDefaults)))
+	mux.Handle("GET /admin/quotas/near-limit", h.requireAdminMFA(AdminViewOverview, http.HandlerFunc(h.getAdminQuotasNearLimit)))
 	mux.Handle("GET /admin/campaigns", h.requireAdminMFA(AdminReadCampaigns, http.HandlerFunc(h.getAdminCampaigns)))
 	mux.Handle("POST /admin/campaigns/{campaignID}/stop", h.requireAdminMFA(AdminManageCampaigns, http.HandlerFunc(h.stopAdminCampaign)))
 	mux.Handle("GET /admin/transactional-messages", h.requireAdminMFA(AdminReadDelivery, http.HandlerFunc(h.searchAdminTransactionalMessages)))
@@ -713,6 +721,12 @@ func (h *Handler) getAdminOverview(w http.ResponseWriter, r *http.Request) {
 		kit.Error(w, http.StatusServiceUnavailable, "admin_overview_unavailable", "Operational overview data could not be loaded.")
 		return
 	}
+	nearLimitDomains, err := h.legacyAPI.AdminQuotasNearLimit(r.Context())
+	if err != nil {
+		h.logger.Error("load domains near quota limits", "error", err)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_overview_unavailable", "Quota overview data could not be loaded.")
+		return
+	}
 	auditStore, ok := h.store.(adminAuditSearchStore)
 	if !ok {
 		h.logger.Error("identity store does not support admin overview audit query")
@@ -748,6 +762,7 @@ func (h *Handler) getAdminOverview(w http.ResponseWriter, r *http.Request) {
 		"user_counts":          users,
 		"workspace_count":      workspaceCount,
 		"operational_metrics":  operationalMetrics,
+		"near_limit_domains":   nearLimitDomains,
 		"recent_signups":       recentUsers,
 		"recent_admin_actions": recentActions,
 		"platform_role":        actor.user.PlatformRole,
@@ -1286,6 +1301,15 @@ func (h *Handler) setAdminWorkspaceStatus(w http.ResponseWriter, r *http.Request
 func (h *Handler) getAdminDomains(w http.ResponseWriter, r *http.Request) {
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	nearLimit := false
+	if raw := strings.TrimSpace(r.URL.Query().Get("near_limit")); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			kit.Error(w, http.StatusBadRequest, "invalid_near_limit", "near_limit must be true or false.")
+			return
+		}
+		nearLimit = value
+	}
 	if len(search) > 100 || len(status) > 32 {
 		kit.Error(w, http.StatusBadRequest, "invalid_filter", "Domain filters are too long.")
 		return
@@ -1312,7 +1336,7 @@ func (h *Handler) getAdminDomains(w http.ResponseWriter, r *http.Request) {
 		kit.Error(w, http.StatusServiceUnavailable, "admin_domains_unavailable", "Sending-domain metadata could not be loaded.")
 		return
 	}
-	domains, total, err := h.legacyAPI.AdminDomains(r.Context(), search, status, limit, offset)
+	domains, total, err := h.legacyAPI.AdminDomains(r.Context(), search, status, nearLimit, limit, offset)
 	if err != nil {
 		h.logger.Error("load admin sending domains", "error", err)
 		kit.Error(w, http.StatusServiceUnavailable, "admin_domains_unavailable", "Sending-domain metadata could not be loaded.")
@@ -1353,6 +1377,201 @@ func (h *Handler) getAdminDomain(w http.ResponseWriter, r *http.Request) {
 		"data":          domain,
 		"platform_role": r.Context().Value(adminActorKey{}).(*adminActor).user.PlatformRole,
 	})
+}
+
+func (h *Handler) getAdminDomainQuotas(w http.ResponseWriter, r *http.Request) {
+	domainID := r.PathValue("domainID")
+	if _, err := uuid.Parse(domainID); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_domain_id", "The sending domain ID must be a UUID.")
+		return
+	}
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Domain quotas could not be loaded.")
+		return
+	}
+	data, err := h.legacyAPI.AdminDomainQuotas(r.Context(), domainID)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("load admin domain quotas", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Domain quotas could not be loaded.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{
+		"data": data, "platform_role": r.Context().Value(adminActorKey{}).(*adminActor).user.PlatformRole,
+	})
+}
+
+func (h *Handler) setAdminDomainQuotas(w http.ResponseWriter, r *http.Request) {
+	actor, _ := r.Context().Value(adminActorKey{}).(*adminActor)
+	if !adminMFAIsRecent(actor.session.AdminMFAVerifiedAt, time.Now()) {
+		kit.Error(w, http.StatusForbidden, "admin_reauth_required", "Re-verify your authenticator before changing domain quotas.")
+		return
+	}
+	domainID := r.PathValue("domainID")
+	if _, err := uuid.Parse(domainID); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_domain_id", "The sending domain ID must be a UUID.")
+		return
+	}
+	var request struct {
+		Streams json.RawMessage `json:"streams"`
+		Reason  string          `json:"reason"`
+	}
+	if err := kit.Decode(w, r, &request); err != nil || len(request.Streams) == 0 {
+		kit.Error(w, http.StatusBadRequest, "invalid_quota_update", "Provide valid quota overrides.")
+		return
+	}
+	request.Reason = strings.TrimSpace(request.Reason)
+	if request.Reason == "" || len(request.Reason) > 500 {
+		kit.Error(w, http.StatusBadRequest, "admin_reason_required", "Provide a reason of 1 to 500 characters.")
+		return
+	}
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Domain quotas could not be updated.")
+		return
+	}
+	domain, err := h.legacyAPI.AdminDomain(r.Context(), domainID)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("load domain before quota update", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Domain quotas could not be updated.")
+		return
+	}
+	before, err := h.legacyAPI.AdminDomainQuotas(r.Context(), domainID)
+	if err != nil {
+		h.logger.Error("load domain quotas before update", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Domain quotas could not be updated.")
+		return
+	}
+	auditStore, ok := h.store.(adminSecurityStore)
+	if !ok {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Domain quotas could not be updated.")
+		return
+	}
+	after, err := json.Marshal(map[string]any{"streams": request.Streams})
+	if err != nil {
+		h.logger.Error("encode domain quota audit state", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusInternalServerError, "admin_quotas_unavailable", "Domain quotas could not be updated.")
+		return
+	}
+	record := h.adminAuditRecord(r, actor, "admin_domain_quotas_updated", "domain", domainID, request.Reason)
+	record.WorkspaceID = &domain.WorkspaceID
+	record.BeforeState = before
+	record.AfterState = after
+	if err := auditStore.WriteAdminAudit(r.Context(), record); err != nil {
+		h.logger.Error("audit domain quota update", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusInternalServerError, "admin_quotas_unavailable", "Domain quotas could not be updated.")
+		return
+	}
+	updated, err := h.legacyAPI.SetAdminDomainQuotas(
+		r.Context(), domainID, actor.user.ID, request.Reason, request.Streams,
+	)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("update admin domain quotas", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_update_failed", "Domain quotas could not be updated.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{
+		"data": updated, "platform_role": actor.user.PlatformRole,
+	})
+}
+
+func (h *Handler) getAdminQuotaDefaults(w http.ResponseWriter, r *http.Request) {
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Platform quota defaults could not be loaded.")
+		return
+	}
+	data, err := h.legacyAPI.AdminQuotaDefaults(r.Context())
+	if err != nil {
+		h.logger.Error("load platform quota defaults", "error", err)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Platform quota defaults could not be loaded.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{
+		"data": data, "platform_role": r.Context().Value(adminActorKey{}).(*adminActor).user.PlatformRole,
+	})
+}
+
+func (h *Handler) setAdminQuotaDefaults(w http.ResponseWriter, r *http.Request) {
+	actor, _ := r.Context().Value(adminActorKey{}).(*adminActor)
+	if !adminMFAIsRecent(actor.session.AdminMFAVerifiedAt, time.Now()) {
+		kit.Error(w, http.StatusForbidden, "admin_reauth_required", "Re-verify your authenticator before changing platform quota defaults.")
+		return
+	}
+	var request struct {
+		Defaults json.RawMessage `json:"defaults"`
+		Reason   string          `json:"reason"`
+	}
+	if err := kit.Decode(w, r, &request); err != nil || len(request.Defaults) == 0 {
+		kit.Error(w, http.StatusBadRequest, "invalid_quota_defaults", "Provide valid platform quota defaults.")
+		return
+	}
+	request.Reason = strings.TrimSpace(request.Reason)
+	if request.Reason == "" || len(request.Reason) > 500 {
+		kit.Error(w, http.StatusBadRequest, "admin_reason_required", "Provide a reason of 1 to 500 characters.")
+		return
+	}
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Platform quota defaults could not be updated.")
+		return
+	}
+	before, err := h.legacyAPI.AdminQuotaDefaults(r.Context())
+	if err != nil {
+		h.logger.Error("load quota defaults before update", "error", err)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Platform quota defaults could not be updated.")
+		return
+	}
+	auditStore, ok := h.store.(adminSecurityStore)
+	if !ok {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Platform quota defaults could not be updated.")
+		return
+	}
+	after, err := json.Marshal(map[string]any{"defaults": request.Defaults})
+	if err != nil {
+		h.logger.Error("encode quota defaults audit state", "error", err)
+		kit.Error(w, http.StatusInternalServerError, "admin_quotas_unavailable", "Platform quota defaults could not be updated.")
+		return
+	}
+	record := h.adminAuditRecord(r, actor, "admin_quota_defaults_updated", "platform_settings", "quota_defaults", request.Reason)
+	record.BeforeState = before
+	record.AfterState = after
+	if err := auditStore.WriteAdminAudit(r.Context(), record); err != nil {
+		h.logger.Error("audit platform quota defaults update", "error", err)
+		kit.Error(w, http.StatusInternalServerError, "admin_quotas_unavailable", "Platform quota defaults could not be updated.")
+		return
+	}
+	updated, err := h.legacyAPI.SetAdminQuotaDefaults(r.Context(), actor.user.ID, request.Reason, request.Defaults)
+	if err != nil {
+		h.logger.Error("update platform quota defaults", "error", err)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_update_failed", "Platform quota defaults could not be updated.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{
+		"data": updated, "platform_role": actor.user.PlatformRole,
+	})
+}
+
+func (h *Handler) getAdminQuotasNearLimit(w http.ResponseWriter, r *http.Request) {
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Quota overview could not be loaded.")
+		return
+	}
+	data, err := h.legacyAPI.AdminQuotasNearLimit(r.Context())
+	if err != nil {
+		h.logger.Error("load domains near quota limits", "error", err)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Quota overview could not be loaded.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{"data": data})
 }
 
 func (h *Handler) recheckAdminDomain(w http.ResponseWriter, r *http.Request) {
@@ -1614,7 +1833,7 @@ func (h *Handler) resolveAdminDomainConflict(w http.ResponseWriter, r *http.Requ
 		kit.Error(w, http.StatusServiceUnavailable, "admin_domains_unavailable", "Domain ownership could not be resolved.")
 		return
 	}
-	candidates, _, err := h.legacyAPI.AdminDomains(r.Context(), domain.Domain, "", 100, 0)
+	candidates, _, err := h.legacyAPI.AdminDomains(r.Context(), domain.Domain, "", false, 100, 0)
 	if err != nil {
 		h.logger.Error("load domain ownership candidates", "error", err, "domain_id", domainID)
 		kit.Error(w, http.StatusServiceUnavailable, "admin_domains_unavailable", "Domain ownership could not be resolved.")

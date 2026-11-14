@@ -49,6 +49,7 @@ type fakeLegacyAPIAdmin struct {
 	workspaceStatusErr    error
 	search                string
 	status                string
+	nearLimit             bool
 	limit                 int
 	offset                int
 	recheckedID           string
@@ -63,10 +64,17 @@ type fakeLegacyAPIAdmin struct {
 	createdSuppression    AdminSuppression
 	deletedSuppressionID  string
 	suppressionErr        error
+	domainQuotaData       json.RawMessage
+	quotaDefaultsData     json.RawMessage
+	nearLimitData         json.RawMessage
+	domainQuotaStreams    json.RawMessage
+	quotaDefaultsInput    json.RawMessage
+	quotaUpdatedBy        string
+	quotaUpdateReason     string
 }
 
-func (f *fakeLegacyAPIAdmin) AdminDomains(_ context.Context, search, status string, limit, offset int) ([]AdminSendingDomain, int, error) {
-	f.search, f.status, f.limit, f.offset = search, status, limit, offset
+func (f *fakeLegacyAPIAdmin) AdminDomains(_ context.Context, search, status string, nearLimit bool, limit, offset int) ([]AdminSendingDomain, int, error) {
+	f.search, f.status, f.nearLimit, f.limit, f.offset = search, status, nearLimit, limit, offset
 	return f.domains, f.total, f.err
 }
 
@@ -126,6 +134,34 @@ func (f *fakeLegacyAPIAdmin) SearchAdminTransactionalMessages(_ context.Context,
 
 func (f *fakeLegacyAPIAdmin) AdminOperationalMetrics(context.Context) (AdminOperationalMetrics, error) {
 	return f.metrics, f.err
+}
+
+func (f *fakeLegacyAPIAdmin) AdminDomainQuotas(context.Context, string) (json.RawMessage, error) {
+	return f.domainQuotaData, f.domainErr
+}
+
+func (f *fakeLegacyAPIAdmin) SetAdminDomainQuotas(
+	_ context.Context, _, updatedBy, reason string, streams json.RawMessage,
+) (json.RawMessage, error) {
+	f.quotaUpdatedBy, f.quotaUpdateReason = updatedBy, reason
+	f.domainQuotaStreams = streams
+	return f.domainQuotaData, f.domainErr
+}
+
+func (f *fakeLegacyAPIAdmin) AdminQuotaDefaults(context.Context) (json.RawMessage, error) {
+	return f.quotaDefaultsData, f.err
+}
+
+func (f *fakeLegacyAPIAdmin) SetAdminQuotaDefaults(
+	_ context.Context, updatedBy, reason string, defaults json.RawMessage,
+) (json.RawMessage, error) {
+	f.quotaUpdatedBy, f.quotaUpdateReason = updatedBy, reason
+	f.quotaDefaultsInput = defaults
+	return f.quotaDefaultsData, f.err
+}
+
+func (f *fakeLegacyAPIAdmin) AdminQuotasNearLimit(context.Context) (json.RawMessage, error) {
+	return f.nearLimitData, f.err
 }
 
 func (f *fakeLegacyAPIAdmin) AdminSuppressions(_ context.Context, search, workspaceID string, limit, offset int) ([]AdminSuppression, int, error) {
@@ -489,6 +525,89 @@ func TestAdminPermissionMatrixSeparatesPlatformAndWorkspaceRoles(t *testing.T) {
 		!CanAdmin(PlatformRoleSuperAdmin, AdminManageDomains) ||
 		CanAdmin(PlatformRoleSuperAdmin, AdminPermission("export_contacts")) {
 		t.Fatal("platform admin permissions do not match the deny-by-default matrix")
+	}
+}
+
+func TestAdminDomainQuotaWriteRequiresSuperAdminFreshMFAReasonAndAudit(t *testing.T) {
+	handler, baseStore, workspace, _ := newTestHandler(t)
+	adminStore := newAdminTestStore(baseStore)
+	handler.store = adminStore
+	operator := seedVerifiedUser(t, handler, baseStore, workspace, "domain-quota-admin@example.test")
+	operatorToken := createAdminTestSession(t, handler, baseStore, operator.ID)
+	domainID := "9b2df23a-6c47-4e56-8648-927b1645d408"
+	workspaceID := "a83bf6e5-2d12-4ca7-b31f-fcf8bf1277e4"
+	before := json.RawMessage(`{"streams":{"marketing":{"daily_limit":100}}}`)
+	apiClient := &fakeLegacyAPIAdmin{
+		domain:          AdminSendingDomain{ID: domainID, WorkspaceID: workspaceID, Domain: "mail.example.test"},
+		domainQuotaData: before,
+	}
+	handler.legacyAPI = apiClient
+	path := "/admin/domains/" + domainID + "/quotas"
+	body := `{"streams":[{"stream":"marketing","daily_limit":500},{"stream":"transactional","daily_limit":null}],"reason":"Approved sending increase"}`
+
+	anonymous := adminRequest(t, handler.Routes(), http.MethodPut, path, "", body)
+	if anonymous.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous quota update = %d, want 401: %s", anonymous.Code, anonymous.Body.String())
+	}
+	baseStore.usersByID[operator.ID].PlatformRole = PlatformRoleNone
+	normalUser := adminRequest(t, handler.Routes(), http.MethodPut, path, operatorToken, body)
+	if normalUser.Code != http.StatusForbidden {
+		t.Fatalf("normal-user quota update = %d, want 403: %s", normalUser.Code, normalUser.Body.String())
+	}
+	baseStore.usersByID[operator.ID].PlatformRole = PlatformRoleSupportAdmin
+	adminStore.mfa[operator.ID] = adminMFAState{Secret: "configured", Enabled: true}
+	freshMFA := time.Now()
+	for _, session := range baseStore.sessions {
+		if session.UserID == operator.ID {
+			session.AdminMFAVerifiedAt = &freshMFA
+		}
+	}
+	supportAdmin := adminRequest(t, handler.Routes(), http.MethodPut, path, operatorToken, body)
+	if supportAdmin.Code != http.StatusForbidden {
+		t.Fatalf("support_admin quota update = %d, want 403: %s", supportAdmin.Code, supportAdmin.Body.String())
+	}
+	if len(adminStore.auditRows) != 0 {
+		t.Fatalf("denied quota update wrote audit rows: %+v", adminStore.auditRows)
+	}
+
+	baseStore.usersByID[operator.ID].PlatformRole = PlatformRoleSuperAdmin
+	staleMFA := time.Now().Add(-10 * time.Minute)
+	for _, session := range baseStore.sessions {
+		if session.UserID == operator.ID {
+			session.AdminMFAVerifiedAt = &staleMFA
+		}
+	}
+	stale := adminRequest(t, handler.Routes(), http.MethodPut, path, operatorToken, body)
+	if stale.Code != http.StatusForbidden || !strings.Contains(stale.Body.String(), "admin_reauth_required") {
+		t.Fatalf("quota update with stale MFA = %d, want reauthentication: %s", stale.Code, stale.Body.String())
+	}
+	freshMFA = time.Now()
+	for _, session := range baseStore.sessions {
+		if session.UserID == operator.ID {
+			session.AdminMFAVerifiedAt = &freshMFA
+		}
+	}
+	withoutReason := adminRequest(t, handler.Routes(), http.MethodPut, path, operatorToken,
+		`{"streams":[{"stream":"marketing","daily_limit":500},{"stream":"transactional","daily_limit":null}]}`)
+	if withoutReason.Code != http.StatusBadRequest || len(adminStore.auditRows) != 0 {
+		t.Fatalf("quota update without reason = %d, audit rows=%d: %s", withoutReason.Code, len(adminStore.auditRows), withoutReason.Body.String())
+	}
+
+	updated := adminRequest(t, handler.Routes(), http.MethodPut, path, operatorToken, body)
+	if updated.Code != http.StatusOK || apiClient.quotaUpdatedBy != operator.ID ||
+		apiClient.quotaUpdateReason != "Approved sending increase" {
+		t.Fatalf("super_admin quota update = %d, updated_by=%q reason=%q: %s",
+			updated.Code, apiClient.quotaUpdatedBy, apiClient.quotaUpdateReason, updated.Body.String())
+	}
+	if len(adminStore.auditRows) != 1 {
+		t.Fatalf("quota update audit rows = %d, want one", len(adminStore.auditRows))
+	}
+	audit := adminStore.auditRows[0]
+	if audit.Action != "admin_domain_quotas_updated" || audit.TargetID != domainID ||
+		audit.WorkspaceID == nil || *audit.WorkspaceID != workspaceID ||
+		audit.Reason != "Approved sending increase" || !strings.Contains(string(audit.BeforeState), `"daily_limit":100`) ||
+		!strings.Contains(string(audit.AfterState), `"daily_limit":500`) {
+		t.Fatalf("quota update audit lacks before/after state or target metadata: %+v", audit)
 	}
 }
 

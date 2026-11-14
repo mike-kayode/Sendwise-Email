@@ -17,6 +17,7 @@ import (
 	"github.com/khayode/email-platform/internal/messaging"
 	"github.com/khayode/email-platform/internal/observability"
 	"github.com/khayode/email-platform/internal/outbox"
+	"github.com/khayode/email-platform/internal/quota"
 	"github.com/khayode/email-platform/internal/session"
 	"github.com/khayode/email-platform/internal/transactional"
 )
@@ -44,6 +45,19 @@ func main() {
 			logger.Error("run migrations", "error", err)
 			os.Exit(1)
 		}
+	}
+	if err := quota.SeedPoolDefaults(
+		ctx,
+		pool,
+		int64(cfg.MaxDailyEmails),
+		int64(cfg.SendingRate),
+		int64(cfg.TransactionalDailyLimit),
+		int64(cfg.TransactionalMonthlyLimit),
+		int64(cfg.TransactionalRequestsPerSecond),
+		int64(cfg.PlatformMaxDomainRate),
+	); err != nil {
+		logger.Error("seed platform quota defaults", "error", err)
+		os.Exit(1)
 	}
 
 	var publisher campaigns.Publisher

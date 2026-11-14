@@ -753,6 +753,69 @@ $ npm --prefix apps/web run build
 Route table includes /admin/suppressions and /admin/domains/[domainID].
 ```
 
+## Per-domain sending quotas — 2026-11-14
+
+**Locally verified against PostgreSQL; not production verified.** Migration
+`0033_domain_quotas.sql` adds platform defaults, per-domain overrides,
+UTC-window usage counters, rate counters, reservation records, and customer
+increase requests. Transactional REST returns `429 quota_exceeded` with a
+window, reset time, and `Retry-After`; SMTP quota exhaustion returns temporary
+`452 4.5.3`. Campaign deliveries defer and can reserve again after quota
+capacity is available. Super-admin writes require a typed reason and fresh MFA,
+with before/after state in the Identity audit log.
+
+The admin console includes domain quota progress/edit controls, reputation
+warnings, request visibility, usage percentages and near-limit filtering,
+overview links, and a platform defaults page. Customers can view effective
+limits and usage and record an increase request. Environment quota values are
+seed defaults; the database is authoritative after seeding. No production
+server or data was accessed.
+
+Focused local proof gates:
+
+```text
+$ TEST_DATABASE_URL='<local Compose Postgres URL>' go test ./internal/quota -run 'TestConcurrentReservationsNeverExceedDomainLimit|TestQuotaInheritanceUnlimitedAndUTCWindowRollover' -count=1 -v
+=== RUN   TestConcurrentReservationsNeverExceedDomainLimit
+--- PASS: TestConcurrentReservationsNeverExceedDomainLimit
+=== RUN   TestQuotaInheritanceUnlimitedAndUTCWindowRollover
+--- PASS: TestQuotaInheritanceUnlimitedAndUTCWindowRollover
+PASS
+
+$ TEST_DATABASE_URL='<local Compose Postgres URL>' go test ./internal/transactional -run TestSMTPQuotaExhaustionReturnsTemporary452 -count=1 -v
+=== RUN   TestSMTPQuotaExhaustionReturnsTemporary452
+--- PASS: TestSMTPQuotaExhaustionReturnsTemporary452
+PASS
+
+$ TEST_DATABASE_URL='<local Compose Postgres URL>' go test ./internal/worker -run TestCampaignQuotaDefersAndReservesAfterQuotaIncrease -count=1 -v
+=== RUN   TestCampaignQuotaDefersAndReservesAfterQuotaIncrease
+--- PASS: TestCampaignQuotaDefersAndReservesAfterQuotaIncrease
+PASS
+
+$ TEST_DATABASE_URL='<local Compose Postgres URL>' go test ./internal/api -run TestInternalAdminDomainQuotaUpdateChangesAtomicEnforcement -count=1 -v
+=== RUN   TestInternalAdminDomainQuotaUpdateChangesAtomicEnforcement
+--- PASS: TestInternalAdminDomainQuotaUpdateChangesAtomicEnforcement
+PASS
+
+$ TEST_DATABASE_URL='<local Compose Postgres URL>' go test ./services/identity -run TestAdminDomainQuotaWriteRequiresSuperAdminFreshMFAReasonAndAudit -count=1 -v
+=== RUN   TestAdminDomainQuotaWriteRequiresSuperAdminFreshMFAReasonAndAudit
+--- PASS: TestAdminDomainQuotaWriteRequiresSuperAdminFreshMFAReasonAndAudit
+PASS
+```
+
+Full local checks also passed: `go test ./...`, `go vet ./...`,
+`gofmt -l` on changed Go files, web typecheck/lint/unit tests and production
+build, and all three tests in
+`apps/web/e2e/admin-navigation.spec.ts`. The Mintlify documentation site
+validated with `cd docs && npx --yes mint@latest validate --no-build`.
+
+Before any server rollout, an operator still needs to verify the migration and
+seed values against that server's database/environment, then smoke-test REST
+429 headers, SMTP 452 retry handling, deferred campaign resumption, admin MFA
+and audit records, and customer usage/request visibility in staging. `PLATFORM_MAX_DOMAIN_RATE`
+is the new environment key; `SENDING_RATE_PER_SECOND`, `MAX_DAILY_EMAILS`,
+`TRANSACTIONAL_REQUESTS_PER_SECOND`, `TRANSACTIONAL_DAILY_LIMIT`, and
+`TRANSACTIONAL_MONTHLY_LIMIT` are documented as initial seed defaults.
+
 PostgreSQL-backed verification of the newly added conflict-resolution
 integration case could not be rerun in the current environment: the local
 Postgres listener at `127.0.0.1:5432` refused connections, and the Docker

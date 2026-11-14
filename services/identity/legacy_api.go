@@ -25,23 +25,24 @@ var (
 )
 
 type AdminSendingDomain struct {
-	ID                    string          `json:"id"`
-	WorkspaceID           string          `json:"workspace_id"`
-	WorkspaceName         string          `json:"workspace_name"`
-	WorkspaceSlug         string          `json:"workspace_slug"`
-	Domain                string          `json:"domain"`
-	Status                string          `json:"status"`
-	SPFStatus             string          `json:"spf_status"`
-	DKIMStatus            string          `json:"dkim_status"`
-	DMARCStatus           string          `json:"dmarc_status"`
-	VerificationStatus    string          `json:"verification_status"`
-	OwnerConflict         bool            `json:"owner_conflict"`
-	StalwartAuthenticated bool            `json:"stalwart_authenticated"`
-	TransactionalEnabled  bool            `json:"transactional_enabled"`
-	AdminDisabledAt       *time.Time      `json:"admin_disabled_at"`
-	LastCheckedAt         *time.Time      `json:"last_checked_at"`
-	CreatedAt             time.Time       `json:"created_at"`
-	DNSCheckDetails       json.RawMessage `json:"dns_check_details,omitempty"`
+	ID                    string             `json:"id"`
+	WorkspaceID           string             `json:"workspace_id"`
+	WorkspaceName         string             `json:"workspace_name"`
+	WorkspaceSlug         string             `json:"workspace_slug"`
+	Domain                string             `json:"domain"`
+	Status                string             `json:"status"`
+	SPFStatus             string             `json:"spf_status"`
+	DKIMStatus            string             `json:"dkim_status"`
+	DMARCStatus           string             `json:"dmarc_status"`
+	VerificationStatus    string             `json:"verification_status"`
+	OwnerConflict         bool               `json:"owner_conflict"`
+	StalwartAuthenticated bool               `json:"stalwart_authenticated"`
+	TransactionalEnabled  bool               `json:"transactional_enabled"`
+	AdminDisabledAt       *time.Time         `json:"admin_disabled_at"`
+	LastCheckedAt         *time.Time         `json:"last_checked_at"`
+	CreatedAt             time.Time          `json:"created_at"`
+	DNSCheckDetails       json.RawMessage    `json:"dns_check_details,omitempty"`
+	QuotaUsage            map[string]float64 `json:"quota_usage,omitempty"`
 }
 
 type AdminCampaign struct {
@@ -96,7 +97,7 @@ type AdminSuppression struct {
 }
 
 type LegacyAPIAdminClient interface {
-	AdminDomains(ctx context.Context, search, status string, limit, offset int) ([]AdminSendingDomain, int, error)
+	AdminDomains(ctx context.Context, search, status string, nearLimit bool, limit, offset int) ([]AdminSendingDomain, int, error)
 	AdminDomain(ctx context.Context, domainID string) (AdminSendingDomain, error)
 	RecheckAdminDomain(ctx context.Context, domainID string) (AdminSendingDomain, error)
 	SetAdminDomainDisabled(ctx context.Context, domainID string, disabled bool) (AdminSendingDomain, error)
@@ -108,9 +109,86 @@ type LegacyAPIAdminClient interface {
 	StopAdminCampaign(ctx context.Context, campaignID string) error
 	SearchAdminTransactionalMessages(ctx context.Context, search string, limit, offset int) ([]AdminTransactionalMessage, int, error)
 	AdminOperationalMetrics(ctx context.Context) (AdminOperationalMetrics, error)
+	AdminDomainQuotas(ctx context.Context, domainID string) (json.RawMessage, error)
+	SetAdminDomainQuotas(ctx context.Context, domainID, updatedBy, reason string, streams json.RawMessage) (json.RawMessage, error)
+	AdminQuotaDefaults(ctx context.Context) (json.RawMessage, error)
+	SetAdminQuotaDefaults(ctx context.Context, updatedBy, reason string, defaults json.RawMessage) (json.RawMessage, error)
+	AdminQuotasNearLimit(ctx context.Context) (json.RawMessage, error)
 	AdminSuppressions(ctx context.Context, search, workspaceID string, limit, offset int) ([]AdminSuppression, int, error)
 	CreateAdminSuppression(ctx context.Context, workspaceID, email string) (AdminSuppression, error)
 	DeleteAdminSuppression(ctx context.Context, suppressionID string) error
+}
+
+func (c *httpLegacyAPIAdminClient) adminQuotaRequest(ctx context.Context, method, path string, body []byte) (json.RawMessage, error) {
+	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build legacy API admin quota request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	if len(body) > 0 {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	kit.WithServiceToken(request, c.serviceToken)
+	response, err := c.http.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("request legacy API admin quota endpoint: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("legacy API admin quota endpoint returned %d", response.StatusCode)
+	}
+	var result struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode legacy API admin quota response: %w", err)
+	}
+	return result.Data, nil
+}
+
+func (c *httpLegacyAPIAdminClient) AdminDomainQuotas(ctx context.Context, domainID string) (json.RawMessage, error) {
+	return c.adminQuotaRequest(ctx, http.MethodGet,
+		"/internal/admin/domains/"+url.PathEscape(domainID)+"/quotas", nil)
+}
+
+func (c *httpLegacyAPIAdminClient) SetAdminDomainQuotas(
+	ctx context.Context,
+	domainID, updatedBy, reason string,
+	streams json.RawMessage,
+) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]any{
+		"streams": streams, "updated_by": updatedBy, "reason": reason,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode legacy API domain quota update: %w", err)
+	}
+	return c.adminQuotaRequest(ctx, http.MethodPut,
+		"/internal/admin/domains/"+url.PathEscape(domainID)+"/quotas", body)
+}
+
+func (c *httpLegacyAPIAdminClient) AdminQuotaDefaults(ctx context.Context) (json.RawMessage, error) {
+	return c.adminQuotaRequest(ctx, http.MethodGet, "/internal/admin/quota-defaults", nil)
+}
+
+func (c *httpLegacyAPIAdminClient) SetAdminQuotaDefaults(
+	ctx context.Context,
+	updatedBy, reason string,
+	defaults json.RawMessage,
+) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]any{
+		"defaults": defaults, "updated_by": updatedBy, "reason": reason,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode legacy API quota defaults update: %w", err)
+	}
+	return c.adminQuotaRequest(ctx, http.MethodPut, "/internal/admin/quota-defaults", body)
+}
+
+func (c *httpLegacyAPIAdminClient) AdminQuotasNearLimit(ctx context.Context) (json.RawMessage, error) {
+	return c.adminQuotaRequest(ctx, http.MethodGet, "/internal/admin/quotas/near-limit", nil)
 }
 
 type httpLegacyAPIAdminClient struct {
@@ -127,9 +205,12 @@ func NewHTTPLegacyAPIAdminClient(baseURL, serviceToken string) LegacyAPIAdminCli
 	}
 }
 
-func (c *httpLegacyAPIAdminClient) AdminDomains(ctx context.Context, search, status string, limit, offset int) ([]AdminSendingDomain, int, error) {
+func (c *httpLegacyAPIAdminClient) AdminDomains(ctx context.Context, search, status string, nearLimit bool, limit, offset int) ([]AdminSendingDomain, int, error) {
 	path := fmt.Sprintf("/internal/admin/domains?search=%s&status=%s&limit=%d&offset=%d",
 		url.QueryEscape(search), url.QueryEscape(status), limit, offset)
+	if nearLimit {
+		path += "&near_limit=true"
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("build legacy API admin domain request: %w", err)

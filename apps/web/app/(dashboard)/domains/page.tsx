@@ -23,6 +23,156 @@ function dnsNameForDisplay(name: string, domain: string, showFullName: boolean):
   return name.toLowerCase().endsWith(suffix) ? name.slice(0, -suffix.length) : name;
 }
 
+type DomainQuotaSnapshot = {
+  stream: string;
+  daily_limit: number | null;
+  monthly_limit: number | null;
+  per_second_limit: number;
+  unlimited: boolean;
+  daily_used: number;
+  monthly_used: number;
+  per_second_used: number;
+  daily_reset_at: string;
+  monthly_reset_at: string;
+  per_second_reset_at: string;
+  daily_usage_percent: number;
+  monthly_usage_percent: number;
+};
+
+type DomainQuotaData = {
+  domain_id: string;
+  streams: Record<"marketing" | "transactional", DomainQuotaSnapshot>;
+};
+
+function DomainQuotaPanel({ domainId, domainName }: { domainId: string; domainName: string }) {
+  const [requestOpen, setRequestOpen] = useState(false);
+  const [stream, setStream] = useState<"marketing" | "transactional">("marketing");
+  const [dailyLimit, setDailyLimit] = useState("");
+  const [monthlyLimit, setMonthlyLimit] = useState("");
+  const [perSecondLimit, setPerSecondLimit] = useState("");
+  const [reason, setReason] = useState("");
+  const [requestError, setRequestError] = useState<string | null>(null);
+  const [requestBusy, setRequestBusy] = useState(false);
+  const { toast } = useToast();
+  const quotaQuery = useQuery({
+    queryKey: ["domain-quotas", domainId],
+    queryFn: () => apiFetch<{ data: DomainQuotaData }>(`/domains/${encodeURIComponent(domainId)}/quotas`),
+    retry: false,
+  });
+
+  const submitRequest = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if ((!dailyLimit && !monthlyLimit && !perSecondLimit) || !reason.trim() || requestBusy) return;
+    setRequestBusy(true);
+    setRequestError(null);
+    try {
+      await apiFetch(`/domains/${encodeURIComponent(domainId)}/quota-requests`, {
+        method: "POST",
+        body: JSON.stringify({
+          stream,
+          daily_limit: dailyLimit ? Number(dailyLimit) : null,
+          monthly_limit: monthlyLimit ? Number(monthlyLimit) : null,
+          per_second_limit: perSecondLimit ? Number(perSecondLimit) : null,
+          reason: reason.trim(),
+        }),
+      });
+      setDailyLimit("");
+      setMonthlyLimit("");
+      setPerSecondLimit("");
+      setReason("");
+      setRequestOpen(false);
+      toast({ title: "Quota request recorded", description: `Your request for ${domainName} is visible to the Sendwise admin team.` });
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : "The quota request could not be recorded.");
+    } finally {
+      setRequestBusy(false);
+    }
+  };
+
+  if (quotaQuery.isLoading) {
+    return <p className="mt-4 border-t border-slate-100 pt-3 text-xs text-slate-500">Loading domain quotas...</p>;
+  }
+  if (quotaQuery.error || !quotaQuery.data) {
+    return (
+      <div role="alert" className="mt-4 border-t border-slate-100 pt-3 text-xs text-rose-700">
+        Domain quota usage could not be loaded: {quotaQuery.error instanceof Error ? quotaQuery.error.message : "No quota data returned."}
+      </div>
+    );
+  }
+
+  const formatLimit = (value: number | null, unlimited: boolean) =>
+    unlimited || value === null ? "Unlimited" : value.toLocaleString();
+  const streams = quotaQuery.data.data.streams;
+
+  return (
+    <div className="mt-4 border-t border-slate-100 pt-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-semibold text-slate-800">Sending quotas</p>
+        <button
+          type="button"
+          className="text-xs font-medium text-indigo-700 hover:underline"
+          onClick={() => setRequestOpen((open) => !open)}
+        >
+          {requestOpen ? "Close request" : "Request increase"}
+        </button>
+      </div>
+      <div className="mt-3 grid gap-3">
+        {(["marketing", "transactional"] as const).map((key) => {
+          const item = streams[key];
+          return (
+            <section key={key} className="rounded-lg bg-slate-50 p-3" aria-label={`${key} quota usage`}>
+              <h4 className="text-xs font-semibold capitalize text-slate-800">{key}</h4>
+              <div className="mt-2 grid grid-cols-1 gap-1 text-[11px] text-slate-600 sm:grid-cols-3">
+                <span>Today: {item.daily_used.toLocaleString()} / {formatLimit(item.daily_limit, item.unlimited)}</span>
+                <span>This month: {item.monthly_used.toLocaleString()} / {formatLimit(item.monthly_limit, item.unlimited)}</span>
+                <span>Rate: {item.per_second_used} / {item.per_second_limit.toLocaleString()} per second</span>
+              </div>
+              <div className="mt-2 flex flex-col gap-1 text-[10px] text-slate-500 sm:flex-row sm:justify-between">
+                <span>Daily reset {formatDateTime(item.daily_reset_at)}</span>
+                <span>Monthly reset {formatDateTime(item.monthly_reset_at)}</span>
+              </div>
+            </section>
+          );
+        })}
+      </div>
+      {requestOpen ? (
+        <form className="mt-3 space-y-3 rounded-lg border border-slate-200 p-3" onSubmit={(event) => void submitRequest(event)}>
+          <label className="block text-xs font-medium text-slate-700">
+            Stream
+            <select className="mt-1 h-9 w-full rounded-md border border-slate-300 bg-white px-2 text-sm" value={stream} onChange={(event) => setStream(event.target.value as typeof stream)}>
+              <option value="marketing">Marketing</option>
+              <option value="transactional">Transactional</option>
+            </select>
+          </label>
+          <div className="grid gap-2 sm:grid-cols-3">
+            <label className="text-xs font-medium text-slate-700">
+              Daily limit
+              <Input type="number" min="1" value={dailyLimit} onChange={(event) => setDailyLimit(event.target.value)} />
+            </label>
+            <label className="text-xs font-medium text-slate-700">
+              Monthly limit
+              <Input type="number" min="1" value={monthlyLimit} onChange={(event) => setMonthlyLimit(event.target.value)} />
+            </label>
+            <label className="text-xs font-medium text-slate-700">
+              Per-second limit
+              <Input type="number" min="1" value={perSecondLimit} onChange={(event) => setPerSecondLimit(event.target.value)} />
+            </label>
+          </div>
+          <label className="block text-xs font-medium text-slate-700">
+            Reason
+            <textarea className="mt-1 min-h-20 w-full rounded-md border border-slate-300 p-2 text-sm" value={reason} onChange={(event) => setReason(event.target.value)} required maxLength={1000} />
+          </label>
+          {requestError ? <p role="alert" className="text-xs text-rose-700">{requestError}</p> : null}
+          <button type="submit" disabled={requestBusy || !reason.trim() || (!dailyLimit && !monthlyLimit && !perSecondLimit)} className="inline-flex h-9 items-center rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50">
+            {requestBusy ? "Recording..." : "Submit request"}
+          </button>
+          <p className="text-[11px] text-slate-500">Requests are recorded for admin review; no email notification is sent.</p>
+        </form>
+      ) : null}
+    </div>
+  );
+}
+
 export default function DomainsPage() {
   const [newDomain, setNewDomain] = useState("");
   const [selectedDomainId, setSelectedDomainId] = useState<string | null>(null);
@@ -45,13 +195,21 @@ export default function DomainsPage() {
   });
 
   const domains = domainsQuery.data ?? [];
-  const domainIDs = domains.map((domain) => domain.id);
+  const pendingDnsDomains = domains.filter(
+    (domain) => domain.status !== "verified" || domain.owner_conflict,
+  );
+  const verifiedDomains = domains.filter(
+    (domain) => domain.status === "verified" && !domain.owner_conflict,
+  );
+  const selectedDomain = domains.find((domain) => domain.id === selectedDomainId) ?? null;
+  const domainsForTable = selectedDomain ? [selectedDomain] : pendingDnsDomains;
+  const domainIDs = domainsForTable.map((domain) => domain.id);
   const dnsRecordsQuery = useQuery({
     queryKey: ["domain-dns-records", domainIDs],
     enabled: domainIDs.length > 0,
     queryFn: async () => {
       const entries = await Promise.all(
-        domains.map(async (domain) => {
+        domainsForTable.map(async (domain) => {
           const result = await apiFetch<{ dns_records: DomainDNSRecord[] }>(
             `/domains/${domain.id}/dns-records`,
           );
@@ -63,9 +221,7 @@ export default function DomainsPage() {
   });
   const unverified = domains.filter((d) => d.status !== "verified" && !d.owner_conflict);
   const needsAttention = domains.filter((d) => d.status !== "verified" || d.owner_conflict);
-  const verifiedCount = domains.length - needsAttention.length;
-  const selectedDomain = domains.find((d) => d.id === selectedDomainId) ?? null;
-  const domainsForTable = selectedDomain ? [selectedDomain] : domains;
+  const verifiedCount = verifiedDomains.length;
 
   const handleAddDomain = async () => {
     if (!newDomain.trim()) return;
@@ -144,6 +300,7 @@ export default function DomainsPage() {
       }>(`/domains/${id}/verify`, { method: "POST" });
       await queryClient.invalidateQueries({ queryKey: ["domains"] });
       await queryClient.invalidateQueries({ queryKey: ["domain-dns-records"] });
+      if (result.domain.status === "verified") setSelectedDomainId(null);
       if (!silent) {
         toast({
           title: result.domain.status === "verified" ? `${domainName ?? "Domain"} is verified` : "DNS check complete",
@@ -196,6 +353,7 @@ export default function DomainsPage() {
     }
     await queryClient.invalidateQueries({ queryKey: ["domains"] });
     await queryClient.invalidateQueries({ queryKey: ["domain-dns-records"] });
+    setSelectedDomainId(null);
     setVerifyingAll(false);
     toast({
       title: "Verification run finished",
@@ -205,8 +363,13 @@ export default function DomainsPage() {
   };
 
   const handleReviewRecords = () => {
-    const target = unverified[0] ?? domains.find((domain) => domain.owner_conflict) ?? domains[0];
+    const target = pendingDnsDomains[0];
     if (target) setSelectedDomainId(target.id);
+    dnsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const handleViewRecords = (domainId: string) => {
+    setSelectedDomainId(domainId);
     dnsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
@@ -363,12 +526,9 @@ export default function DomainsPage() {
         ) : (
           domains.map((domain) => {
             const isReady = domain.status === "verified" && !domain.owner_conflict;
-            const isSelected = selectedDomainId === domain.id;
             return (
               <Card
                 key={domain.id}
-                onClick={() => setSelectedDomainId(isSelected ? null : domain.id)}
-                className={`cursor-pointer transition ${isSelected ? "ring-2 ring-indigo-500" : ""}`}
               >
                 <CardContent className="p-5">
                   <div className="flex items-start justify-between gap-2">
@@ -465,6 +625,8 @@ export default function DomainsPage() {
                     </span>
                   </label>
 
+                  {isReady ? <DomainQuotaPanel domainId={domain.id} domainName={domain.domain} /> : null}
+
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -497,7 +659,7 @@ export default function DomainsPage() {
             <div>
               <CardTitle id="dns-records">DNS records</CardTitle>
               <CardDescription>
-                Add these records at your DNS provider, then click verify. Checks query public and authoritative nameservers.
+                Pending domains show the DNS records needed for verification. Verified-domain records stay hidden until you choose View records.
                 Ownership, SPF, and DKIM gate verification; DMARC and MX are advisory.
               </CardDescription>
             </div>
@@ -507,7 +669,7 @@ export default function DomainsPage() {
                   onClick={() => setSelectedDomainId(null)}
                   className="text-xs font-medium text-indigo-600 hover:text-indigo-500"
                 >
-                  Show all domains
+                  Show pending records
                 </button>
               ) : null}
               <button
@@ -533,37 +695,50 @@ export default function DomainsPage() {
                   <div className="border-b border-slate-100 px-6 py-2 text-xs font-medium text-slate-600">
                     Showing records for <span className="font-semibold">{selectedDomain.domain}</span>
                   </div>
+                ) : pendingDnsDomains.length > 0 ? (
+                  <div className="border-b border-slate-100 px-6 py-2 text-xs font-semibold text-slate-700">
+                    Pending verification
+                  </div>
                 ) : null}
-                <Table className="min-w-[1100px] table-fixed">
-                  <Thead>
-                    <Tr>
-                      <Th className="w-[8%]">Type</Th>
-                      <Th className="w-[22%]">Name</Th>
-                      <Th className="w-[46%]">Value</Th>
-                      <Th className="w-[8%]">TTL</Th>
-                      <Th className="w-[16%]">Status</Th>
-                    </Tr>
-                  </Thead>
-                  <Tbody>
-                    {dnsRecordsQuery.error ? (
+                {(pendingDnsDomains.length > 0 || selectedDomain) ? (
+                  <Table className="min-w-[1240px] table-fixed">
+                    <Thead>
                       <Tr>
-                        <Td colSpan={5} className="p-6 text-center text-sm text-red-600">
-                          Could not load DNS records: {dnsRecordsQuery.error.message}
-                        </Td>
+                        <Th className="w-[7%]">Type</Th>
+                        <Th className="w-[14%]">Domain</Th>
+                        <Th className="w-[21%]">Name</Th>
+                        <Th className="w-[42%]">Value</Th>
+                        <Th className="w-[7%]">TTL</Th>
+                        <Th className="w-[9%]">Status</Th>
                       </Tr>
-                    ) : dnsRecordsQuery.isLoading ? (
-                      <Tr>
-                        <Td colSpan={5} className="p-6 text-center text-sm text-slate-500">
-                          Loading DNS records...
-                        </Td>
-                      </Tr>
-                    ) : (
-                      domainsForTable.flatMap((domain) =>
-                        (dnsRecordsQuery.data?.[domain.id] ?? []).map((record, idx) => (
-                          <Tr key={`${domain.id}-${record.name}-${idx}`}>
+                    </Thead>
+                    <Tbody>
+                      {dnsRecordsQuery.error ? (
+                        <Tr>
+                          <Td colSpan={6} className="p-6 text-center text-sm text-red-600">
+                            Could not load DNS records: {dnsRecordsQuery.error.message}
+                          </Td>
+                        </Tr>
+                      ) : dnsRecordsQuery.isLoading ? (
+                        <Tr>
+                          <Td colSpan={6} className="p-6 text-center text-sm text-slate-500">
+                            Loading DNS records...
+                          </Td>
+                        </Tr>
+                      ) : domainsForTable.every((domain) => !dnsRecordsQuery.data?.[domain.id]?.length) ? (
+                        <Tr>
+                          <Td colSpan={6} className="p-6 text-center text-sm text-slate-500">
+                            No DNS records to display.
+                          </Td>
+                        </Tr>
+                      ) : (
+                        domainsForTable.flatMap((domain) =>
+                          (dnsRecordsQuery.data?.[domain.id] ?? []).map((record, idx) => (
+                            <Tr key={`${domain.id}-${record.name}-${idx}`}>
                             <Td>
                               <Badge variant="outline">{record.type}</Badge>
                             </Td>
+                            <Td className="break-all text-xs text-slate-700">{domain.domain}</Td>
                             <Td className="font-mono text-xs text-slate-700">
                               <div className="flex items-center gap-1">
                                 <span>{dnsNameForDisplay(record.name, domain.domain, showFullNames)}</span>
@@ -624,12 +799,44 @@ export default function DomainsPage() {
                                 ) : null}
                               </div>
                             </Td>
-                          </Tr>
-                        )),
-                      )
-                    )}
-                  </Tbody>
-                </Table>
+                            </Tr>
+                          )),
+                        )
+                      )}
+                    </Tbody>
+                  </Table>
+                ) : (
+                  <div className="p-6 text-center text-sm text-slate-500">
+                    All sending domains are verified. Choose a domain below to view its DNS records.
+                  </div>
+                )}
+                {verifiedDomains.length > 0 ? (
+                  <section className="border-t border-slate-100 p-4 sm:p-6" aria-labelledby="verified-domain-records">
+                    <div className="mb-3">
+                      <h3 id="verified-domain-records" className="text-sm font-semibold text-slate-800">
+                        Verified domains
+                      </h3>
+                      <p className="mt-1 text-xs text-slate-500">
+                        DNS records are hidden by default. View them only when you need to review or copy a record.
+                      </p>
+                    </div>
+                    <ul className="divide-y divide-slate-100">
+                      {verifiedDomains.map((domain) => (
+                        <li key={domain.id} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+                          <span className="break-all text-sm font-medium text-slate-700">{domain.domain}</span>
+                          <button
+                            type="button"
+                            aria-label={`View records for ${domain.domain}`}
+                            onClick={() => handleViewRecords(domain.id)}
+                            className="inline-flex h-9 shrink-0 items-center justify-center rounded-lg px-3 text-sm font-medium text-indigo-700 ring-1 ring-inset ring-indigo-200 hover:bg-indigo-50"
+                          >
+                            View records
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                ) : null}
               </>
             )}
           </CardContent>

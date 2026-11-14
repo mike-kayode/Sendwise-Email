@@ -25,6 +25,29 @@ function Logo() {
   );
 }
 
+function ThemeToggleButton({
+  theme,
+  onToggleTheme,
+  placement,
+}: {
+  theme: "light" | "dark";
+  onToggleTheme: () => void;
+  placement: "desktop" | "mobile";
+}) {
+  return (
+    <button
+      type="button"
+      className={`marketing-theme-toggle marketing-theme-toggle-${placement}`}
+      aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+      aria-pressed={theme === "dark"}
+      onClick={onToggleTheme}
+    >
+      {theme === "light" ? <Moon size={16} aria-hidden="true" /> : <Sun size={16} aria-hidden="true" />}
+      <span>{theme === "light" ? "Dark" : "Light"}</span>
+    </button>
+  );
+}
+
 export function SiteHeader({
   theme,
   onToggleTheme,
@@ -56,16 +79,7 @@ export function SiteHeader({
     <header className="marketing-header">
       <div className="wrap marketing-header-inner">
         <Logo />
-        <button
-          type="button"
-          className="marketing-theme-toggle"
-          aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
-          aria-pressed={theme === "dark"}
-          onClick={onToggleTheme}
-        >
-          {theme === "light" ? <Moon size={16} aria-hidden="true" /> : <Sun size={16} aria-hidden="true" />}
-          <span>{theme === "light" ? "Dark" : "Light"}</span>
-        </button>
+        <ThemeToggleButton theme={theme} onToggleTheme={onToggleTheme} placement="mobile" />
         <button
           ref={menuButton}
           type="button"
@@ -102,6 +116,7 @@ export function SiteHeader({
           </div>
         </nav>
         <div className="marketing-header-actions">
+          <ThemeToggleButton theme={theme} onToggleTheme={onToggleTheme} placement="desktop" />
           <Link href="/login" className="btn btn-ghost-dark">Sign in</Link>
           <Link href="/register" className="btn btn-accent">Start sending</Link>
         </div>
@@ -137,15 +152,6 @@ const footerColumns = [
       ["Contact", "/contact"],
       ["Sign in", "/login"],
       ["Create account", "/register"],
-    ],
-  },
-  {
-    title: "Legal",
-    links: [
-      ["Privacy", "/legal/privacy"],
-      ["Terms", "/legal/terms"],
-      ["Acceptable use", "/legal/acceptable-use"],
-      ["Data protection", "/legal/data-protection"],
     ],
   },
 ] as const;

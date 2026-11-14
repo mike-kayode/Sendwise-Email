@@ -22,6 +22,7 @@ import (
 	smtpserver "github.com/emersion/go-smtp"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khayode/email-platform/internal/config"
+	"github.com/khayode/email-platform/internal/quota"
 )
 
 type SMTPSubmissionServer struct {
@@ -232,6 +233,7 @@ func (s *smtpSubmissionSession) Data(reader io.Reader) error {
 	_, err = s.backend.store.Enqueue(ctx, EnqueueOptions{
 		OrganizationID: s.credential.OrganizationID,
 		EnforceLimits:  true,
+		HardRate:       int64(s.backend.cfg.PlatformMaxDomainRate),
 	}, input)
 	if err != nil {
 		switch {
@@ -239,9 +241,13 @@ func (s *smtpSubmissionSession) Data(reader io.Reader) error {
 			return smtpError(550, "5.7.1", "Transactional sending is disabled for this workspace")
 		case errors.Is(err, ErrWorkspacePaused):
 			return smtpError(451, "4.7.1", "Transactional sending is paused for this workspace")
-		case errors.Is(err, ErrDailyLimit), errors.Is(err, ErrMonthlyLimit):
-			return smtpError(452, "4.5.3", "The workspace sending quota has been reached")
+		case errors.Is(err, ErrSenderDomainNotAllowed):
+			return smtpError(550, "5.7.1", "The transactional sender domain is not verified and enabled")
 		default:
+			var exceeded *quota.ExceededError
+			if errors.As(err, &exceeded) {
+				return smtpError(452, "4.5.3", "The sending domain quota has been reached")
+			}
 			return smtpError(554, "5.6.0", "The message could not be accepted")
 		}
 	}

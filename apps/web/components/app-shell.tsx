@@ -81,6 +81,23 @@ const navigation: { label: string; items: NavItem[] }[] = [
   },
 ];
 
+const adminNavigation: { label: string; items: NavItem[] }[] = [
+  {
+    label: "Platform administration",
+    items: [
+      { href: "/admin", label: "Overview", icon: LayoutDashboard },
+      { href: "/admin/search", label: "Search", icon: Search },
+      { href: "/admin/users", label: "Users", icon: ShieldCheck },
+      { href: "/admin/workspaces", label: "Workspaces", icon: LayoutDashboard },
+      { href: "/admin/domains", label: "Domains", icon: Globe },
+      { href: "/admin/settings", label: "Quota defaults", icon: Settings },
+      { href: "/admin/campaigns", label: "Campaigns", icon: Send },
+      { href: "/admin/suppressions", label: "Suppressions", icon: List },
+      { href: "/admin/audit", label: "Audit log", icon: ShieldAlert },
+    ],
+  },
+];
+
 type AdminSession = {
   platform_role: "support_admin" | "super_admin";
 };
@@ -102,6 +119,7 @@ function SidebarContent({
   pathname,
   organizationRole,
   adminRole,
+  isAdminExperience,
   adminNavigationError,
   onNavigate,
   workspaceName,
@@ -115,6 +133,7 @@ function SidebarContent({
   pathname: string;
   organizationRole: string;
   adminRole: AdminSession["platform_role"] | null;
+  isAdminExperience: boolean;
   adminNavigationError: boolean;
   onNavigate?: () => void;
   workspaceName: string;
@@ -131,40 +150,40 @@ function SidebarContent({
         <Image src="/logo.svg" width={30} height={30} alt="" />
         <div>
           <p className="text-[17px] font-semibold tracking-tight text-slate-900">Sendwise</p>
-          <p className="text-[9px] font-medium uppercase tracking-[0.14em] text-slate-500">Marketing workspace</p>
+          <p className="text-[9px] font-medium uppercase tracking-[0.14em] text-slate-500">
+            {isAdminExperience ? "Platform administration" : "Marketing workspace"}
+          </p>
         </div>
       </div>
 
-      <div className="px-3 pt-4">
-        <button className="flex w-full items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left hover:bg-white">
-          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-emerald-800 text-[11px] font-semibold text-white">
-            {initials(workspaceName).slice(0, 2).toUpperCase()}
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-sm font-medium text-slate-900">{workspaceName}</span>
-            <span className="block text-[11px] text-slate-500">{workspacePlan} plan</span>
-          </span>
-          <span className="text-xs text-slate-400">⌄</span>
-        </button>
-      </div>
+      {isAdminExperience ? (
+        <div className="mx-3 mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+          <p className="text-sm font-medium text-slate-900">System management</p>
+          <p className="mt-0.5 text-[11px] capitalize text-slate-500">
+            {adminRole?.replace("_", " ") ?? "Platform admin"}
+          </p>
+        </div>
+      ) : (
+        <div className="px-3 pt-4">
+          <button className="flex w-full items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left hover:bg-white">
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-emerald-800 text-[11px] font-semibold text-white">
+              {initials(workspaceName).slice(0, 2).toUpperCase()}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-medium text-slate-900">{workspaceName}</span>
+              <span className="block text-[11px] text-slate-500">{workspacePlan} plan</span>
+            </span>
+            <span className="text-xs text-slate-400">⌄</span>
+          </button>
+        </div>
+      )}
 
       <nav className="flex-1 space-y-6 overflow-y-auto px-3 py-5">
-        {[...navigation, ...(adminRole ? [{
-          label: "Platform admin",
-          items: [
-            { href: "/admin", label: "Overview", icon: LayoutDashboard },
-            { href: "/admin/search", label: "Search", icon: Search },
-            { href: "/admin/users", label: "Users", icon: ShieldCheck },
-            { href: "/admin/workspaces", label: "Workspaces", icon: LayoutDashboard },
-            { href: "/admin/domains", label: "Domains", icon: Globe },
-            { href: "/admin/campaigns", label: "Campaigns", icon: Send },
-            { href: "/admin/suppressions", label: "Suppressions", icon: List },
-            { href: "/admin/audit", label: "Audit log", icon: ShieldAlert },
-          ],
-        }] : [])].map((group) => {
+        {(isAdminExperience ? adminNavigation : navigation).map((group) => {
           const items = group.items.filter(
             (item) =>
-              (item.href !== "/transactional" ||
+              (isAdminExperience ||
+                item.href !== "/transactional" ||
                 organizationRole === "owner" ||
                 organizationRole === "admin") &&
               (item.href !== "/admin/suppressions" || adminRole === "super_admin"),
@@ -250,6 +269,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const workspacePlan = organization?.role ? organization.role.toUpperCase() : "WORKSPACE";
   const userName = user?.name ?? "Workspace owner";
   const userEmail = user?.email ?? "owner@example.com";
+  const isAdminRoute = pathname === "/admin" || pathname.startsWith("/admin/");
+  const isAdminExperience = adminRole !== null || isAdminRoute;
   useEffect(() => {
     let active = true;
     if (!user) {
@@ -297,6 +318,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           pathname={pathname}
           organizationRole={organization?.role ?? ""}
           adminRole={adminRole}
+          isAdminExperience={isAdminExperience}
           adminNavigationError={adminNavigationError}
           workspaceName={workspaceName}
           workspacePlan={workspacePlan}
@@ -327,6 +349,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               pathname={pathname}
               organizationRole={organization?.role ?? ""}
               adminRole={adminRole}
+              isAdminExperience={isAdminExperience}
               adminNavigationError={adminNavigationError}
               onNavigate={() => setMobileOpen(false)}
               workspaceName={workspaceName}
@@ -351,16 +374,26 @@ export function AppShell({ children }: { children: ReactNode }) {
             <Menu className="h-5 w-5" />
           </button>
 
-          <div className="relative hidden max-w-sm flex-1 sm:block">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
-              placeholder="Search contacts, campaigns, templates..."
-              className="h-9 w-full rounded-lg border-0 bg-slate-50 pl-9 pr-3 text-sm text-slate-900 ring-1 ring-inset ring-slate-200 placeholder:text-slate-400 focus:bg-white focus:ring-2 focus:ring-inset focus:ring-emerald-700"
-            />
-          </div>
+          {isAdminExperience ? (
+            <Link
+              href="/admin/search"
+              className="hidden h-9 max-w-sm flex-1 items-center gap-2 rounded-lg bg-slate-50 px-3 text-sm text-slate-500 ring-1 ring-inset ring-slate-200 hover:bg-white sm:flex"
+            >
+              <Search className="h-4 w-4" />
+              Search users, workspaces, domains...
+            </Link>
+          ) : (
+            <div className="relative hidden max-w-sm flex-1 sm:block">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                placeholder="Search contacts, campaigns, templates..."
+                className="h-9 w-full rounded-lg border-0 bg-slate-50 pl-9 pr-3 text-sm text-slate-900 ring-1 ring-inset ring-slate-200 placeholder:text-slate-400 focus:bg-white focus:ring-2 focus:ring-inset focus:ring-emerald-700"
+              />
+            </div>
+          )}
 
           <div className="ml-auto flex items-center gap-2">
-            {pathname !== "/dashboard" ? (
+            {!isAdminExperience && pathname !== "/dashboard" ? (
               <Link
                 href="/campaigns/new"
                 className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-emerald-800 px-3.5 text-sm font-medium text-white shadow-sm hover:bg-emerald-900"

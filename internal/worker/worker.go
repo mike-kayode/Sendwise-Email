@@ -19,6 +19,7 @@ import (
 	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/messaging"
 	"github.com/khayode/email-platform/internal/observability"
+	"github.com/khayode/email-platform/internal/quota"
 	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/time/rate"
 )
@@ -77,6 +78,8 @@ type jobRow struct {
 	SenderFooterText    string
 	SenderSocialLinks   []byte
 	WarmupReservedOn    *time.Time
+	QuotaReservationID  string
+	QuotaDeferred       bool
 	CreatedAt           time.Time
 }
 
@@ -97,6 +100,9 @@ func New(
 	}
 	if cfg.MaxDailyEmails < 1 {
 		cfg.MaxDailyEmails = 10000
+	}
+	if cfg.PlatformMaxDomainRate < 1 {
+		cfg.PlatformMaxDomainRate = 1000
 	}
 	if cfg.RecipientDomainDefault < 1 {
 		cfg.RecipientDomainDefault = cfg.SendingRate
@@ -192,7 +198,7 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	}
 
 	// Maximum message age: do not retry jobs older than the configured age.
-	if w.cfg.MaxMessageAge > 0 && time.Since(row.CreatedAt) > w.cfg.MaxMessageAge {
+	if !row.QuotaDeferred && w.cfg.MaxMessageAge > 0 && time.Since(row.CreatedAt) > w.cfg.MaxMessageAge {
 		return 0, w.deadLetterJob(ctx, row, "message_expired", fmt.Errorf("message exceeded max age %s", w.cfg.MaxMessageAge))
 	}
 
@@ -287,8 +293,7 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		}
 	}
 
-	// Tenant quota and abuse pause: reject sends for paused organizations or
-	// organizations that have exceeded their daily email quota.
+	// Workspace suspension and abuse pauses remain independent of domain quotas.
 	if err := w.checkTenantQuota(ctx, row.OrganizationID); err != nil {
 		if errors.Is(err, errWorkspaceSuspended) {
 			return time.Minute, nil
@@ -428,6 +433,14 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	}
 	defer w.releaseDomainSlot(recipientDomain)
 
+	deferred, retryAt, err := w.reserveCampaignQuota(ctx, row)
+	if err != nil {
+		return 30 * time.Second, err
+	}
+	if deferred {
+		return max(retryAt.Sub(time.Now()), time.Second), nil
+	}
+
 	result, err := w.transport.Send(ctx, message)
 	if err != nil {
 		return w.handleSendFailure(ctx, row, err)
@@ -458,7 +471,8 @@ func (w *Worker) loadJob(ctx context.Context, jobID string) (*jobRow, error) {
 		       COALESCE(sp.city, ''), COALESCE(sp.region, ''), COALESCE(sp.postal_code, ''),
 		       COALESCE(sp.country, ''), COALESCE(sp.website, ''), COALESCE(sp.support_email, ''),
 		       COALESCE(sp.footer_text, ''), COALESCE(sp.social_links, '[]'::jsonb),
-		       dj.warmup_reserved_on, dj.created_at
+		       dj.warmup_reserved_on, COALESCE(dj.quota_reservation_id::text, ''),
+		       dj.quota_deferred, dj.created_at
 		FROM delivery_jobs dj
 		JOIN campaigns cp ON cp.id = dj.campaign_id
 		JOIN organizations o ON o.id = dj.organization_id
@@ -480,6 +494,7 @@ func (w *Worker) loadJob(ctx context.Context, jobID string) (*jobRow, error) {
 		&row.SenderPostalCode, &row.SenderCountry, &row.SenderWebsite, &row.SenderSupportEmail,
 		&row.SenderFooterText, &row.SenderSocialLinks,
 		&row.WarmupReservedOn,
+		&row.QuotaReservationID, &row.QuotaDeferred,
 		&row.CreatedAt,
 	)
 	if err != nil {
@@ -494,6 +509,11 @@ func (w *Worker) recordSubmission(ctx context.Context, row *jobRow, result *deli
 		return fmt.Errorf("begin submission transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if row.QuotaReservationID != "" {
+		if err := quota.Retain(ctx, tx, quota.StreamMarketing, quota.SourceCampaignDelivery, row.QuotaReservationID); err != nil {
+			return err
+		}
+	}
 
 	transportMessageID := result.MessageID
 	if transportMessageID == "" {
@@ -506,6 +526,8 @@ func (w *Worker) recordSubmission(ctx context.Context, row *jobRow, result *deli
 		    attempts = attempts + 1,
 		    accepted_at = now(),
 		    transport_message_id = $2,
+		    quota_reservation_id = NULL,
+		    quota_deferred = false,
 		    last_error = NULL,
 		    updated_at = now()
 		WHERE id = $1 AND status IN ('queued', 'processing', 'deferred')
@@ -572,6 +594,9 @@ func (w *Worker) handleSendFailure(ctx context.Context, row *jobRow, sendErr err
 		return 0, w.deadLetterJob(ctx, row, "max_attempts_exceeded", sendErr)
 	}
 
+	if err := w.releaseCampaignQuota(ctx, row); err != nil {
+		return 30 * time.Second, err
+	}
 	delay := backoff(attempts)
 	_, err := w.pool.Exec(ctx, `
 		UPDATE delivery_jobs
@@ -610,6 +635,9 @@ func (w *Worker) failJob(ctx context.Context, row *jobRow, cause error) error {
 	defer tx.Rollback(ctx)
 
 	message := truncateError(cause)
+	if err := w.releaseCampaignQuotaTx(ctx, tx, row); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE delivery_jobs
 		SET status = 'failed',
@@ -656,6 +684,9 @@ func (w *Worker) bounceJob(ctx context.Context, row *jobRow, cause error, bounce
 	defer tx.Rollback(ctx)
 
 	message := truncateError(cause)
+	if err := w.releaseCampaignQuotaTx(ctx, tx, row); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE delivery_jobs
 		SET status = 'bounced',
@@ -708,6 +739,9 @@ func (w *Worker) deadLetterJob(ctx context.Context, row *jobRow, reason string, 
 	defer tx.Rollback(ctx)
 
 	message := truncateError(cause)
+	if err := w.releaseCampaignQuotaTx(ctx, tx, row); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE delivery_jobs
 		SET status = 'failed',
@@ -795,38 +829,151 @@ func (w *Worker) checkTenantQuota(ctx context.Context, organizationID string) er
 	if workspaceStatus != "active" {
 		return fmt.Errorf("workspace is %s", workspaceStatus)
 	}
-	var settings struct {
-		MaxDailyEmails int
-		PausedUntil    *time.Time
-	}
+	var pausedUntil *time.Time
 	if err := w.pool.QueryRow(ctx, `
-		SELECT COALESCE(max_daily_emails, 10000), paused_until
+		SELECT paused_until
 		FROM organization_settings
 		WHERE organization_id = $1
-	`, organizationID).Scan(&settings.MaxDailyEmails, &settings.PausedUntil); err != nil {
+	`, organizationID).Scan(&pausedUntil); err != nil {
 		if err == pgx.ErrNoRows {
 			return nil
 		}
 		return fmt.Errorf("load organization settings: %w", err)
 	}
 
-	if settings.PausedUntil != nil && settings.PausedUntil.After(time.Now()) {
-		return fmt.Errorf("organization sending paused until %s", settings.PausedUntil.Format(time.RFC3339))
+	if pausedUntil != nil && pausedUntil.After(time.Now()) {
+		return fmt.Errorf("organization sending paused until %s", pausedUntil.Format(time.RFC3339))
+	}
+	return nil
+}
+
+func (w *Worker) reserveCampaignQuota(ctx context.Context, row *jobRow) (bool, time.Time, error) {
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return false, time.Time{}, fmt.Errorf("begin campaign quota reservation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var domainID string
+	if err := tx.QueryRow(ctx, `
+		SELECT id::text FROM sending_domains
+		WHERE organization_id = $1 AND lower(domain) = lower($2)
+		  AND status = 'verified' AND NOT owner_conflict
+		  AND admin_disabled_at IS NULL
+		ORDER BY created_at
+		LIMIT 1
+		FOR UPDATE
+	`, row.OrganizationID, domainOf(row.SenderEmail)).Scan(&domainID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, time.Time{}, quota.ErrDomainNotFound
+		}
+		return false, time.Time{}, fmt.Errorf("find verified campaign sending domain: %w", err)
 	}
 
-	var dailyCount int
-	if err := w.pool.QueryRow(ctx, `
-		SELECT COALESCE(SUM(quantity), 0)
-		FROM usage_records
-		WHERE organization_id = $1
-		  AND metric = 'email_submitted'
-		  AND occurred_at >= now() - interval '1 day'
-	`, organizationID).Scan(&dailyCount); err != nil {
-		return fmt.Errorf("count daily emails: %w", err)
+	reservationID := row.QuotaReservationID
+	if reservationID == "" {
+		if err := tx.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&reservationID); err != nil {
+			return false, time.Time{}, fmt.Errorf("create campaign quota reservation id: %w", err)
+		}
+	}
+	_, err = quota.Reserve(
+		ctx, tx, domainID, quota.StreamMarketing, quota.SourceCampaignDelivery,
+		reservationID, 1, int64(w.cfg.PlatformMaxDomainRate),
+	)
+	if err != nil {
+		var exceeded *quota.ExceededError
+		if !errors.As(err, &exceeded) {
+			return false, time.Time{}, err
+		}
+		warmupTag, warmupErr := tx.Exec(ctx, `
+			UPDATE delivery_jobs SET warmup_reserved_on = NULL
+			WHERE id = $1 AND warmup_reserved_on = CURRENT_DATE
+		`, row.ID)
+		if warmupErr != nil {
+			return false, time.Time{}, fmt.Errorf("release warm-up slot after quota deferral: %w", warmupErr)
+		}
+		if warmupTag.RowsAffected() > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE sending_domain_daily_stats
+				SET reserved_count = GREATEST(reserved_count - 1, 0), updated_at = now()
+				WHERE organization_id = $1 AND lower(domain) = lower($2)
+				  AND sending_day = CURRENT_DATE
+			`, row.OrganizationID, domainOf(row.SenderEmail)); err != nil {
+				return false, time.Time{}, fmt.Errorf("release warm-up usage after quota deferral: %w", err)
+			}
+		}
+		if _, updateErr := tx.Exec(ctx, `
+			UPDATE delivery_jobs
+			SET status = 'deferred', next_attempt_at = $2, quota_deferred = true,
+			    quota_reservation_id = NULL, last_error = $3, updated_at = now()
+			WHERE id = $1 AND status IN ('queued', 'processing', 'deferred')
+		`, row.ID, exceeded.ResetAt, exceeded.Error()); updateErr != nil {
+			return false, time.Time{}, fmt.Errorf("defer campaign delivery for quota: %w", updateErr)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return false, time.Time{}, fmt.Errorf("commit campaign quota deferral: %w", err)
+		}
+		row.QuotaDeferred = true
+		row.QuotaReservationID = ""
+		return true, exceeded.ResetAt, nil
 	}
 
-	if dailyCount >= settings.MaxDailyEmails {
-		return fmt.Errorf("daily email quota of %d exceeded", settings.MaxDailyEmails)
+	tag, err := tx.Exec(ctx, `
+		UPDATE delivery_jobs
+		SET quota_reservation_id = $2, quota_deferred = false, updated_at = now()
+		WHERE id = $1 AND status IN ('queued', 'processing', 'deferred')
+	`, row.ID, reservationID)
+	if err != nil {
+		return false, time.Time{}, fmt.Errorf("save campaign quota reservation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		if err := quota.Release(ctx, tx, quota.StreamMarketing, quota.SourceCampaignDelivery, reservationID); err != nil {
+			return false, time.Time{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return false, time.Time{}, fmt.Errorf("commit unused campaign quota reservation: %w", err)
+		}
+		return true, time.Now(), nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, time.Time{}, fmt.Errorf("commit campaign quota reservation: %w", err)
+	}
+	row.QuotaReservationID = reservationID
+	row.QuotaDeferred = false
+	return false, time.Time{}, nil
+}
+
+func (w *Worker) releaseCampaignQuota(ctx context.Context, row *jobRow) error {
+	if row.QuotaReservationID == "" {
+		return nil
+	}
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin campaign quota release: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := w.releaseCampaignQuotaTx(ctx, tx, row); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit campaign quota release: %w", err)
+	}
+	row.QuotaReservationID = ""
+	return nil
+}
+
+func (w *Worker) releaseCampaignQuotaTx(ctx context.Context, tx pgx.Tx, row *jobRow) error {
+	if row.QuotaReservationID == "" {
+		return nil
+	}
+	if err := quota.Release(ctx, tx, quota.StreamMarketing, quota.SourceCampaignDelivery, row.QuotaReservationID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE delivery_jobs SET quota_reservation_id = NULL
+		WHERE id = $1 AND quota_reservation_id = $2
+	`, row.ID, row.QuotaReservationID); err != nil {
+		return fmt.Errorf("clear campaign quota reservation: %w", err)
 	}
 	return nil
 }
@@ -1061,6 +1208,9 @@ func (w *Worker) cancelPendingJob(ctx context.Context, row *jobRow, reason strin
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := w.releaseCampaignQuotaTx(ctx, tx, row); err != nil {
+		return err
+	}
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE delivery_jobs

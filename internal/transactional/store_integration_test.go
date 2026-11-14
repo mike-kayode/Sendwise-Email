@@ -8,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	smtpserver "github.com/emersion/go-smtp"
+	"github.com/khayode/email-platform/internal/config"
 	"github.com/khayode/email-platform/internal/delivery"
+	"github.com/khayode/email-platform/internal/quota"
 	"github.com/khayode/email-platform/internal/testutil"
 )
 
@@ -197,6 +200,92 @@ func TestPlatformDisabledDomainBlocksTransactionalSMTPAndWorker(t *testing.T) {
 	}
 	if err := session.validateSender(ctx, job.From); err != errSMTPSenderNotAllowed {
 		t.Fatalf("SMTP sender validation error = %v, want sender not allowed", err)
+	}
+}
+
+func TestSMTPQuotaExhaustionReturnsTemporary452(t *testing.T) {
+	pool := testutil.NewPostgres(t)
+	ctx := context.Background()
+	var organizationID, domainID, credentialID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO organizations (name, slug)
+		VALUES ('SMTP quota test', 'smtp-quota-test')
+		RETURNING id::text
+	`).Scan(&organizationID); err != nil {
+		t.Fatalf("create SMTP quota organization: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE transactional_settings
+		SET enabled = true, status = 'active'
+		WHERE organization_id = $1
+	`, organizationID); err != nil {
+		t.Fatalf("enable transactional settings: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO sending_domains
+			(organization_id, domain, status, spf_status, dkim_status, transactional_enabled)
+		VALUES ($1, 'mailer.example.test', 'verified', 'verified', 'verified', true)
+		RETURNING id::text
+	`, organizationID).Scan(&domainID); err != nil {
+		t.Fatalf("create verified transactional domain: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO domain_quotas
+			(domain_id, stream, daily_limit, monthly_limit, per_second_limit)
+		VALUES ($1, 'transactional', 1, 10, 100)
+	`, domainID); err != nil {
+		t.Fatalf("set transactional domain quota: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO domain_usage (domain_id, stream, period, period_start, sent_count)
+		VALUES ($1, 'transactional', 'day', (now() AT TIME ZONE 'UTC')::date, 1)
+	`, domainID); err != nil {
+		t.Fatalf("fill transactional daily quota: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO transactional_smtp_credentials
+			(organization_id, name, username, secret_hash, requests_per_second)
+		VALUES ($1, 'quota test', 'quota-test-user', 'unused', 10)
+		RETURNING id::text
+	`, organizationID).Scan(&credentialID); err != nil {
+		t.Fatalf("create SMTP credential: %v", err)
+	}
+
+	backend := &smtpSubmissionBackend{
+		cfg: config.Config{
+			PlatformMaxDomainRate:        100,
+			TransactionalMaxMessageBytes: 4096,
+			TransactionalMaxRecipients:   10,
+		},
+		pool:  pool,
+		store: NewStore(pool),
+	}
+	session := &smtpSubmissionSession{
+		backend: backend,
+		credential: SMTPCredential{
+			ID: credentialID, OrganizationID: organizationID,
+		},
+		envelopeFrom: "receipts@mailer.example.test",
+		recipients:   []string{"person@example.test"},
+	}
+	message := "From: receipts@mailer.example.test\r\nTo: person@example.test\r\nSubject: quota test\r\n\r\nbody\r\n"
+	err := session.Data(strings.NewReader(message))
+	var smtpErr *smtpserver.SMTPError
+	if !errors.As(err, &smtpErr) || smtpErr.Code != 452 ||
+		smtpErr.EnhancedCode != (smtpserver.EnhancedCode{4, 5, 3}) {
+		t.Fatalf("SMTP quota response = %v; want temporary 452 4.5.3", err)
+	}
+
+	var usage int64
+	if err := pool.QueryRow(ctx, `
+		SELECT sent_count FROM domain_usage
+		WHERE domain_id = $1 AND stream = $2 AND period = 'day'
+		  AND period_start = (now() AT TIME ZONE 'UTC')::date
+	`, domainID, quota.StreamTransactional).Scan(&usage); err != nil {
+		t.Fatalf("read unchanged quota usage: %v", err)
+	}
+	if usage != 1 {
+		t.Fatalf("SMTP rejection changed daily usage to %d; want 1", usage)
 	}
 }
 

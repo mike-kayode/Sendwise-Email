@@ -17,6 +17,7 @@ import (
 	"github.com/khayode/email-platform/internal/messaging"
 	"github.com/khayode/email-platform/internal/observability"
 	"github.com/khayode/email-platform/internal/projections"
+	"github.com/khayode/email-platform/internal/quota"
 	"github.com/khayode/email-platform/internal/transactional"
 	"github.com/khayode/email-platform/internal/worker"
 )
@@ -38,6 +39,19 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+	if err := quota.SeedPoolDefaults(
+		ctx,
+		pool,
+		int64(cfg.MaxDailyEmails),
+		int64(cfg.SendingRate),
+		int64(cfg.TransactionalDailyLimit),
+		int64(cfg.TransactionalMonthlyLimit),
+		int64(cfg.TransactionalRequestsPerSecond),
+		int64(cfg.PlatformMaxDomainRate),
+	); err != nil {
+		logger.Error("seed platform quota defaults", "error", err)
+		os.Exit(1)
+	}
 
 	bus, err := messaging.Connect(cfg.NATSURL, "email-platform-worker")
 	if err != nil {

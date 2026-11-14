@@ -17,10 +17,9 @@ import (
 )
 
 var (
-	ErrWorkspaceDisabled = errors.New("transactional delivery is disabled for this workspace")
-	ErrWorkspacePaused   = errors.New("transactional delivery is paused for this workspace")
-	ErrDailyLimit        = errors.New("transactional daily recipient limit exceeded")
-	ErrMonthlyLimit      = errors.New("transactional monthly recipient limit exceeded")
+	ErrWorkspaceDisabled      = errors.New("transactional delivery is disabled for this workspace")
+	ErrWorkspacePaused        = errors.New("transactional delivery is paused for this workspace")
+	ErrSenderDomainNotAllowed = errors.New("transactional sender domain is not verified and enabled")
 )
 
 type Status string

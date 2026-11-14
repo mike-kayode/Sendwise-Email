@@ -50,6 +50,12 @@ type AdminOverview = {
     reason: string;
     created_at: string;
   }>;
+  near_limit_domains: Array<{
+    id: string;
+    domain: string;
+    workspace_name: string;
+    highest_usage_percent: number;
+  }>;
 };
 
 const dateLabel = (value: string) =>
@@ -101,6 +107,7 @@ export default function AdminOverviewPage() {
     ["Bounces · 30 days", `${overview.operational_metrics.bounce_rate_30_days.toFixed(2)}%`],
     ["Complaints · 30 days", `${overview.operational_metrics.complaint_rate_30_days.toFixed(3)}%`],
     ["Delivery queue depth", overview.operational_metrics.queue_depth],
+    ["Domains near quota", overview.near_limit_domains.length],
   ] : [];
 
   return (
@@ -118,6 +125,26 @@ export default function AdminOverviewPage() {
               </CardContent></Card>
             ))}
           </div>
+          <Card className="mt-5">
+            <CardContent className="p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold text-slate-900">Domains near quota limits</h2>
+                <Link href="/admin/domains?near_limit=true" className="text-xs font-medium text-emerald-800 hover:underline">View filtered domains</Link>
+              </div>
+              <ul className="divide-y divide-slate-100">
+                {overview.near_limit_domains.map((domain) => (
+                  <li key={domain.id} className="flex items-center justify-between gap-3 py-3">
+                    <div className="min-w-0">
+                      <Link href={`/admin/domains/${encodeURIComponent(domain.id)}`} className="truncate text-sm font-medium text-slate-800 hover:underline">{domain.domain}</Link>
+                      <p className="truncate text-xs text-slate-500">{domain.workspace_name}</p>
+                    </div>
+                    <span className="shrink-0 text-sm font-semibold text-amber-800">{domain.highest_usage_percent.toFixed(0)}%</span>
+                  </li>
+                ))}
+                {overview.near_limit_domains.length === 0 ? <li className="py-5 text-sm text-slate-500">No domains are above 80% of a quota.</li> : null}
+              </ul>
+            </CardContent>
+          </Card>
           <p className="mt-4 rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-600">
             Delivery rates use terminal campaign and transactional outcomes from the last 30 days. Queue depth is read from the API database. Stalwart, NATS, worker health, and top-sender rankings are not included yet.
           </p>

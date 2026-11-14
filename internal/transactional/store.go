@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khayode/email-platform/internal/delivery"
+	"github.com/khayode/email-platform/internal/quota"
 	xhtml "golang.org/x/net/html"
 )
 
@@ -30,6 +31,7 @@ type EnqueueOptions struct {
 	IdempotencyKey string
 	Mode           bool
 	EnforceLimits  bool
+	HardRate       int64
 }
 
 type Job struct {
@@ -206,15 +208,15 @@ func (s *Store) Enqueue(ctx context.Context, options EnqueueOptions, input Messa
 		}
 		var enabled bool
 		var status string
-		var dailyLimit, monthlyLimit, maxRecipients int
+		var maxRecipients int
 		var maxMessageBytes int64
 		if err := tx.QueryRow(ctx, `
-			SELECT enabled, status, daily_limit, monthly_limit, max_recipients, max_message_bytes
+			SELECT enabled, status, max_recipients, max_message_bytes
 			FROM transactional_settings
 			WHERE organization_id = $1
 			FOR UPDATE
 		`, options.OrganizationID).Scan(
-			&enabled, &status, &dailyLimit, &monthlyLimit, &maxRecipients, &maxMessageBytes,
+			&enabled, &status, &maxRecipients, &maxMessageBytes,
 		); err != nil {
 			return receipt, fmt.Errorf("load transactional workspace limits: %w", err)
 		}
@@ -228,24 +230,25 @@ func (s *Store) Enqueue(ctx context.Context, options EnqueueOptions, input Messa
 		if err != nil {
 			return receipt, err
 		}
-		if !options.Mode {
-			var dailyUsage, monthlyUsage int64
-			if err := tx.QueryRow(ctx, `
-				SELECT
-					count(*) FILTER (WHERE m.created_at >= current_date),
-					count(*) FILTER (WHERE m.created_at >= date_trunc('month', now()))
-				FROM transactional_message_recipients r
-				JOIN transactional_messages m ON m.id = r.message_id
-				WHERE m.organization_id = $1 AND m.status <> 'rejected'
-			`, options.OrganizationID).Scan(&dailyUsage, &monthlyUsage); err != nil {
-				return receipt, fmt.Errorf("check transactional recipient usage: %w", err)
+	}
+	quotaDomainID := ""
+	if options.EnforceLimits && !options.Mode {
+		_, senderDomain, _ := strings.Cut(strings.ToLower(from), "@")
+		if err := tx.QueryRow(ctx, `
+			SELECT id::text
+			FROM sending_domains
+			WHERE organization_id = $1 AND lower(domain) = $2
+			  AND transactional_enabled AND status = 'verified'
+			  AND spf_status = 'verified' AND dkim_status = 'verified'
+			  AND NOT owner_conflict AND admin_disabled_at IS NULL
+			ORDER BY created_at
+			LIMIT 1
+			FOR UPDATE
+		`, options.OrganizationID, senderDomain).Scan(&quotaDomainID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return receipt, ErrSenderDomainNotAllowed
 			}
-			if dailyUsage+int64(len(recipients)) > int64(dailyLimit) {
-				return receipt, ErrDailyLimit
-			}
-			if monthlyUsage+int64(len(recipients)) > int64(monthlyLimit) {
-				return receipt, ErrMonthlyLimit
-			}
+			return receipt, fmt.Errorf("load verified transactional sending domain: %w", err)
 		}
 	}
 
@@ -289,11 +292,25 @@ func (s *Store) Enqueue(ctx context.Context, options EnqueueOptions, input Messa
 	}
 
 	for _, recipient := range recipients {
-		if _, err := tx.Exec(ctx, `
+		var recipientID string
+		if err := tx.QueryRow(ctx, `
 			INSERT INTO transactional_message_recipients (message_id, email, recipient_type)
 			VALUES ($1, $2, $3)
-		`, messageUUID, recipient.Email, recipient.Type); err != nil {
+			RETURNING id::text
+		`, messageUUID, recipient.Email, recipient.Type).Scan(&recipientID); err != nil {
 			return MessageReceipt{}, fmt.Errorf("insert transactional recipient: %w", err)
+		}
+		if quotaDomainID != "" {
+			hardRate := options.HardRate
+			if hardRate < 1 {
+				hardRate = 1000
+			}
+			if _, err := quota.Reserve(
+				ctx, tx, quotaDomainID, quota.StreamTransactional, quota.SourceTransactionalRecipient,
+				recipientID, 1, hardRate,
+			); err != nil {
+				return MessageReceipt{}, err
+			}
 		}
 	}
 	if _, err := tx.Exec(ctx, `
@@ -402,6 +419,50 @@ func (s *Store) ClaimDue(ctx context.Context, lease time.Duration) (*Job, error)
 	return &job, nil
 }
 
+func (s *Store) ReserveRecipientQuota(ctx context.Context, job *Job, hardRate int64) error {
+	if hardRate < 1 {
+		hardRate = 1000
+	}
+	address, err := mail.ParseAddress(job.From)
+	if err != nil {
+		return errors.New("transactional sender address is invalid")
+	}
+	senderDomain := strings.ToLower(address.Address[strings.LastIndexByte(address.Address, '@')+1:])
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transactional quota reservation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var domainID string
+	if err := tx.QueryRow(ctx, `
+		SELECT id::text
+		FROM sending_domains
+		WHERE organization_id = $1 AND lower(domain) = $2
+		  AND transactional_enabled AND status = 'verified'
+		  AND spf_status = 'verified' AND dkim_status = 'verified'
+		  AND NOT owner_conflict AND admin_disabled_at IS NULL
+		ORDER BY created_at
+		LIMIT 1
+		FOR UPDATE
+	`, job.Organization, senderDomain).Scan(&domainID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrSenderDomainNotAllowed
+		}
+		return fmt.Errorf("load transactional quota domain: %w", err)
+	}
+	if _, err := quota.Reserve(
+		ctx, tx, domainID, quota.StreamTransactional, quota.SourceTransactionalRecipient,
+		job.RecipientID, 1, hardRate,
+	); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit transactional quota reservation: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) SaveVERPToken(ctx context.Context, job *Job, token, email string) error {
 	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO transactional_verp_tokens
@@ -437,6 +498,9 @@ func (s *Store) MarkAccepted(ctx context.Context, job *Job, smtpMessageID string
 		return fmt.Errorf("begin transactional acceptance: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if err := quota.Retain(ctx, tx, quota.StreamTransactional, quota.SourceTransactionalRecipient, job.RecipientID); err != nil {
+		return err
+	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE transactional_message_recipients
 		SET status = 'sending', accepted_at = COALESCE(accepted_at, now()),
@@ -729,6 +793,11 @@ func (s *Store) TransitionRecipient(
 	}
 	if current == to {
 		return tx.Commit(ctx)
+	}
+	if to == StatusDeferred || to == StatusFailed || to == StatusRejected || to == StatusSuppressed {
+		if err := quota.Release(ctx, tx, quota.StreamTransactional, quota.SourceTransactionalRecipient, recipientID); err != nil {
+			return err
+		}
 	}
 	encodedMetadata, err := json.Marshal(metadata)
 	if err != nil {

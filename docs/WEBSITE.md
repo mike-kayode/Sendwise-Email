@@ -1,9 +1,7 @@
 ---
 title: Public website
-description: Marketing pages, contact form, legal pages, and public auth shell
+description: Marketing pages, contact form, and public authentication shell
 ---
-
-# Public website
 
 The public marketing site is implemented in `apps/web` using the App Router.
 Routes in the `(marketing)` group share the marketing header, footer, responsive
@@ -15,11 +13,13 @@ home-page client redirect.
 
 - `/` — home
 - `/platform`, `/developers`, `/pricing`, `/about`, `/contact`
-- `/legal` and `/legal/privacy`, `/legal/terms`,
-  `/legal/acceptable-use`, `/legal/data-protection`
 - `/login`, `/register`, `/forgot-password`, `/auth/verify`,
   `/auth/reset-password` — existing authentication flows with the public site
   shell and styling
+
+Legal routes are intentionally not published until approved policy text is
+available. They return 404 rather than displaying generated or placeholder
+terms.
 
 ## Editing content
 
@@ -29,43 +29,33 @@ home-page client redirect.
   illustration at `apps/web/public/images/sendwise-dashboard.png`.
 - Marketing page copy and page layouts are in
   `apps/web/components/marketing/pages.tsx`.
-- Change plan prices, limits, and features in
-  `apps/web/lib/marketing/pricing.ts`. The current monthly prices and email
-  volumes are Free (3,000/month, 100/day), Starter (10,000/month, ₦5,000),
-  Business (50,000/month, ₦15,000), and Enterprise (200,000/month, ₦50,000).
-  Monthly/yearly selection is a display toggle and does not change billing.
-- Replace legal section text and metadata in
-  `apps/web/content/legal/documents.ts`. Legal copy is intentionally a
-  placeholder and must be reviewed by counsel before launch.
+- Change published monthly prices and email volumes in
+  `apps/web/lib/marketing/pricing.ts`: Free (3,000/month, up to 100/day),
+  Starter (10,000/month, ₦5,000), Business (50,000/month, ₦15,000), and
+  Enterprise (200,000/month, ₦50,000). Paid-plan payment and activation are not
+  automated in the app; the pricing page directs those questions to Contact.
+  Annual prices are not published.
 - Update the public canonical origin using `NEXT_PUBLIC_SITE_URL`. It defaults
-  to `https://sendwise.ng`; set it to the actual site origin for builds and
-  deployments.
+  to `https://campaign.pipsleague.com`, matching the configured public site
+  origin in `.env.example`.
 - Contact notification delivery is disabled when `CONTACT_NOTIFY_EMAIL` is
-  empty. Submissions are still stored. Set the address to enable notification
-  email through the API's configured platform SMTP relay.
+  empty. Valid submissions are stored; set the address to enable notification
+  email through the API's configured platform SMTP relay. The public form does
+  not promise a response time.
 
-## Owner TODOs before public launch
+## Public-content boundaries
 
-- Confirm yearly billing prices and any discount; no annual discount is
-  currently applied or advertised. The yearly selector asks users to contact
-  Sendwise instead of assuming an annual rate.
-- Confirm daily caps for paid tiers and any sending-domain, sender-address, and
-  log-retention limits before publishing them.
-- Confirm plan audiences and included features before treating them as contract
-  terms.
-- Set the pay-as-you-go rate and usage terms. The current callout directs
-  customers to contact Sendwise and does not promise a rate.
-- Confirm operational policies and payment methods referenced in the pricing
-  FAQs before offering definitive answers.
-- Replace the About page `[YOUR STORY]`, `[YOUR MISSION]`, `[CITY, COUNTRY]`,
-  `[NAME]`, and `[ROLE]` placeholders with approved company and team details.
-- Replace `[EMAIL ADDRESS]`, `[SUPPORT EMAIL]`, `[RESPONSE TIME]`, and
-  `[ABUSE EMAIL]` on Contact with monitored addresses and an accurate response
-  commitment.
-- Replace each legal section's `[LEGAL TEXT: written or reviewed by your
-  lawyer]` and `[DATE]` with approved text and the real effective date.
-- Review the sample API hostnames, SMTP hostnames, response example, and
-  integration credentials in Developers against the production service.
+- The About page describes product behavior verified in the repository; it
+  does not invent a founder story, location, or team roster.
+- Contact and abuse reports use the validated public contact form. No direct
+  contact email or response-time commitment is published.
+- The Developers page documents registered routes only. Its REST examples use
+  `POST /api/v1/transactional/messages`; no batch or suppression route is
+  claimed. The public API base follows `NEXT_PUBLIC_SITE_URL`.
+- SMTP submission is enabled only where configured. The public page does not
+  invent a public SMTP hostname.
+- Provide counsel-approved legal policies and a confirmed billing/activation
+  process before publishing those details. The site does not fabricate either.
 
 ## Contact endpoint and migration
 

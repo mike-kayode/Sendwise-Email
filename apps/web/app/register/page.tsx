@@ -97,9 +97,6 @@ export default function RegisterPage() {
               <p className="small auth-password-hint" id="register-password-hint">Use at least 10 characters.</p>
               {form.formState.errors.password && <p className="form-error">{form.formState.errors.password.message}</p>}
             </div>
-            <p className="small auth-terms">
-              By creating an account, you agree to the <Link href="/legal/terms">Terms</Link> and <Link href="/legal/privacy">Privacy policy</Link>.
-            </p>
             <button type="submit" className="btn btn-ink auth-submit" disabled={form.formState.isSubmitting}>
               {form.formState.isSubmitting ? "Creating workspace..." : "Create account"}
             </button>

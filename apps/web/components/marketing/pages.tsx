@@ -20,25 +20,25 @@ import {
   Section,
   Wrap,
 } from "@/components/marketing/primitives";
-import { legalDocuments, legalTextPlaceholder, type LegalSlug } from "@/content/legal/documents";
-import { plans, pricingFAQs, planComparison, type BillingPeriod } from "@/lib/marketing/pricing";
+import { plans, pricingFAQs, planComparison } from "@/lib/marketing/pricing";
 import { ContactForm } from "@/components/marketing/contact-form";
-import { LegalTabs } from "@/components/marketing/legal-tabs";
 import { PricingExperience } from "@/components/marketing/pricing-interaction";
+
+const API_BASE_URL = `${(process.env.NEXT_PUBLIC_SITE_URL || "https://campaign.pipsleague.com").replace(/\/+$/, "")}/api/v1`;
 
 const homeExamples: CodeExample[] = [
   {
     label: "cURL",
     code: [
-      "curl https://sendwise.ng/api/v1/transactional/send \\",
+      `curl ${API_BASE_URL}/transactional/messages \\`,
       '  -H "Authorization: Bearer $SENDWISE_API_KEY" \\',
       '  -H "Content-Type: application/json" \\',
       "  -d '{",
       '    "from": "Acme <hello@yourdomain.com>",',
       '    "to": ["ada@example.com"],',
       '    "subject": "Your verification code",',
-      '    "template_id": "verify-email",',
-      '    "variables": { "code": "482915" }',
+      '    "text": "Your verification code is 482915.",',
+      '    "html": "<p>Your verification code is 482915.</p>"',
       "  }'",
     ].join("\n"),
   },
@@ -46,7 +46,7 @@ const homeExamples: CodeExample[] = [
     label: "Node",
     code: [
       "const res = await fetch(",
-      '  "https://sendwise.ng/api/v1/transactional/send",',
+      `  "${API_BASE_URL}/transactional/messages",`,
       "  {",
       '    method: "POST",',
       "    headers: {",
@@ -57,8 +57,8 @@ const homeExamples: CodeExample[] = [
       '      from: "Acme <hello@yourdomain.com>",',
       '      to: ["ada@example.com"],',
       '      subject: "Your verification code",',
-      '      template_id: "verify-email",',
-      '      variables: { code: "482915" },',
+      '      text: "Your verification code is 482915.",',
+      '      html: "<p>Your verification code is 482915.</p>",',
       "    }),",
       "  }",
       ");",
@@ -70,14 +70,14 @@ const homeExamples: CodeExample[] = [
       "import os, requests",
       "",
       "requests.post(",
-      '    "https://sendwise.ng/api/v1/transactional/send",',
+      `    "${API_BASE_URL}/transactional/messages",`,
       '    headers={"Authorization": "Bearer " + os.environ["SENDWISE_API_KEY"]},',
       "    json={",
       '        "from": "Acme <hello@yourdomain.com>",',
       '        "to": ["ada@example.com"],',
       '        "subject": "Your verification code",',
-      '        "template_id": "verify-email",',
-      '        "variables": {"code": "482915"},',
+      '        "text": "Your verification code is 482915.",',
+      '        "html": "<p>Your verification code is 482915.</p>"',
       "    },",
       ")",
     ].join("\n"),
@@ -85,7 +85,7 @@ const homeExamples: CodeExample[] = [
   {
     label: "PHP",
     code: [
-      '$ch = curl_init("https://sendwise.ng/api/v1/transactional/send");',
+      `$ch = curl_init("${API_BASE_URL}/transactional/messages");`,
       "curl_setopt_array($ch, [",
       "  CURLOPT_POST => true,",
       "  CURLOPT_HTTPHEADER => [",
@@ -96,21 +96,11 @@ const homeExamples: CodeExample[] = [
       '    "from" => "Acme <hello@yourdomain.com>",',
       '    "to" => ["ada@example.com"],',
       '    "subject" => "Your verification code",',
-      '    "template_id" => "verify-email",',
-      '    "variables" => ["code" => "482915"],',
+      '    "text" => "Your verification code is 482915.",',
+      '    "html" => "<p>Your verification code is 482915.</p>",',
       "  ]),",
       "]);",
       "curl_exec($ch);",
-    ].join("\n"),
-  },
-  {
-    label: "SMTP",
-    code: [
-      "SMTP_HOST=smtp.sendwise.ng",
-      "SMTP_PORT=587",
-      "SMTP_USERNAME=your_api_username",
-      "SMTP_PASSWORD=your_api_password",
-      "SMTP_ENCRYPTION=tls",
     ].join("\n"),
   },
 ];
@@ -118,10 +108,10 @@ const homeExamples: CodeExample[] = [
 const developerExamples: CodeExample[] = [
   {
     label: "Send",
-    file: "POST /api/v1/transactional/send",
+    file: "POST /api/v1/transactional/messages",
     note: "Use a verified sender address on a domain that is enabled for transactional email.",
     code: [
-      "curl https://sendwise.ng/api/v1/transactional/send \\",
+      `curl ${API_BASE_URL}/transactional/messages \\`,
       '  -H "Authorization: Bearer $SENDWISE_API_KEY" \\',
       '  -H "Idempotency-Key: order-1042-receipt" \\',
       '  -H "Content-Type: application/json" \\',
@@ -129,21 +119,9 @@ const developerExamples: CodeExample[] = [
       '    "from": "Acme <billing@yourdomain.com>",',
       '    "to": ["ada@example.com"],',
       '    "subject": "Your receipt",',
-      '    "template_id": "payment-receipt",',
-      '    "variables": { "amount": "₦12,500", "order": "1042" }',
+      '    "text": "Your receipt for order 1042 is ready.",',
+      '    "html": "<p>Your receipt for order 1042 is ready.</p>"',
       "  }'",
-    ].join("\n"),
-  },
-  {
-    label: "SMTP",
-    file: "SMTP settings",
-    note: "Works with Nodemailer, Laravel, Django, WordPress plugins and anything else that supports SMTP.",
-    code: [
-      "SMTP_HOST=smtp.sendwise.ng",
-      "SMTP_PORT=587",
-      "SMTP_USERNAME=your_api_username",
-      "SMTP_PASSWORD=your_api_password",
-      "SMTP_ENCRYPTION=tls",
     ].join("\n"),
   },
   {
@@ -291,7 +269,7 @@ export function HomePage() {
             "@context": "https://schema.org",
             "@type": "Organization",
             name: "Sendwise",
-            url: process.env.NEXT_PUBLIC_SITE_URL || "https://sendwise.ng",
+            url: process.env.NEXT_PUBLIC_SITE_URL || "https://campaign.pipsleague.com",
             description: "Email infrastructure for campaigns and application email.",
           }),
         }}
@@ -627,11 +605,11 @@ export function DevelopersPage() {
               <thead><tr><th>Method</th><th>Path</th><th>Purpose</th></tr></thead>
               <tbody>
                 <tr><td><Badge>POST</Badge></td><td className="mono">/api/v1/transactional/messages</td><td>Send one message, with HTML, text or a template</td></tr>
-                <tr><td><Badge>POST</Badge></td><td className="mono">/api/v1/transactional/messages/batch</td><td>Send up to 100 messages in one request</td></tr>
-                <tr><td><Badge tone="soon">GET</Badge></td><td className="mono">/api/v1/transactional/messages/{"{id}"}</td><td>Status and event timeline for a message</td></tr>
-                <tr><td><Badge tone="soon">GET</Badge></td><td className="mono">/api/v1/transactional/messages</td><td>Search and page through your email logs</td></tr>
-                <tr><td><Badge>POST</Badge></td><td className="mono">/api/v1/transactional/templates</td><td>Create and version reusable templates</td></tr>
-                <tr><td><Badge>POST</Badge></td><td className="mono">/api/v1/transactional/suppressions</td><td>Add an address to the suppression list</td></tr>
+                <tr><td><Badge>GET</Badge></td><td className="mono">/api/v1/transactional/messages</td><td>List messages for the authenticated API key</td></tr>
+                <tr><td><Badge>GET</Badge></td><td className="mono">/api/v1/transactional/messages/{"{id}"}</td><td>Read a message and its delivery events</td></tr>
+                <tr><td><Badge>GET</Badge></td><td className="mono">/api/v1/transactional/templates</td><td>List workspace templates (user session)</td></tr>
+                <tr><td><Badge>POST</Badge></td><td className="mono">/api/v1/transactional/templates</td><td>Create a workspace template (user session)</td></tr>
+                <tr><td><Badge>GET, PATCH, DELETE</Badge></td><td className="mono">/api/v1/transactional/templates/{"{id}"}</td><td>Read, update, or delete a workspace template (user session)</td></tr>
                 <tr><td><Badge>POST</Badge></td><td className="mono">/api/v1/transactional/webhooks</td><td>Register an endpoint for delivery events</td></tr>
               </tbody>
             </table>
@@ -654,16 +632,18 @@ export function DevelopersPage() {
       </Section>
       <Section dark>
         <Wrap>
-          <div className="section-intro"><span className="eyebrow eyebrow-dark">Libraries</span><h2 className="title">SDKs and integrations.</h2></div>
-          <Grid columns={4}>
+          <div className="section-intro">
+            <span className="eyebrow eyebrow-dark">SDKs and integrations</span>
+            <h2 className="title">Use your preferred client.</h2>
+            <p className="lead">Sendwise does not currently publish official SDK packages. The REST API works with standard HTTP clients; SMTP submission is available to enabled workspaces.</p>
+          </div>
+          <Grid columns={2}>
             {[
-              ["REST API", "Works from any language with an HTTP client.", true],
-              ["SMTP", "Drop-in for frameworks and plugins that speak SMTP.", true],
-              ["Node SDK", "Typed client for JavaScript and TypeScript.", false],
-              ["Python and PHP", "Official libraries for the most requested languages.", false],
-            ].map(([title, description, live]) => (
+              ["REST API", "Use an HTTP client in your language. The examples above call the implemented message endpoint.", "Live"],
+              ["SMTP submission", "Use an SMTP client with the host and connection details provided for your deployment.", "Available when enabled"],
+            ].map(([title, description, status]) => (
               <Card dark key={String(title)}>
-                <Badge tone={live ? "ok" : "soon"}>{live ? "Live" : "Coming soon"}</Badge>
+                <Badge>{status}</Badge>
                 <h3 className="h3 library-title">{title}</h3>
                 <p className="small">{description}</p>
               </Card>
@@ -708,23 +688,29 @@ export function AboutPage() {
       <PageHero
         eyebrow="About Sendwise"
         title="Email infrastructure you can understand."
-        description="Sendwise exists so businesses can send email from their own domain, see exactly what happened to every message, and keep their sender reputation healthy."
+        description="Sendwise brings campaign tools and application email delivery together, with domain verification and message status visible in the product."
       />
       <Section>
         <Wrap className="split">
           <div>
-            <span className="eyebrow">Our story</span>
-            <h2 className="title">Why we built it.</h2>
-            <p className="lead">[YOUR STORY: the problem you saw sending email in your market, and what you decided to build.]</p>
-            <p className="lead">[YOUR MISSION: one or two sentences on what Sendwise is for.]</p>
+            <span className="eyebrow">The product</span>
+            <h2 className="title">One workspace for two kinds of email.</h2>
+            <p className="lead">
+              Marketing teams can manage contacts and campaigns, while application teams can submit transactional messages
+              through the REST API or authenticated SMTP. Both use sending domains configured in the workspace.
+            </p>
+            <p className="lead">
+              Domain setup shows the required DNS records and their verification results. Delivery views expose message
+              status without requiring a separate email provider dashboard.
+            </p>
           </div>
           <Card className="glance-card">
             <h3 className="h3">At a glance</h3>
             {[
-              ["Product", "Campaigns and transactional email"],
-              ["Sending", "From your own verified domain"],
-              ["Integration", "REST API and SMTP"],
-              ["Based in", "[CITY, COUNTRY]"],
+              ["Campaigns", "Create and send marketing campaigns"],
+              ["Transactional", "Submit messages through REST API or SMTP"],
+              ["Domain setup", "SPF and DKIM verification; DMARC is advisory"],
+              ["Message status", "Review sending and delivery events"],
             ].map(([label, value]) => <div className="row" key={label}><span className="small">{label}</span><strong>{value}</strong></div>)}
           </Card>
         </Wrap>
@@ -734,27 +720,11 @@ export function AboutPage() {
           <div className="section-intro"><span className="eyebrow">How we work</span><h2 className="title">Principles behind the product.</h2></div>
           <Grid>
             {[
-              ["Reputation first", "We would rather slow a risky send than damage your domain. Limits, warm-up and suppression exist to protect you."],
-              ["No black boxes", "When a record fails or a message bounces, you see the reason and the evidence, not a vague error."],
-              ["Respect for recipients", "Every campaign carries your company details and a working unsubscribe link, because trust travels with the email."],
-              ["Your data stays yours", "Your contacts and content belong to your workspace, with clear controls for export and deletion."],
-              ["Built for developers", "A clean API, standard SMTP and honest documentation, so integration takes hours rather than weeks."],
-              ["Built for the people sending", "Marketers get a visual editor. Developers get an API. Both work from the same verified domain."],
+              ["Domain verification", "The product displays SPF and DKIM setup records and reports DNS verification results."],
+              ["Separate sending paths", "Campaign delivery and transactional submission use distinct workflows."],
+              ["Developer access", "Transactional messages can be submitted through the REST API or authenticated SMTP when enabled."],
+              ["Delivery visibility", "Message and campaign status are available in the workspace for operational follow-up."],
             ].map(([title, description]) => <FeatureCard key={title} title={title} description={description} />)}
-          </Grid>
-        </Wrap>
-      </Section>
-      <Section>
-        <Wrap>
-          <div className="section-intro"><span className="eyebrow">Team</span><h2 className="title">The people behind Sendwise.</h2></div>
-          <Grid columns={4}>
-            {Array.from({ length: 4 }, (_, index) => (
-              <Card key={index}>
-                <div className="team-placeholder" aria-hidden="true" />
-                <h3 className="h3">[NAME]</h3>
-                <p className="small">[ROLE]</p>
-              </Card>
-            ))}
           </Grid>
         </Wrap>
       </Section>
@@ -771,57 +741,15 @@ export function ContactPage() {
           <div>
             <span className="eyebrow">Contact</span>
             <h1 className="display">Talk to the Sendwise team.</h1>
-            <p className="lead">Questions about plans, migrating your sending, or getting a domain verified? Send us a note and we will reply by email.</p>
-            <div className="contact-info">
-              <Card><p className="small contact-label">Sales and general</p><p className="small">[EMAIL ADDRESS]</p></Card>
-              <Card><p className="small contact-label">Support</p><p className="small">[SUPPORT EMAIL] · [RESPONSE TIME]</p></Card>
-              <Card><p className="small contact-label">Report abuse</p><p className="small">[ABUSE EMAIL]</p></Card>
-            </div>
+            <p className="lead">
+              Use the form for plan questions, migration, domain verification, transactional email, or abuse reports.
+              Choose the closest topic and include the details needed to understand your request.
+            </p>
+            <p className="small">The form confirms when your message has been recorded. A response-time commitment is not published.</p>
           </div>
           <ContactForm />
         </Wrap>
       </Section>
     </>
   );
-}
-
-export function LegalPage({ slug }: { slug: LegalSlug }) {
-  const document = legalDocuments[slug];
-  return (
-    <>
-      <PageHero
-        eyebrow="Legal"
-        title="Policies and terms."
-        description="Last updated: [DATE]"
-      />
-      <Section className="legal-section">
-        <Wrap className="legal-wrap">
-          <LegalTabs activeSlug={slug} />
-          <article className="card legal-card" role="tabpanel" id="legal-document-panel" aria-labelledby={`legal-tab-${slug}`}>
-            <h2 className="title">{document.title}</h2>
-            <p className="small legal-intro">{document.intro}</p>
-            {document.sections.map((heading) => (
-              <section className="legal-subsection" key={heading}>
-                <h3 className="h3">{heading}</h3>
-                <p className="small legal-copy">{legalTextPlaceholder}</p>
-              </section>
-            ))}
-          </article>
-          <p className="small legal-contact">Questions about these documents? <Link href="/contact">Contact us</Link>.</p>
-        </Wrap>
-      </Section>
-    </>
-  );
-}
-
-export function getLegalTitle(slug: LegalSlug) {
-  return legalDocuments[slug].title;
-}
-
-export function getLegalSlugs(): LegalSlug[] {
-  return Object.keys(legalDocuments) as LegalSlug[];
-}
-
-export function getBillingPeriodLabel(period: BillingPeriod): string {
-  return period === "Monthly" ? "/month" : "/month, billed yearly";
 }
