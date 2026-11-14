@@ -63,7 +63,7 @@ test("mail worker retries queued verification after the SMTP relay recovers", as
     await page.getByPlaceholder("you@example.com").fill(email);
     await page.getByPlaceholder("Workspace name").fill("Relay Recovery Workspace");
     await page.getByPlaceholder("••••••••••").fill("local-relay-recovery-2026!");
-    await page.getByRole("button", { name: "Create workspace" }).click();
+    await page.getByRole("button", { name: "Create account" }).click();
 
     await expect(page).toHaveURL(/\/auth\/verify\?email=/);
     await expect(page.getByText(/Your verification email is queued/)).toBeVisible();

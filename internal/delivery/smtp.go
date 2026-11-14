@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -76,6 +77,12 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 		}
 	}
 
+	if msg.RequestDSN {
+		if supported, _ := client.Extension("DSN"); !supported {
+			return nil, &PermanentError{Err: errors.New("smtp server does not support requested delivery status notifications")}
+		}
+	}
+
 	if t.Username != "" {
 		auth := smtp.PlainAuth("", t.Username, t.Password, t.Host)
 		if err := client.Auth(auth); err != nil {
@@ -101,7 +108,7 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 	if err != nil {
 		return nil, classifySMTP(fmt.Errorf("smtp rcpt to: invalid recipient address: %w", err))
 	}
-	if err := client.Rcpt(envelopeTo); err != nil {
+	if err := sendSMTPRecipient(client, envelopeTo, msg.RequestDSN); err != nil {
 		return nil, classifySMTP(fmt.Errorf("smtp rcpt to: %w", err))
 	}
 
@@ -123,6 +130,21 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 
 	messageID := formatMessageID(msg.ID)
 	return &Result{MessageID: messageID, Accepted: true}, nil
+}
+
+func sendSMTPRecipient(client *smtp.Client, recipient string, requestDSN bool) error {
+	if !requestDSN {
+		return client.Rcpt(recipient)
+	}
+
+	id, err := client.Text.Cmd("RCPT TO:<%s> NOTIFY=SUCCESS,FAILURE,DELAY", recipient)
+	if err != nil {
+		return err
+	}
+	client.Text.StartResponse(id)
+	defer client.Text.EndResponse(id)
+	_, _, err = client.Text.ReadResponse(250)
+	return err
 }
 
 func marshalMessage(msg Message) ([]byte, error) {
@@ -158,6 +180,73 @@ func writeMessage(writer interface{ Write([]byte) (int, error) }, msg Message) e
 	headers["Message-ID"] = formatMessageID(msg.ID)
 	headers["MIME-Version"] = "1.0"
 	headers["Auto-Submitted"] = "auto-generated"
+	if len(msg.Attachments) == 0 {
+		mw := multipart.NewWriter(writer)
+		headers["Content-Type"] = fmt.Sprintf("multipart/alternative; boundary=%q", mw.Boundary())
+		if err := writeHeaders(writer, headers); err != nil {
+			return err
+		}
+		if err := writeAlternative(mw, msg); err != nil {
+			return err
+		}
+		return mw.Close()
+	}
+
+	mixed := multipart.NewWriter(writer)
+	headers["Content-Type"] = fmt.Sprintf("multipart/mixed; boundary=%q", mixed.Boundary())
+	if err := writeHeaders(writer, headers); err != nil {
+		return err
+	}
+	var alternativeBody bytes.Buffer
+	alternative := multipart.NewWriter(&alternativeBody)
+	if err := writeAlternative(alternative, msg); err != nil {
+		return err
+	}
+	if err := alternative.Close(); err != nil {
+		return fmt.Errorf("close message alternative: %w", err)
+	}
+	alternativePart, err := mixed.CreatePart(textproto.MIMEHeader{
+		"Content-Type": {fmt.Sprintf("multipart/alternative; boundary=%q", alternative.Boundary())},
+	})
+	if err != nil {
+		return fmt.Errorf("create message body part: %w", err)
+	}
+	if _, err := alternativePart.Write(alternativeBody.Bytes()); err != nil {
+		return fmt.Errorf("write message alternative: %w", err)
+	}
+
+	for _, attachment := range msg.Attachments {
+		contentType := strings.TrimSpace(attachment.ContentType)
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		if _, _, err := mime.ParseMediaType(contentType); err != nil {
+			return fmt.Errorf("invalid attachment content type: %w", err)
+		}
+		disposition := mime.FormatMediaType("attachment", map[string]string{"filename": attachment.Filename})
+		part, err := mixed.CreatePart(textproto.MIMEHeader{
+			"Content-Type":              {contentType},
+			"Content-Disposition":       {disposition},
+			"Content-Transfer-Encoding": {"base64"},
+		})
+		if err != nil {
+			return fmt.Errorf("create attachment part: %w", err)
+		}
+		encoded := base64.StdEncoding.EncodeToString(attachment.Content)
+		for len(encoded) > 76 {
+			if _, err := io.WriteString(part, encoded[:76]+"\r\n"); err != nil {
+				return fmt.Errorf("write attachment: %w", err)
+			}
+			encoded = encoded[76:]
+		}
+		if _, err := io.WriteString(part, encoded+"\r\n"); err != nil {
+			return fmt.Errorf("write attachment: %w", err)
+		}
+	}
+	return mixed.Close()
+}
+
+func writeHeaders(writer interface{ Write([]byte) (int, error) }, headers map[string]string) error {
 
 	keys := make([]string, 0, len(headers))
 	for k := range headers {
@@ -166,23 +255,21 @@ func writeMessage(writer interface{ Write([]byte) (int, error) }, msg Message) e
 	sort.Strings(keys)
 	for _, k := range keys {
 		if _, err := fmt.Fprintf(writer, "%s: %s\r\n", k, headers[k]); err != nil {
-			return err
+			return fmt.Errorf("write message header %q: %w", k, err)
 		}
 	}
+	_, err := io.WriteString(writer, "\r\n")
+	return err
+}
 
-	mw := multipart.NewWriter(writer)
-	if _, err := fmt.Fprintf(writer, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", mw.Boundary()); err != nil {
-		return err
-	}
-
+func writeAlternative(mw *multipart.Writer, msg Message) error {
 	if err := writePart(mw, "text/plain; charset=utf-8", msg.Text); err != nil {
 		return err
 	}
 	if err := writePart(mw, "text/html; charset=utf-8", msg.HTML); err != nil {
 		return err
 	}
-
-	return mw.Close()
+	return nil
 }
 
 func writePart(mw *multipart.Writer, contentType, body string) error {

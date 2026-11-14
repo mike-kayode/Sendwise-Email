@@ -33,6 +33,30 @@ func TestLoadDevelopmentDefaults(t *testing.T) {
 	if cfg.RecipientDomainRates["gmail.com"] != 0 || cfg.RecipientDomainDefault != 10 {
 		t.Fatalf("unexpected recipient rate defaults: %+v default=%d", cfg.RecipientDomainRates, cfg.RecipientDomainDefault)
 	}
+	if cfg.TransactionalEnabled || cfg.TransactionalSMTPEnabled {
+		t.Fatal("transactional delivery must be disabled by default")
+	}
+	if cfg.ContactNotifyEmail != "" {
+		t.Fatalf("ContactNotifyEmail = %q, want disabled by default", cfg.ContactNotifyEmail)
+	}
+}
+
+func TestLoadContactNotificationAddress(t *testing.T) {
+	cfg, err := load(configLookup(map[string]string{"CONTACT_NOTIFY_EMAIL": "support@example.test"}))
+	if err != nil {
+		t.Fatalf("load contact notification address: %v", err)
+	}
+	if cfg.ContactNotifyEmail != "support@example.test" {
+		t.Fatalf("ContactNotifyEmail = %q", cfg.ContactNotifyEmail)
+	}
+
+	if _, err := load(configLookup(map[string]string{"CONTACT_NOTIFY_EMAIL": "not-an-address"})); err == nil {
+		t.Fatal("load accepted invalid CONTACT_NOTIFY_EMAIL")
+	}
+	if cfg.TransactionalRetryHours != 24 || cfg.TransactionalMaxMessageBytes != 10<<20 ||
+		cfg.TransactionalMaxBounceRate != 0.05 || cfg.TransactionalMaxComplaintRate != 0.003 {
+		t.Fatalf("unexpected transactional defaults: %+v", cfg)
+	}
 }
 
 func TestLoadRejectsMalformedEnvironmentValues(t *testing.T) {
@@ -47,6 +71,8 @@ func TestLoadRejectsMalformedEnvironmentValues(t *testing.T) {
 		{name: "sending rate integer", key: "SENDING_RATE_PER_SECOND", value: "fast"},
 		{name: "delivery attempts integer", key: "MAX_DELIVERY_ATTEMPTS", value: "many"},
 		{name: "scheduler duration", key: "SCHEDULER_INTERVAL", value: "often"},
+		{name: "transactional enabled boolean", key: "TRANSACTIONAL_ENABLED", value: "sometimes"},
+		{name: "transactional byte limit integer", key: "TRANSACTIONAL_MAX_MESSAGE_BYTES", value: "large"},
 	}
 
 	for _, test := range tests {
@@ -57,6 +83,36 @@ func TestLoadRejectsMalformedEnvironmentValues(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), test.key) {
 				t.Fatalf("error %q does not identify %s", err, test.key)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsUnsafeTransactionalConfiguration(t *testing.T) {
+	tests := []struct {
+		name   string
+		values map[string]string
+	}{
+		{
+			name:   "smtp cannot run while product is disabled",
+			values: map[string]string{"TRANSACTIONAL_SMTP_ENABLED": "true"},
+		},
+		{
+			name: "smtp requires an advertised hostname",
+			values: map[string]string{
+				"TRANSACTIONAL_ENABLED":      "true",
+				"TRANSACTIONAL_SMTP_ENABLED": "true",
+			},
+		},
+		{
+			name:   "retry duration has a finite bound",
+			values: map[string]string{"TRANSACTIONAL_MAX_RETRY_HOURS": "169"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := load(configLookup(test.values)); err == nil {
+				t.Fatal("load accepted unsafe transactional configuration")
 			}
 		})
 	}

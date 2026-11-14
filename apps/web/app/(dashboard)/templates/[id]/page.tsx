@@ -4,14 +4,17 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Save, Trash2 } from "lucide-react";
+import { ArrowLeft, Monitor, Save, Smartphone, Trash2 } from "lucide-react";
 import { GrapesEmailEditor, type GrapesEmailDesign } from "@/components/grapes-email-editor";
+import { ComplianceFooterEditor, defaultComplianceFooter, type ComplianceFooterSetting } from "@/components/compliance-footer-editor";
+import { EmailPreview } from "@/components/email-preview";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input, Select, Textarea } from "@/components/ui/input";
 import { apiFetch, type SenderIdentity } from "@/lib/auth";
 import { blocksToHtml, type EmailDesignBlock } from "@/lib/email-html-importer";
+import { hasComplianceContent, rehostExternalImages, rewriteAssetReferences } from "@/lib/email-assets";
 import { useToast } from "@/components/ui/use-toast";
 
 type Template = {
@@ -53,6 +56,7 @@ function readDesign(template: Template) {
   const blocks = Array.isArray(design.blocks) ? design.blocks as EmailDesignBlock[] : [];
   const html = typeof design.html === "string" ? design.html : blocksToHtml(blocks);
   const project = design.editor_project;
+  const htmlMode: "original" | "visual" = design.html_mode === "original" ? "original" : "visual";
   const theme = {
     ...defaultTheme,
     ...(isRecord(design.theme) ? design.theme : {}),
@@ -61,9 +65,14 @@ function readDesign(template: Template) {
   return {
     html,
     project,
+    htmlMode,
     mode: template.mode ?? (design.mode === "plain" ? "plain" : "html"),
     textContent: template.text_content ?? (typeof design.text_content === "string" ? design.text_content : ""),
     theme,
+    complianceFooter: {
+      ...defaultComplianceFooter,
+      ...(isRecord(design.compliance_footer) ? design.compliance_footer : {}),
+    } as ComplianceFooterSetting,
   };
 }
 
@@ -76,9 +85,11 @@ export default function TemplateEditorPage() {
   const [category, setCategory] = useState("general");
   const [html, setHtml] = useState("");
   const [editorProject, setEditorProject] = useState<unknown>(null);
+  const [htmlMode, setHtmlMode] = useState<"visual" | "original">("visual");
   const [mode, setMode] = useState<"plain" | "html">("html");
   const [textContent, setTextContent] = useState("");
   const [theme, setTheme] = useState(defaultTheme);
+  const [complianceFooter, setComplianceFooter] = useState<ComplianceFooterSetting>(defaultComplianceFooter);
   const [senderIdentityID, setSenderIdentityID] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -87,6 +98,12 @@ export default function TemplateEditorPage() {
   const [testStatus, setTestStatus] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [imageWarnings, setImageWarnings] = useState<string[]>([]);
+  const [assetReplacements, setAssetReplacements] = useState<Record<string, string>>({});
+  const [previewHTML, setPreviewHTML] = useState("");
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewViewport, setPreviewViewport] = useState<"desktop" | "mobile">("desktop");
 
   const templateQuery = useQuery({
     queryKey: ["template", id],
@@ -105,9 +122,11 @@ export default function TemplateEditorPage() {
     const design = readDesign(template);
     setHtml(design.html);
     setEditorProject(design.project);
+    setHtmlMode(design.htmlMode);
     setMode(design.mode);
     setTextContent(design.textContent);
     setTheme(design.theme);
+    setComplianceFooter(design.complianceFooter);
     setSenderIdentityID(template.sender_identity_id ?? "");
     setDirty(false);
   }, [templateQuery.data]);
@@ -115,6 +134,8 @@ export default function TemplateEditorPage() {
   const handleEditorChange = (next: GrapesEmailDesign, changed: boolean) => {
     setEditorProject(next.project);
     setHtml(next.html);
+    setHtmlMode(next.htmlMode);
+    setImageWarnings(next.imageWarnings);
     if (changed) setDirty(true);
   };
 
@@ -135,6 +156,12 @@ export default function TemplateEditorPage() {
     setSaving(true);
     setError(null);
     try {
+      const rehosted = await rehostExternalImages(html);
+      const project = rewriteAssetReferences(editorProject, rehosted.replacements);
+      setAssetReplacements(rehosted.replacements);
+      setHtml(rehosted.html);
+      setEditorProject(project);
+      setImageWarnings(rehosted.warnings);
       await apiFetch<Template>(`/templates/${id}`, {
         method: "PATCH",
         body: JSON.stringify({
@@ -143,11 +170,13 @@ export default function TemplateEditorPage() {
           design: {
             version: 2,
             editor: "grapesjs",
-            editor_project: editorProject,
-            html,
+            editor_project: project,
+            html: rehosted.html,
+            html_mode: htmlMode,
             mode,
             text_content: textContent,
             theme,
+            compliance_footer: complianceFooter,
           },
           mode,
           text_content: textContent,
@@ -192,7 +221,46 @@ export default function TemplateEditorPage() {
     if (!dirty || !templateQuery.data || saving) return;
     const timeout = window.setTimeout(() => void save(), 1800);
     return () => window.clearTimeout(timeout);
-  }, [dirty, html, editorProject, mode, textContent, theme, name, category, senderIdentityID, saving, templateQuery.data]);
+  }, [dirty, html, htmlMode, editorProject, mode, textContent, theme, complianceFooter, name, category, senderIdentityID, saving, templateQuery.data]);
+
+  useEffect(() => {
+    if (mode !== "html") {
+      setPreviewHTML("");
+      return;
+    }
+    let active = true;
+    setPreviewLoading(true);
+    const timeout = window.setTimeout(() => {
+      void apiFetch<{ html: string }>("/templates/preview", {
+        method: "POST",
+        body: JSON.stringify({
+          design: {
+            version: 2,
+            mode,
+            html_mode: htmlMode,
+            html,
+            text_content: textContent,
+            theme,
+            compliance_footer: complianceFooter,
+            editor_project: editorProject,
+          },
+        }),
+      }).then((preview) => {
+        if (!active) return;
+        setPreviewHTML(preview.html);
+        setPreviewError(null);
+      }).catch((previewRequestError: unknown) => {
+        if (!active) return;
+        setPreviewError(previewRequestError instanceof Error ? previewRequestError.message : "The sanitized preview could not be rendered.");
+      }).finally(() => {
+        if (active) setPreviewLoading(false);
+      });
+    }, 250);
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+    };
+  }, [mode, htmlMode, html, textContent, theme, complianceFooter, editorProject]);
 
   const remove = async () => {
     if (!templateQuery.data || deleting) return;
@@ -245,6 +313,19 @@ export default function TemplateEditorPage() {
         }
       />
       {error ? <p role="alert" className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800">{error}</p> : null}
+      {imageWarnings.length > 0 ? (
+        <div role="alert" className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+          <p className="font-medium">These image sources could not be copied to Sendwise. Their source values remain in the HTML; review or replace them before sending:</p>
+          <ul className="mt-1 list-inside list-disc break-all">
+            {imageWarnings.map((url) => <li key={url}>{url}</li>)}
+          </ul>
+        </div>
+      ) : null}
+      {hasComplianceContent(html) ? (
+        <p role="status" className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+          The template appears to include its own unsubscribe or address content. Sendwise will add its required compliance footer after the template.
+        </p>
+      ) : null}
       <Card className="mb-5">
         <CardContent className="grid gap-4 p-5 sm:grid-cols-2">
           <label className="text-sm font-medium text-slate-700">
@@ -281,13 +362,44 @@ export default function TemplateEditorPage() {
           </label>
         </CardContent>
       </Card>
+      <ComplianceFooterEditor value={complianceFooter} onChange={(value) => { setComplianceFooter(value); setDirty(true); }} />
       {mode === "plain" ? (
         <label className="mb-5 block text-sm font-medium text-slate-700">
           Plain-text message
           <Textarea aria-label="Plain-text message" rows={12} className="mt-1 font-mono" value={textContent} onChange={(event) => { setTextContent(event.target.value); setDirty(true); }} />
         </label>
       ) : (
-        <GrapesEmailEditor project={editorProject} html={html} onChange={handleEditorChange} />
+        <>
+          <GrapesEmailEditor
+            project={editorProject}
+            html={html}
+            htmlMode={htmlMode}
+            imageWarnings={imageWarnings}
+            assetReplacements={assetReplacements}
+            onChange={handleEditorChange}
+          />
+          <Card className="mt-5">
+            <CardContent className="p-5">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold text-slate-900">Sanitized send preview</h2>
+                  <p className="text-xs text-slate-500">Rendered by the same server pipeline used for sending.</p>
+                </div>
+                <div className="flex gap-2" role="group" aria-label="Preview viewport">
+                  <Button type="button" variant={previewViewport === "desktop" ? "primary" : "secondary"} onClick={() => setPreviewViewport("desktop")}>
+                    <Monitor className="h-4 w-4" /> Desktop
+                  </Button>
+                  <Button type="button" variant={previewViewport === "mobile" ? "primary" : "secondary"} onClick={() => setPreviewViewport("mobile")}>
+                    <Smartphone className="h-4 w-4" /> Mobile
+                  </Button>
+                </div>
+              </div>
+              {previewError ? <p role="alert" className="mb-3 text-sm text-rose-700">{previewError}</p> : null}
+              {previewLoading && !previewHTML ? <p role="status" className="mb-3 text-sm text-slate-500">Rendering preview…</p> : null}
+              {previewHTML ? <EmailPreview sanitizedDocument={previewHTML} theme={theme} viewport={previewViewport} /> : null}
+            </CardContent>
+          </Card>
+        </>
       )}
       <Card className="mt-5">
         <CardContent className="flex flex-col gap-3 p-5 sm:flex-row sm:items-end">

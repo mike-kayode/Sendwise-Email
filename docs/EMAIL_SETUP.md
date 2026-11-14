@@ -21,6 +21,25 @@ PLATFORM_FROM_EMAIL=noreply@example.com
 SMTP_FROM=hello@example.com
 ```
 
+### Transactional client submission
+
+The authenticated Sendwise submission listener is separate from the Stalwart
+relay. Enable it on both the API and worker with
+`TRANSACTIONAL_ENABLED=true` and `TRANSACTIONAL_SMTP_ENABLED=true`, and set
+`TRANSACTIONAL_SMTP_HOSTNAME`, `TRANSACTIONAL_SMTP_TLS_CERT`, and
+`TRANSACTIONAL_SMTP_TLS_KEY`. The listener requires TLS 1.2 or newer and offers
+STARTTLS and implicit TLS; the default local ports are 2587 and 2465 because
+Stalwart owns 587 and 465. Compose binds the Sendwise ports to loopback by
+default. Expose them only after configuring a valid certificate and firewall
+rules. API and worker settings must agree.
+
+Workspace owners create and revoke SMTP credentials from the Transactional
+dashboard. The generated password is shown only once. Clients authenticate
+with PLAIN only after TLS, use the generated username/password, and may send
+only from a verified, transactionally enabled workspace domain. Message size,
+recipient count, credential rate, and workspace quotas are enforced before
+queueing.
+
 `PLATFORM_SMTP_TLS_MODE` is `none`, `starttls`, or `tls`. `starttls` is the recommended
 mode on port 587; `tls` is for implicit TLS, commonly port 465. Production
 Identity does not fall back to `SMTP_ADDR`/Stalwart. Sender addresses must use
@@ -206,11 +225,13 @@ the webhook HMAC, verifies the VERP token against the persisted tenant-scoped
 mapping, and deduplicates the raw report before changing delivery or
 suppression state.
 
-**Collection from Stalwart is not yet configured.** No Stalwart event
-subscription or bounce-mailbox poller currently forwards real DSNs/ARFs to
-that endpoint. Until a collector is deployed and exercised end to end, the
-application does not automatically learn about downstream delivery outcomes.
-Do not treat the local parser/API tests as proof of bounce collection.
+The local Stalwart integration test provisions a loopback-only bounce mailbox,
+submits a message to a reserved `.invalid` recipient, retrieves Stalwart's real
+failure DSN over JMAP, and posts it to the signed feedback endpoint. It verifies
+the corresponding Postgres recipient and message become `bounced`. This is a
+local integration proof, not a production collector. No production Stalwart
+event subscription or bounce-mailbox poller currently forwards real DSNs/ARFs
+automatically, so production delivery outcomes are not yet collected.
 
 ## DNS and delivery limits
 
@@ -244,11 +265,34 @@ recipient for each run. The test reports SMTP acceptance, not inbox placement.
 
 The visual template editor stores GrapesJS project JSON alongside compiled
 HTML, allowing templates to be reopened for editing and rendered by the Go
-campaign delivery service. Imported HTML is parsed into editor components.
-Uploaded PNG, JPEG, and GIF files are stored in workspace-associated Postgres
-records. The public asset URL is served by Sendwise for use in email; uploads
-are limited to 8 MiB and 10000 by 10000 pixels. External image URLs are not
-emitted by the campaign renderer.
+campaign delivery service. Full HTML documents default to **Keep original
+HTML**, which preserves table-based layouts and provides a source editor.
+**Convert to editable blocks** is explicit and warns that layout may change;
+the editor shows the sanitized original and converted previews side by side.
+
+On import and save, external HTTP(S) images are copied into workspace-associated
+Sendwise assets and their `src` values are rewritten. The asset importer blocks
+private and link-local destinations, limits redirects, time, response size,
+and image type (PNG, JPEG, GIF, or WebP). If an image cannot be copied, the
+original URL remains in the HTML and the editor displays a warning; the
+renderer does not silently remove it. Direct user uploads are also stored in
+workspace-associated Postgres records, limited to 8 MiB and 10000 by 10000
+pixels.
+
+Original-HTML mode provides exact find-and-replace for text, links, image URLs,
+and color values without parsing the document. Template and campaign editors
+show desktop/mobile previews rendered by the same server pipeline used for
+sending.
+
+The Go renderer sanitizes both preview and send HTML, retains safe email table
+attributes, class rules, media queries, and safe MSO conditional comments. A
+full-document/fixed-width template is not wrapped in the block editor's padded
+shell. The same renderer adds one compliance footer after the template content
+and outside its tables. Its alignment, colors, and unsubscribe-button label
+are editable in the template/campaign editor; placement stays at the bottom.
+Unsubscribe is mandatory. A postal address is optional and appears only when
+provided in the sender profile. The editor warns when imported content appears
+to include its own unsubscribe or address information.
 
 Template test messages use the configured SMTP relay and app-managed DKIM key.
 The response describes SMTP acceptance only. A local Mailpit run is not proof

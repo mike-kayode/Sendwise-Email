@@ -20,6 +20,7 @@ var senderLocalPartPattern = regexp.MustCompile(`^[a-z0-9._+-]{1,64}$`)
 var (
 	errSenderDomainMissing     = errors.New("add this domain to the workspace before using the address")
 	errSenderDomainConflict    = errors.New("Domain already owned by another workspace.")
+	errSenderDomainDisabled    = errors.New("sending domain has been disabled by a platform administrator")
 	errSenderDomainUnverified  = errors.New("verify this sending domain before using the address")
 	errSenderIdentityMissing   = errors.New("sender identity does not belong to this workspace")
 	errSenderIdentityMismatch  = errors.New("campaign From address does not match the selected sender identity")
@@ -42,7 +43,7 @@ type senderIdentity struct {
 func (s *Server) listSenderIdentities(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.pool.Query(r.Context(), `
 		SELECT si.id, si.domain, si.local_part, si.display_name, si.reply_to,
-		       si.is_default, COALESCE(sd.status = 'verified' AND NOT sd.owner_conflict, false),
+		       si.is_default, COALESCE(sd.status = 'verified' AND NOT sd.owner_conflict AND sd.admin_disabled_at IS NULL, false),
 		       si.created_at, si.updated_at
 		FROM sender_identities si
 		LEFT JOIN sending_domains sd
@@ -306,6 +307,8 @@ func (s *Server) setDefaultSenderIdentity(w http.ResponseWriter, r *http.Request
 
 func (s *Server) writeSenderDomainError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, errSenderDomainDisabled):
+		httpx.Error(w, http.StatusConflict, "sending_domain_disabled", err.Error())
 	case errors.Is(err, errSenderDomainMissing),
 		errors.Is(err, errSenderDomainConflict),
 		errors.Is(err, errSenderDomainUnverified):
@@ -318,11 +321,11 @@ func (s *Server) writeSenderDomainError(w http.ResponseWriter, err error) {
 
 func (s *Server) loadVerifiedSenderIdentity(ctx context.Context, id, organizationID string) (*senderIdentity, error) {
 	var item senderIdentity
-	var domainFound, ownerConflict bool
+	var domainFound, ownerConflict, domainDisabled bool
 	err := s.pool.QueryRow(ctx, `
 		SELECT si.id, si.domain, si.local_part, si.display_name, si.reply_to,
 		       si.is_default, COALESCE(sd.status = 'verified', false), sd.id IS NOT NULL,
-		       COALESCE(sd.owner_conflict, false),
+		       COALESCE(sd.owner_conflict, false), COALESCE(sd.admin_disabled_at IS NOT NULL, false),
 		       si.created_at, si.updated_at
 		FROM sender_identities si
 		LEFT JOIN sending_domains sd
@@ -330,7 +333,7 @@ func (s *Server) loadVerifiedSenderIdentity(ctx context.Context, id, organizatio
 		WHERE si.id = $1 AND si.organization_id = $2
 	`, id, organizationID).Scan(
 		&item.ID, &item.Domain, &item.LocalPart, &item.DisplayName, &item.ReplyTo,
-		&item.IsDefault, &item.Verified, &domainFound, &ownerConflict, &item.CreatedAt, &item.UpdatedAt,
+		&item.IsDefault, &item.Verified, &domainFound, &ownerConflict, &domainDisabled, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errSenderIdentityMissing
@@ -341,6 +344,9 @@ func (s *Server) loadVerifiedSenderIdentity(ctx context.Context, id, organizatio
 	item.Email = item.LocalPart + "@" + item.Domain
 	if ownerConflict {
 		return nil, errSenderDomainConflict
+	}
+	if domainDisabled {
+		return nil, errSenderDomainDisabled
 	}
 	if !domainFound {
 		return nil, errSenderDomainMissing
@@ -357,7 +363,8 @@ func (s *Server) writeSenderIdentityLookupError(w http.ResponseWriter, err error
 		httpx.Error(w, http.StatusBadRequest, "sender_identity_required", "Choose a sender identity that belongs to this workspace.")
 	case errors.Is(err, errSenderDomainUnverified),
 		errors.Is(err, errSenderDomainConflict),
-		errors.Is(err, errSenderDomainMissing):
+		errors.Is(err, errSenderDomainMissing),
+		errors.Is(err, errSenderDomainDisabled):
 		s.writeSenderDomainError(w, err)
 	case errors.Is(err, errSenderIdentityMismatch):
 		httpx.Error(w, http.StatusBadRequest, "sender_identity_mismatch", err.Error())
@@ -383,12 +390,12 @@ func scanSenderIdentity(row pgx.Row) (*senderIdentity, error) {
 
 func requireVerifiedOwnedDomain(ctx context.Context, tx pgx.Tx, organizationID, domain string) error {
 	var status string
-	var ownerConflict bool
+	var ownerConflict, domainDisabled bool
 	err := tx.QueryRow(ctx, `
-		SELECT status, owner_conflict
+		SELECT status, owner_conflict, admin_disabled_at IS NOT NULL
 		FROM sending_domains
 		WHERE organization_id = $1 AND lower(domain) = lower($2)
-	`, organizationID, domain).Scan(&status, &ownerConflict)
+	`, organizationID, domain).Scan(&status, &ownerConflict, &domainDisabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errSenderDomainMissing
 	}
@@ -397,6 +404,9 @@ func requireVerifiedOwnedDomain(ctx context.Context, tx pgx.Tx, organizationID, 
 	}
 	if ownerConflict {
 		return errSenderDomainConflict
+	}
+	if domainDisabled {
+		return errSenderDomainDisabled
 	}
 	if status != "verified" {
 		return errSenderDomainUnverified
@@ -538,9 +548,7 @@ func loadSenderProfile(ctx context.Context, queryer interface {
 }
 
 func senderProfileComplete(profile senderProfile) bool {
-	if profile.CompanyName == "" || profile.Street == "" || profile.City == "" ||
-		profile.PostalCode == "" || profile.Country == "" || profile.Website == "" ||
-		profile.SupportEmail == "" {
+	if profile.CompanyName == "" || profile.Website == "" || profile.SupportEmail == "" {
 		return false
 	}
 	return true
@@ -548,17 +556,21 @@ func senderProfileComplete(profile senderProfile) bool {
 
 func (s *Server) validateCampaignSender(ctx context.Context, organizationID string, c *campaign) (senderProfile, error) {
 	if c.SenderIdentityID == nil || strings.TrimSpace(*c.SenderIdentityID) == "" {
-		var ownerConflict bool
+		var ownerConflict, domainDisabled bool
 		err := s.pool.QueryRow(ctx, `
-			SELECT COALESCE(bool_or(owner_conflict), false)
+			SELECT COALESCE(bool_or(owner_conflict), false),
+			       COALESCE(bool_or(admin_disabled_at IS NOT NULL), false)
 			FROM sending_domains
 			WHERE organization_id = $1 AND lower(domain) = lower($2)
-		`, organizationID, senderDomain(c.SenderEmail)).Scan(&ownerConflict)
+		`, organizationID, senderDomain(c.SenderEmail)).Scan(&ownerConflict, &domainDisabled)
 		if err != nil {
 			return senderProfile{}, err
 		}
 		if ownerConflict {
 			return senderProfile{}, errSenderDomainConflict
+		}
+		if domainDisabled {
+			return senderProfile{}, errSenderDomainDisabled
 		}
 		return senderProfile{}, errSenderIdentityMissing
 	}

@@ -51,9 +51,9 @@ func (s *pgxStore) CreateUser(ctx context.Context, email, passwordHash, name str
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO users (email, password_hash, name, status)
 		VALUES ($1, $2, $3, 'pending')
-		RETURNING id, email, name, status, password_hash, created_at
+		RETURNING id, email, name, status, password_hash, platform_role, created_at
 	`, email, passwordHash, name).Scan(
-		&user.ID, &user.Email, &user.Name, &user.Status, &user.PasswordHash, &user.CreatedAt,
+		&user.ID, &user.Email, &user.Name, &user.Status, &user.PasswordHash, &user.PlatformRole, &user.CreatedAt,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -75,9 +75,9 @@ func (s *pgxStore) CreateUserWithRegistration(ctx context.Context, email, passwo
 	err = tx.QueryRow(ctx, `
 		INSERT INTO users (email, password_hash, name, status)
 		VALUES ($1, $2, $3, 'pending')
-		RETURNING id, email, name, status, password_hash, created_at
+		RETURNING id, email, name, status, password_hash, platform_role, created_at
 	`, email, passwordHash, name).Scan(
-		&user.ID, &user.Email, &user.Name, &user.Status, &user.PasswordHash, &user.CreatedAt,
+		&user.ID, &user.Email, &user.Name, &user.Status, &user.PasswordHash, &user.PlatformRole, &user.CreatedAt,
 	)
 	if isUniqueViolation(err) {
 		return nil, ErrEmailInUse
@@ -98,14 +98,14 @@ func (s *pgxStore) CreateUserWithRegistration(ctx context.Context, email, passwo
 
 func (s *pgxStore) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	return s.scanUser(s.pool.QueryRow(ctx, `
-		SELECT id, email, name, status, password_hash, email_verified_at, last_login_at, created_at
+		SELECT id, email, name, status, password_hash, email_verified_at, last_login_at, created_at, platform_role
 		FROM users WHERE lower(email) = lower($1)
 	`, email))
 }
 
 func (s *pgxStore) GetUserByID(ctx context.Context, id string) (*User, error) {
 	return s.scanUser(s.pool.QueryRow(ctx, `
-		SELECT id, email, name, status, password_hash, email_verified_at, last_login_at, created_at
+		SELECT id, email, name, status, password_hash, email_verified_at, last_login_at, created_at, platform_role
 		FROM users WHERE id = $1
 	`, id))
 }
@@ -115,7 +115,7 @@ type rowScanner interface{ Scan(dest ...any) error }
 func (s *pgxStore) scanUser(row rowScanner) (*User, error) {
 	var user User
 	var verifiedAt, lastLoginAt sql.NullTime
-	err := row.Scan(&user.ID, &user.Email, &user.Name, &user.Status, &user.PasswordHash, &verifiedAt, &lastLoginAt, &user.CreatedAt)
+	err := row.Scan(&user.ID, &user.Email, &user.Name, &user.Status, &user.PasswordHash, &verifiedAt, &lastLoginAt, &user.CreatedAt, &user.PlatformRole)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -269,14 +269,14 @@ func (s *pgxStore) LookupRefreshToken(ctx context.Context, tokenHash string) (*S
 const sessionSelect = `
 	SELECT id, user_id, COALESCE(organization_id::text, ''), organization_name,
 	       organization_slug, role, refresh_token_hash,
-	       COALESCE(previous_refresh_token_hash, ''), expires_at, revoked_at
+	       COALESCE(previous_refresh_token_hash, ''), expires_at, revoked_at, admin_mfa_verified_at
 	FROM sessions`
 
 func (s *pgxStore) scanSession(row rowScanner) (*Session, error) {
 	var session Session
 	err := row.Scan(&session.ID, &session.UserID, &session.OrganizationID, &session.OrganizationName,
 		&session.OrganizationSlug, &session.Role, &session.RefreshTokenHash,
-		&session.PreviousRefreshTokenHash, &session.ExpiresAt, &session.RevokedAt)
+		&session.PreviousRefreshTokenHash, &session.ExpiresAt, &session.RevokedAt, &session.AdminMFAVerifiedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound

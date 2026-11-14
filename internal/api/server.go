@@ -15,6 +15,7 @@ import (
 	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/config"
 	"github.com/khayode/email-platform/internal/httpx"
+	"github.com/khayode/email-platform/internal/kit"
 	"github.com/khayode/email-platform/internal/observability"
 )
 
@@ -29,6 +30,8 @@ type Server struct {
 	stalwartDomainHoster   stalwartDomainHoster
 	logger                 *slog.Logger
 	formConfirmationSender func(context.Context, string, string, string) error
+	contactNotifier        func(context.Context, string, string, string, string) error
+	contactLimiter         *kit.RateLimiter
 }
 
 func New(
@@ -41,20 +44,27 @@ func New(
 	logger *slog.Logger,
 ) *Server {
 	server := &Server{
-		cfg:         cfg,
-		pool:        pool,
-		tokens:      tokens,
-		campaigns:   campaignService,
-		apiKeys:     apiKeyService,
-		delivery:    NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret, cfg.JWTSecret, cfg.BounceDomain, cfg.MaxBounceRate, cfg.MaxComplaintRate),
-		dnsResolver: newDNSResolver(cfg.DNSResolverAddr, cfg.DNSResolverTimeout),
-		logger:      logger,
+		cfg:            cfg,
+		pool:           pool,
+		tokens:         tokens,
+		campaigns:      campaignService,
+		apiKeys:        apiKeyService,
+		delivery:       NewDeliveryHandler(pool, tokens, logger, nil, publisher, cfg.WebhookSecret, cfg.JWTSecret, cfg.BounceDomain, cfg.MaxBounceRate, cfg.MaxComplaintRate),
+		dnsResolver:    newDNSResolver(cfg.DNSResolverAddr, cfg.DNSResolverTimeout),
+		logger:         logger,
+		contactLimiter: kit.NewRateLimiter(5, 3),
 	}
 	server.stalwartDomainHoster = stalwartDomainProvisionFunc(func(ctx context.Context, domain string) error {
 		return ensureStalwartDomain(ctx, cfg, domain)
 	})
 	server.formConfirmationSender = func(ctx context.Context, to, formName, confirmURL string) error {
 		return sendFormConfirmationEmail(ctx, cfg, to, formName, confirmURL)
+	}
+	server.contactNotifier = func(ctx context.Context, name, email, topic, message string) error {
+		if cfg.ContactNotifyEmail == "" {
+			return nil
+		}
+		return sendContactNotification(ctx, cfg, name, email, topic, message)
 	}
 	return server
 }
@@ -65,6 +75,61 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.Handle("GET /metrics", observability.MetricsHandler())
+	internalAdmin := kit.Chain(http.HandlerFunc(s.internalAdmin), kit.ServiceAuth(s.cfg.ServiceToken))
+	mux.Handle("GET /internal/admin/domains", internalAdmin)
+	mux.Handle("GET /internal/admin/domains/{id}", internalAdmin)
+	mux.Handle("POST /internal/admin/domains/{id}/verify", kit.Chain(
+		http.HandlerFunc(s.recheckAdminDomain),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("PATCH /internal/admin/domains/{id}/disabled", kit.Chain(
+		http.HandlerFunc(s.setAdminDomainDisabled),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("DELETE /internal/admin/domains/{id}", kit.Chain(
+		http.HandlerFunc(s.deleteAdminDomain),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("GET /internal/admin/workspaces/{id}/status", kit.Chain(
+		http.HandlerFunc(s.adminWorkspaceStatus),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("PATCH /internal/admin/workspaces/{id}/status", kit.Chain(
+		http.HandlerFunc(s.setAdminWorkspaceSuspended),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("POST /internal/admin/domains/{id}/resolve-conflict", kit.Chain(
+		http.HandlerFunc(s.resolveAdminDomainConflict),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("GET /internal/admin/campaigns", kit.Chain(
+		http.HandlerFunc(s.listAdminCampaigns),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("POST /internal/admin/campaigns/{id}/stop", kit.Chain(
+		http.HandlerFunc(s.stopAdminCampaign),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("GET /internal/admin/transactional-messages", kit.Chain(
+		http.HandlerFunc(s.searchAdminTransactionalMessages),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("GET /internal/admin/overview", kit.Chain(
+		http.HandlerFunc(s.getAdminOperationalMetrics),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("GET /internal/admin/suppressions", kit.Chain(
+		http.HandlerFunc(s.listAdminSuppressions),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("POST /internal/admin/suppressions", kit.Chain(
+		http.HandlerFunc(s.createAdminSuppression),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("DELETE /internal/admin/suppressions/{id}", kit.Chain(
+		http.HandlerFunc(s.deleteAdminSuppression),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
 
 	mux.HandleFunc("POST /api/v1/auth/register", s.legacyAuthEmailRoute)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
@@ -73,6 +138,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/reset-password", s.resetPassword)
 
 	mux.HandleFunc("POST /api/v1/public/subscribe", s.publicSubscribe)
+	mux.Handle("POST /api/v1/public/contact", kit.RateLimit(s.contactLimiter)(http.HandlerFunc(s.submitPublicContact)))
 	mux.HandleFunc("GET /api/v1/public/unsubscribe", s.unsubscribePage)
 	mux.HandleFunc("POST /api/v1/public/unsubscribe", s.unsubscribeAPI)
 	mux.HandleFunc("GET /t/open/{token}", s.trackOpen)
@@ -92,6 +158,58 @@ func (s *Server) Handler() http.Handler {
 	campaignEditors := []string{auth.RoleOwner, auth.RoleAdmin, auth.RoleManager, auth.RoleAuthor}
 	campaignManagers := []string{auth.RoleOwner, auth.RoleAdmin, auth.RoleManager}
 	domainManagers := []string{auth.RoleOwner, auth.RoleAdmin}
+	transactionalManagers := []string{auth.RoleOwner, auth.RoleAdmin}
+
+	mux.Handle("POST /api/v1/transactional/messages",
+		s.transactionalKeyAuth("send")(http.HandlerFunc(s.sendTransactionalMessage)))
+	mux.Handle("GET /api/v1/transactional/messages",
+		s.transactionalKeyAuth("read")(http.HandlerFunc(s.listTransactionalMessages)))
+	mux.Handle("GET /api/v1/transactional/messages/{id}",
+		s.transactionalKeyAuth("read")(http.HandlerFunc(s.getTransactionalMessage)))
+	mux.Handle("GET /api/v1/transactional/dashboard/messages",
+		protect(s.listTransactionalMessages, transactionalManagers...))
+	mux.Handle("GET /api/v1/transactional/dashboard/messages/{id}",
+		protect(s.getTransactionalMessage, transactionalManagers...))
+	mux.Handle("GET /api/v1/transactional/usage",
+		protect(s.getTransactionalUsage, transactionalManagers...))
+	mux.Handle("GET /api/v1/transactional/templates",
+		protect(s.listTransactionalTemplates, transactionalManagers...))
+	mux.Handle("POST /api/v1/transactional/templates",
+		protect(s.createTransactionalTemplate, transactionalManagers...))
+	mux.Handle("GET /api/v1/transactional/templates/{id}",
+		protect(s.getTransactionalTemplate, transactionalManagers...))
+	mux.Handle("PATCH /api/v1/transactional/templates/{id}",
+		protect(s.updateTransactionalTemplate, transactionalManagers...))
+	mux.Handle("DELETE /api/v1/transactional/templates/{id}",
+		protect(s.deleteTransactionalTemplate, transactionalManagers...))
+	mux.Handle("GET /api/v1/transactional/settings",
+		protect(s.getTransactionalSettings, transactionalManagers...))
+	mux.Handle("PUT /api/v1/transactional/settings",
+		protect(s.updateTransactionalSettings, transactionalManagers...))
+	mux.Handle("GET /api/v1/transactional/api-keys",
+		protect(s.listTransactionalAPIKeys, transactionalManagers...))
+	mux.Handle("POST /api/v1/transactional/api-keys",
+		protect(s.createTransactionalAPIKey, transactionalManagers...))
+	mux.Handle("POST /api/v1/transactional/api-keys/{id}/rotate",
+		protect(s.rotateTransactionalAPIKey, transactionalManagers...))
+	mux.Handle("DELETE /api/v1/transactional/api-keys/{id}",
+		protect(s.revokeTransactionalAPIKey, transactionalManagers...))
+	mux.Handle("GET /api/v1/transactional/smtp-credentials",
+		protect(s.listTransactionalSMTPCredentials, transactionalManagers...))
+	mux.Handle("POST /api/v1/transactional/smtp-credentials",
+		protect(s.createTransactionalSMTPCredential, transactionalManagers...))
+	mux.Handle("DELETE /api/v1/transactional/smtp-credentials/{id}",
+		protect(s.revokeTransactionalSMTPCredential, transactionalManagers...))
+	mux.Handle("GET /api/v1/transactional/webhooks",
+		protect(s.listTransactionalWebhooks, transactionalManagers...))
+	mux.Handle("POST /api/v1/transactional/webhooks",
+		protect(s.createTransactionalWebhook, transactionalManagers...))
+	mux.Handle("PUT /api/v1/transactional/webhooks/{id}",
+		protect(s.updateTransactionalWebhook, transactionalManagers...))
+	mux.Handle("POST /api/v1/transactional/webhooks/{id}/rotate-secret",
+		protect(s.rotateTransactionalWebhookSecret, transactionalManagers...))
+	mux.Handle("DELETE /api/v1/transactional/webhooks/{id}",
+		protect(s.deleteTransactionalWebhook, transactionalManagers...))
 
 	mux.Handle("GET /api/v1/auth/me", protect(s.me))
 
@@ -145,8 +263,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/templates/{id}", protect(s.getTemplate))
 	mux.Handle("PATCH /api/v1/templates/{id}", protect(s.updateTemplate, campaignEditors...))
 	mux.Handle("DELETE /api/v1/templates/{id}", protect(s.deleteTemplate, campaignManagers...))
+	mux.Handle("POST /api/v1/templates/preview", protect(s.previewTemplate, campaignEditors...))
 	mux.Handle("POST /api/v1/templates/{id}/test", protect(s.sendTemplateTestEmail, campaignEditors...))
 	mux.Handle("POST /api/v1/assets", protect(s.uploadEmailAsset, campaignEditors...))
+	mux.Handle("POST /api/v1/assets/import", protect(s.importRemoteEmailAsset, campaignEditors...))
 	mux.HandleFunc("GET /api/v1/public/assets/{id}", s.getPublicEmailAsset)
 	mux.Handle("GET /api/v1/sender-profile", protect(s.getSenderProfile))
 	mux.Handle("PUT /api/v1/sender-profile", protect(s.putSenderProfile, audienceManagers...))
@@ -182,6 +302,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/domains", protect(s.listDomains))
 	mux.Handle("POST /api/v1/domains", protect(s.createDomain, domainManagers...))
 	mux.Handle("DELETE /api/v1/domains/{id}", protect(s.deleteDomain, domainManagers...))
+	mux.Handle("PUT /api/v1/domains/{id}/transactional", protect(s.setDomainTransactionalEnabled, domainManagers...))
 	mux.Handle("POST /api/v1/domains/{id}/verify", protect(s.verifyDomain, domainManagers...))
 	mux.Handle("POST /api/v1/domains/{id}/providers/{provider}", protect(s.configureDomainProvider, domainManagers...))
 	mux.Handle("POST /api/v1/domains/{id}/providers/{provider}/verify", protect(s.verifyDomainProvider, domainManagers...))

@@ -195,10 +195,20 @@ func TestAppendBeforeBodyClose(t *testing.T) {
 	if !strings.Contains(result, `<img src="track.gif"></body>`) {
 		t.Fatalf("appendBeforeBodyClose() did not insert before </body>: %q", result)
 	}
+
 	noBody := "<html><p>no body tag</p></html>"
 	result2 := appendBeforeBodyClose(noBody, fragment)
 	if !strings.HasSuffix(result2, fragment) {
 		t.Fatalf("appendBeforeBodyClose() should append fragment when no </body>: %q", result2)
+	}
+}
+
+func TestAppendBeforeBodyClosePlacesTrackingPixelBeforeComplianceFooter(t *testing.T) {
+	document := `<html><body>template content<table data-sendwise-compliance-footer="true"><tr><td>Unsubscribe</td></tr></table></body></html>`
+	fragment := `<img src="tracking.gif">`
+	result := appendBeforeBodyClose(document, fragment)
+	if strings.Index(result, "tracking.gif") > strings.Index(result, `data-sendwise-compliance-footer`) {
+		t.Fatalf("tracking pixel was placed after the compliance footer: %s", result)
 	}
 }
 

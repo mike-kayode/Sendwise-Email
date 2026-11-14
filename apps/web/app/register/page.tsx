@@ -5,17 +5,9 @@ import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Button } from "@/components/ui/button";
-import {
-  Field,
-  FieldLabel,
-} from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiFetch } from "@/lib/auth";
 import { useToast } from "@/components/ui/use-toast";
-import { Mail, Users } from "lucide-react";
-import { PageHeader } from "@/components/page-header";
+import { AuthFrame } from "@/components/marketing/site";
 
 const registerSchema = z
   .object({
@@ -69,80 +61,54 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#f6f8f7] px-4">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>Create your workspace</CardTitle>
-          <CardDescription>
-            Join Sendwise and start sending email that reaches inboxes.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <PageHeader title="Create account" description="Set up your first workspace." />
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-              <Field>
-                <FieldLabel>
-                  <Users className="mr-2 h-4 w-4 shrink-0 text-slate-400" /> Name
-                </FieldLabel>
-                <Input {...form.register("name")} placeholder="Your name" disabled={form.formState.isSubmitting} />
-                {form.formState.errors.name && (
-                  <p className="text-sm text-rose-600">{form.formState.errors.name.message}</p>
-                )}
-              </Field>
-              <Field>
-                <FieldLabel>
-                  <Mail className="mr-2 h-4 w-4 shrink-0 text-slate-400" /> Email address
-                </FieldLabel>
-                <Input
-                  {...form.register("email")}
-                  placeholder="you@example.com"
-                  type="email"
-                  autoComplete="email"
-                  disabled={form.formState.isSubmitting}
-                />
-                {form.formState.errors.email && (
-                  <p className="text-sm text-rose-600">{form.formState.errors.email.message}</p>
-                )}
-              </Field>
-              <Field>
-                <FieldLabel>Organization name</FieldLabel>
-                <Input
-                  {...form.register("organization_name")}
-                  placeholder="Workspace name"
-                  disabled={form.formState.isSubmitting}
-                />
-                {form.formState.errors.organization_name && (
-                  <p className="text-sm text-rose-600">{form.formState.errors.organization_name.message}</p>
-                )}
-              </Field>
-              <Field>
-                <FieldLabel>Password</FieldLabel>
-                <Input
-                  type="password"
-                  {...form.register("password")}
-                  placeholder="••••••••••"
-                  autoComplete="new-password"
-                  disabled={form.formState.isSubmitting}
-                />
-                <p className="text-xs text-slate-500">
-                  At least 10 characters.
-                </p>
-                {form.formState.errors.password && (
-                  <p className="text-sm text-rose-600">{form.formState.errors.password.message}</p>
-                )}
-              </Field>
-              <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-                {form.formState.isSubmitting ? "Creating workspace..." : "Create workspace"}
-              </Button>
-              <p className="text-sm text-center text-slate-500">
-                Already have an account?{" "}
-                <Link href="/login" className="font-medium text-emerald-800 hover:text-emerald-900">
-                  Sign in
-                </Link>
-              </p>
+    <AuthFrame>
+      <div className="wrap split auth-columns">
+        <aside className="dark auth-pitch">
+          <div>
+            <span className="eyebrow eyebrow-dark">Get started</span>
+            <h1 className="display">Create your workspace and send your first email.</h1>
+            <p className="lead">You will add a domain, verify it with DNS, and get an API key or SMTP credentials.</p>
+          </div>
+          <ol className="auth-steps">
+            <li><span className="step-n step-accent">1</span><span>Create your account</span></li>
+            <li><span className="step-n step-accent">2</span><span>Verify your email address</span></li>
+            <li><span className="step-n step-accent">3</span><span>Add and verify your sending domain</span></li>
+          </ol>
+        </aside>
+        <section className="card auth-form">
+          <h2 className="title auth-form-title">Create account</h2>
+          <p className="small auth-form-description">Already have an account? <Link href="/login">Sign in</Link></p>
+          <form onSubmit={form.handleSubmit(onSubmit)} className="form-stack">
+            <div>
+              <label className="label" htmlFor="register-organization">Organization name</label>
+              <input {...form.register("organization_name")} className="field" id="register-organization" placeholder="Workspace name" autoComplete="organization" disabled={form.formState.isSubmitting} />
+              {form.formState.errors.organization_name && <p className="form-error">{form.formState.errors.organization_name.message}</p>}
+            </div>
+            <div>
+              <label className="label" htmlFor="register-name">Your name</label>
+              <input {...form.register("name")} className="field" id="register-name" placeholder="Your name" autoComplete="name" disabled={form.formState.isSubmitting} />
+              {form.formState.errors.name && <p className="form-error">{form.formState.errors.name.message}</p>}
+            </div>
+            <div>
+              <label className="label" htmlFor="register-email">Work email</label>
+              <input {...form.register("email")} className="field" id="register-email" placeholder="you@example.com" type="email" autoComplete="email" disabled={form.formState.isSubmitting} />
+              {form.formState.errors.email && <p className="form-error">{form.formState.errors.email.message}</p>}
+            </div>
+            <div>
+              <label className="label" htmlFor="register-password">Password</label>
+              <input {...form.register("password")} className="field" id="register-password" type="password" placeholder="••••••••••" autoComplete="new-password" aria-describedby="register-password-hint" disabled={form.formState.isSubmitting} />
+              <p className="small auth-password-hint" id="register-password-hint">Use at least 10 characters.</p>
+              {form.formState.errors.password && <p className="form-error">{form.formState.errors.password.message}</p>}
+            </div>
+            <p className="small auth-terms">
+              By creating an account, you agree to the <Link href="/legal/terms">Terms</Link> and <Link href="/legal/privacy">Privacy policy</Link>.
+            </p>
+            <button type="submit" className="btn btn-ink auth-submit" disabled={form.formState.isSubmitting}>
+              {form.formState.isSubmitting ? "Creating workspace..." : "Create account"}
+            </button>
           </form>
-        </CardContent>
-      </Card>
-    </div>
+        </section>
+      </div>
+    </AuthFrame>
   );
 }

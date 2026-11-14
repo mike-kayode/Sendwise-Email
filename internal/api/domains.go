@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/httpx"
@@ -22,18 +23,18 @@ import (
 
 var domainPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
 
-// domainColumns selects every public sending-domain column. dkim_public_key is
-// nullable in the schema, so it is coalesced in SQL: a NULL must never reach the
-// scanner as a typed nil and must never fail the whole domain read.
+// domainColumns selects the sending-domain columns needed by tenant handlers.
+// dkim_public_key is nullable, so it is coalesced before scanning.
 const domainColumns = `
-	id, domain, status, dkim_selector, COALESCE(dkim_public_key, '') AS dkim_public_key, verification_token,
+	id, organization_id, domain, status, dkim_selector, COALESCE(dkim_public_key, '') AS dkim_public_key, verification_token,
 	spf_status, dkim_status, dmarc_status, verification_status, last_checked_at, verified_at, created_at,
 	COALESCE(dns_check_details, '{}'::jsonb) AS dns_check_details,
-	owner_conflict, stalwart_authenticated, warmup_profile
+	owner_conflict, stalwart_authenticated, warmup_profile, transactional_enabled
 `
 
 type sendingDomain struct {
 	ID                    string          `json:"id"`
+	OrganizationID        string          `json:"-"`
 	Domain                string          `json:"domain"`
 	Status                string          `json:"status"`
 	DKIMSelector          string          `json:"dkim_selector"`
@@ -50,19 +51,82 @@ type sendingDomain struct {
 	OwnerConflict         bool            `json:"owner_conflict"`
 	StalwartAuthenticated bool            `json:"stalwart_authenticated"`
 	WarmupProfile         string          `json:"warmup_profile"`
+	TransactionalEnabled  bool            `json:"transactional_enabled"`
 }
 
 func scanDomain(row pgx.Row) (*sendingDomain, error) {
 	var d sendingDomain
 	if err := row.Scan(
-		&d.ID, &d.Domain, &d.Status, &d.DKIMSelector, &d.DKIMPublicKey, &d.VerificationToken,
+		&d.ID, &d.OrganizationID, &d.Domain, &d.Status, &d.DKIMSelector, &d.DKIMPublicKey, &d.VerificationToken,
 		&d.SPFStatus, &d.DKIMStatus, &d.DMARCStatus, &d.VerificationStatus,
 		&d.LastCheckedAt, &d.VerifiedAt, &d.CreatedAt, &d.DNSCheckDetails, &d.OwnerConflict,
-		&d.StalwartAuthenticated, &d.WarmupProfile,
+		&d.StalwartAuthenticated, &d.WarmupProfile, &d.TransactionalEnabled,
 	); err != nil {
 		return nil, err
 	}
 	return &d, nil
+}
+
+func (s *Server) setDomainTransactionalEnabled(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_domain_id", "The sending domain ID is invalid.")
+		return
+	}
+	var input struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := httpx.Decode(w, r, &input); err != nil || input.Enabled == nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_body", "Provide a boolean enabled value.")
+		return
+	}
+	ctx := r.Context()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		s.logger.Error("begin sending domain transactional update", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not update transactional domain access.")
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	domain, err := scanDomain(tx.QueryRow(ctx, `
+		SELECT `+domainColumns+`
+		FROM sending_domains
+		WHERE id = $1 AND organization_id = $2
+		FOR UPDATE
+	`, id, s.organizationID(r)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.Error(w, http.StatusNotFound, "domain_not_found", "The sending domain could not be found.")
+		return
+	}
+	if err != nil {
+		s.logger.Error("load sending domain for transactional update", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not update transactional domain access.")
+		return
+	}
+	if *input.Enabled && (domain.Status != "verified" || domain.OwnerConflict ||
+		domain.SPFStatus != "verified" || domain.DKIMStatus != "verified") {
+		httpx.Error(w, http.StatusConflict, "domain_not_ready", "Transactional sending can only be enabled for an owned domain with verified SPF and DKIM.")
+		return
+	}
+	updated, err := scanDomain(tx.QueryRow(ctx, `
+		UPDATE sending_domains
+		SET transactional_enabled = $3, updated_at = now()
+		WHERE id = $1 AND organization_id = $2
+		RETURNING `+domainColumns,
+		id, s.organizationID(r), *input.Enabled,
+	))
+	if err != nil {
+		s.logger.Error("update transactional domain access", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not update transactional domain access.")
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		s.logger.Error("commit transactional domain update", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not update transactional domain access.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) listDomains(w http.ResponseWriter, r *http.Request) {
@@ -229,10 +293,10 @@ func (s *Server) verifyDomainByProvider(w http.ResponseWriter, r *http.Request, 
 		httpx.Error(w, http.StatusBadRequest, "campaign_delivery_stalwart_only", "Campaign sending domains are verified only through Stalwart.")
 		return
 	}
-	s.verifyStalwartDomain(w, r, d)
+	s.verifyStalwartDomain(w, r, d, s.organizationID(r))
 }
 
-func (s *Server) verifyStalwartDomain(w http.ResponseWriter, r *http.Request, d *sendingDomain) {
+func (s *Server) verifyStalwartDomain(w http.ResponseWriter, r *http.Request, d *sendingDomain, organizationID string) {
 	if d.OwnerConflict {
 		httpx.Error(w, http.StatusConflict, "domain_owner_conflict", "Domain already owned by another workspace.")
 		return
@@ -274,7 +338,7 @@ func (s *Server) verifyStalwartDomain(w http.ResponseWriter, r *http.Request, d 
 		    updated_at = now()
 		WHERE id = $1 AND organization_id = $2
 		RETURNING `+domainColumns,
-		d.ID, s.organizationID(r), status, spf, dkim, dmarc, verification, dnsCheckDetails,
+		d.ID, organizationID, status, spf, dkim, dmarc, verification, dnsCheckDetails,
 	))
 	if err != nil {
 		s.logger.Error("update domain verification", "error", err)

@@ -24,6 +24,7 @@ import (
 	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/httpx"
 	"github.com/khayode/email-platform/internal/messaging"
+	"github.com/khayode/email-platform/internal/transactional"
 )
 
 type deliveryService interface {
@@ -389,12 +390,21 @@ func (h *DeliveryHandler) stalwartFeedbackWebhook(w http.ResponseWriter, r *http
 		WHERE token = $1
 	`, token).Scan(&claims.WorkspaceID, &claims.CampaignID, &claims.Recipient); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			httpx.Error(w, http.StatusBadRequest, "invalid_verp", "Feedback token is unknown.")
+			err = h.pool.QueryRow(r.Context(), `
+				SELECT organization_id::text, 'transactional:' || message_id::text, email
+				FROM transactional_verp_tokens
+				WHERE token = $1
+			`, token).Scan(&claims.WorkspaceID, &claims.CampaignID, &claims.Recipient)
+			if errors.Is(err, pgx.ErrNoRows) {
+				httpx.Error(w, http.StatusBadRequest, "invalid_verp", "Feedback token is unknown.")
+				return
+			}
+		}
+		if err != nil {
+			h.logger.Error("load signed VERP claims", "error", err)
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not resolve feedback token.")
 			return
 		}
-		h.logger.Error("load signed VERP claims", "error", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not resolve feedback token.")
-		return
 	}
 	if !delivery.VerifyVERPToken(h.bounceTokenSecret, token, claims) {
 		httpx.Error(w, http.StatusBadRequest, "invalid_verp", "Feedback token signature is invalid.")
@@ -417,6 +427,12 @@ func (h *DeliveryHandler) stalwartFeedbackWebhook(w http.ResponseWriter, r *http
 }
 
 func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte, feedback delivery.Feedback, claims delivery.VERPClaims) error {
+	if strings.HasPrefix(claims.CampaignID, "transactional:") {
+		return transactional.NewStore(h.pool).ApplyFeedback(
+			ctx, delivery.FeedbackMessageKey(raw), claims, feedback,
+		)
+	}
+
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin feedback transaction: %w", err)

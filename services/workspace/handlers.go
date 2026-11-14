@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/mail"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +46,8 @@ func (h *Handler) Routes() http.Handler {
 	internal := kit.Chain(http.HandlerFunc(h.internal), kit.ServiceAuth(cfgSecret(h.cfg)))
 	r.Handle("GET /internal/users/{userID}/memberships", internal)
 	r.Handle("GET /internal/organizations/{organizationID}", internal)
+	r.Handle("GET /internal/admin/organizations", internal)
+	r.Handle("GET /internal/admin/organizations/{organizationID}", internal)
 
 	// Public endpoints reached through the gateway with a user JWT.
 	auth := h.tokens.Middleware
@@ -118,6 +121,69 @@ var allowedInviteRoles = map[string]bool{
 
 func (h *Handler) internal(w http.ResponseWriter, r *http.Request) {
 	switch {
+	case strings.HasPrefix(r.URL.Path, "/internal/admin/organizations/"):
+		organizationID := r.PathValue("organizationID")
+		if _, err := uuid.Parse(organizationID); err != nil {
+			kit.Error(w, http.StatusBadRequest, "invalid_organization_id", "The workspace id must be a UUID.")
+			return
+		}
+		org, err := h.store.GetOrganization(r.Context(), organizationID)
+		if errors.Is(err, ErrNotFound) {
+			kit.Error(w, http.StatusNotFound, "not_found", "Workspace not found.")
+			return
+		}
+		if err != nil {
+			h.logger.Error("load admin workspace", "error", err)
+			kit.Error(w, http.StatusInternalServerError, "internal_error", "Workspace metadata could not be loaded.")
+			return
+		}
+		members, err := h.store.ListMembers(r.Context(), organizationID)
+		if err != nil {
+			h.logger.Error("list admin workspace members", "error", err, "workspace_id", organizationID)
+			kit.Error(w, http.StatusInternalServerError, "internal_error", "Workspace membership metadata could not be loaded.")
+			return
+		}
+		kit.JSON(w, http.StatusOK, map[string]any{
+			"workspace": org,
+			"members":   members,
+		})
+
+	case r.URL.Path == "/internal/admin/organizations":
+		search := strings.TrimSpace(r.URL.Query().Get("search"))
+		if len(search) > 100 {
+			kit.Error(w, http.StatusBadRequest, "invalid_search", "Search must be 100 characters or fewer.")
+			return
+		}
+		limit, offset := 50, 0
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value < 1 || value > 100 {
+				kit.Error(w, http.StatusBadRequest, "invalid_limit", "Limit must be an integer from 1 to 100.")
+				return
+			}
+			limit = value
+		}
+		if raw := r.URL.Query().Get("offset"); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value < 0 {
+				kit.Error(w, http.StatusBadRequest, "invalid_offset", "Offset must be a non-negative integer.")
+				return
+			}
+			offset = value
+		}
+		organizations, total, err := h.store.ListAdminOrganizations(r.Context(), search, limit, offset)
+		if err != nil {
+			h.logger.Error("list admin organizations", "error", err)
+			kit.Error(w, http.StatusInternalServerError, "internal_error", "Workspace data could not be loaded.")
+			return
+		}
+		kit.JSON(w, http.StatusOK, map[string]any{
+			"data": organizations,
+			"pagination": map[string]int{
+				"total": total, "limit": limit, "offset": offset,
+			},
+		})
+
 	case strings.HasPrefix(r.URL.Path, "/internal/users/"):
 		userID := r.PathValue("userID")
 		if _, err := uuid.Parse(userID); err != nil {

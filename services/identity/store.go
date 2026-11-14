@@ -38,12 +38,14 @@ type Store interface {
 
 // Domain errors shared by implementations.
 var (
-	ErrNotFound       = errors.New("not found")
-	ErrEmailInUse     = errors.New("email already registered")
-	ErrInvalidToken   = errors.New("invalid or expired token")
-	ErrRefreshReuse   = errors.New("refresh token reuse detected")
-	ErrTokenConsumed  = errors.New("token already used")
-	ErrNoOrganization = errors.New("user has no organization membership")
+	ErrNotFound          = errors.New("not found")
+	ErrEmailInUse        = errors.New("email already registered")
+	ErrInvalidToken      = errors.New("invalid or expired token")
+	ErrRefreshReuse      = errors.New("refresh token reuse detected")
+	ErrTokenConsumed     = errors.New("token already used")
+	ErrNoOrganization    = errors.New("user has no organization membership")
+	ErrInvalidUserStatus = errors.New("user status cannot be changed through this action")
+	ErrLastSuperAdmin    = errors.New("cannot demote the last active super admin")
 )
 
 // User is an identity account. PasswordHash never leaves the service.
@@ -52,6 +54,7 @@ type User struct {
 	Email           string     `json:"email"`
 	Name            string     `json:"name"`
 	Status          string     `json:"status"`
+	PlatformRole    string     `json:"-"`
 	PasswordHash    string     `json:"-"`
 	EmailVerifiedAt *time.Time `json:"email_verified_at,omitempty"`
 	LastLoginAt     *time.Time `json:"last_login_at,omitempty"`
@@ -70,6 +73,7 @@ type Session struct {
 	PreviousRefreshTokenHash string
 	ExpiresAt                time.Time
 	RevokedAt                *time.Time
+	AdminMFAVerifiedAt       *time.Time
 }
 
 // SessionCreate parameters for CreateSession.

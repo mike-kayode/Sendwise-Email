@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   BarChart3,
   Activity,
@@ -20,6 +20,7 @@ import {
   Send,
   Settings,
   ShieldAlert,
+  ShieldCheck,
   Tags,
   Users,
   Workflow,
@@ -28,6 +29,7 @@ import {
 import { cn, initials } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth";
 import { useAuth } from "@/hooks/use-auth";
+import { apiFetch } from "@/lib/auth";
 
 type NavItem = {
   href: string;
@@ -45,6 +47,7 @@ const navigation: { label: string; items: NavItem[] }[] = [
       { href: "/automations", label: "Automations", icon: Workflow },
       { href: "/templates", label: "Templates", icon: LayoutTemplate },
       { href: "/forms", label: "Forms", icon: Mail },
+      { href: "/transactional", label: "Transactional email", icon: Activity },
     ],
   },
   {
@@ -78,7 +81,14 @@ const navigation: { label: string; items: NavItem[] }[] = [
   },
 ];
 
+type AdminSession = {
+  platform_role: "support_admin" | "super_admin";
+};
+
 function isActive(pathname: string, href: string) {
+  if (href === "/admin") {
+    return pathname === href;
+  }
   if (href === "/campaigns") {
     return pathname === href || pathname.startsWith("/campaigns/");
   }
@@ -90,6 +100,9 @@ function isActive(pathname: string, href: string) {
 
 function SidebarContent({
   pathname,
+  organizationRole,
+  adminRole,
+  adminNavigationError,
   onNavigate,
   workspaceName,
   workspacePlan,
@@ -100,6 +113,9 @@ function SidebarContent({
   logoutError,
 }: {
   pathname: string;
+  organizationRole: string;
+  adminRole: AdminSession["platform_role"] | null;
+  adminNavigationError: boolean;
   onNavigate?: () => void;
   workspaceName: string;
   workspacePlan: string;
@@ -133,35 +149,62 @@ function SidebarContent({
       </div>
 
       <nav className="flex-1 space-y-6 overflow-y-auto px-3 py-5">
-        {navigation.map((group) => (
-          <div key={group.label}>
-            <p className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-widest text-slate-400">
-              {group.label}
-            </p>
-            <div className="space-y-0.5">
-              {group.items.map((item) => {
-                const Icon = item.icon;
-                const active = isActive(pathname, item.href);
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    onClick={onNavigate}
-                    className={cn(
-                      "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition",
-                      active
-                        ? "bg-emerald-50 font-medium text-emerald-900"
-                        : "text-slate-600 hover:bg-slate-50 hover:text-slate-900",
-                    )}
-                  >
-                    <Icon className={cn("h-4 w-4", active ? "text-emerald-800" : "text-slate-400")} />
-                    {item.label}
-                  </Link>
-                );
-              })}
+        {[...navigation, ...(adminRole ? [{
+          label: "Platform admin",
+          items: [
+            { href: "/admin", label: "Overview", icon: LayoutDashboard },
+            { href: "/admin/search", label: "Search", icon: Search },
+            { href: "/admin/users", label: "Users", icon: ShieldCheck },
+            { href: "/admin/workspaces", label: "Workspaces", icon: LayoutDashboard },
+            { href: "/admin/domains", label: "Domains", icon: Globe },
+            { href: "/admin/campaigns", label: "Campaigns", icon: Send },
+            { href: "/admin/suppressions", label: "Suppressions", icon: List },
+            { href: "/admin/audit", label: "Audit log", icon: ShieldAlert },
+          ],
+        }] : [])].map((group) => {
+          const items = group.items.filter(
+            (item) =>
+              (item.href !== "/transactional" ||
+                organizationRole === "owner" ||
+                organizationRole === "admin") &&
+              (item.href !== "/admin/suppressions" || adminRole === "super_admin"),
+          );
+          if (items.length === 0) return null;
+          return (
+            <div key={group.label}>
+              <p className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-widest text-slate-400">
+                {group.label}
+              </p>
+              <div className="space-y-0.5">
+                {items.map((item) => {
+                  const Icon = item.icon;
+                  const active = isActive(pathname, item.href);
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      onClick={onNavigate}
+                      className={cn(
+                        "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition",
+                        active
+                          ? "bg-emerald-50 font-medium text-emerald-900"
+                          : "text-slate-600 hover:bg-slate-50 hover:text-slate-900",
+                      )}
+                    >
+                      <Icon className={cn("h-4 w-4", active ? "text-emerald-800" : "text-slate-400")} />
+                      {item.label}
+                    </Link>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
+        {adminNavigationError ? (
+          <p role="status" className="px-3 text-xs text-amber-700">
+            Admin navigation is temporarily unavailable.
+          </p>
+        ) : null}
       </nav>
 
       <div className="border-t border-slate-100 p-3">
@@ -198,6 +241,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [adminRole, setAdminRole] = useState<AdminSession["platform_role"] | null>(null);
+  const [adminNavigationError, setAdminNavigationError] = useState(false);
   const user = useAuthStore((state) => state.user);
   const organization = useAuthStore((state) => state.organization);
   const { logout } = useAuth();
@@ -205,6 +250,34 @@ export function AppShell({ children }: { children: ReactNode }) {
   const workspacePlan = organization?.role ? organization.role.toUpperCase() : "WORKSPACE";
   const userName = user?.name ?? "Workspace owner";
   const userEmail = user?.email ?? "owner@example.com";
+  useEffect(() => {
+    let active = true;
+    if (!user) {
+      setAdminRole(null);
+      setAdminNavigationError(false);
+      return () => {
+        active = false;
+      };
+    }
+    void apiFetch<AdminSession>("/admin/session")
+      .then((session) => {
+        if (active) {
+          setAdminRole(session.platform_role);
+          setAdminNavigationError(false);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        const code = typeof error === "object" && error !== null && "code" in error
+          ? error.code
+          : null;
+        setAdminRole(null);
+        setAdminNavigationError(code !== "admin_forbidden");
+      });
+    return () => {
+      active = false;
+    };
+  }, [user]);
   const handleLogout = async () => {
     if (isLoggingOut) return;
     setIsLoggingOut(true);
@@ -222,6 +295,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-[250px] border-r border-slate-200 bg-white lg:block">
         <SidebarContent
           pathname={pathname}
+          organizationRole={organization?.role ?? ""}
+          adminRole={adminRole}
+          adminNavigationError={adminNavigationError}
           workspaceName={workspaceName}
           workspacePlan={workspacePlan}
           userName={userName}
@@ -249,6 +325,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             </button>
             <SidebarContent
               pathname={pathname}
+              organizationRole={organization?.role ?? ""}
+              adminRole={adminRole}
+              adminNavigationError={adminNavigationError}
               onNavigate={() => setMobileOpen(false)}
               workspaceName={workspaceName}
               workspacePlan={workspacePlan}

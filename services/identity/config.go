@@ -20,8 +20,10 @@ type Config struct {
 	MigrationsDir   string
 
 	// Workspace service integration (service-to-service).
-	WorkspaceURL string
-	ServiceToken string
+	WorkspaceURL     string
+	LegacyAPIURL     string
+	ServiceToken     string
+	AdminIPAllowlist string
 
 	// Mail delivery for verification and reset messages.
 	MailProvider                  string // "smtp", "log", or "auto"
@@ -55,8 +57,10 @@ func LoadConfig() (Config, error) {
 		AutoMigrate:     kit.GetenvBool("AUTO_MIGRATE", true),
 		MigrationsDir:   kit.Getenv("MIGRATIONS_DIR", "services/identity/migrations"),
 
-		WorkspaceURL: strings.TrimRight(kit.Getenv("WORKSPACE_URL", "http://localhost:8081"), "/"),
-		ServiceToken: kit.Getenv("SERVICE_TOKEN", ""),
+		WorkspaceURL:     strings.TrimRight(kit.Getenv("WORKSPACE_URL", "http://localhost:8081"), "/"),
+		LegacyAPIURL:     strings.TrimRight(kit.Getenv("LEGACY_API_URL", "http://localhost:8080"), "/"),
+		ServiceToken:     kit.Getenv("SERVICE_TOKEN", ""),
+		AdminIPAllowlist: strings.TrimSpace(kit.Getenv("ADMIN_IP_ALLOWLIST", "")),
 
 		MailProvider:                  strings.ToLower(strings.TrimSpace(kit.Getenv("MAIL_PROVIDER", "auto"))),
 		SMTPAddr:                      kit.Getenv("SMTP_ADDR", ""),
@@ -81,6 +85,9 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.ServiceToken == "" {
 		return Config{}, fmt.Errorf("SERVICE_TOKEN is required")
+	}
+	if err := validateAdminIPAllowlist(cfg.AdminIPAllowlist); err != nil {
+		return Config{}, err
 	}
 	switch cfg.MailProvider {
 	case "auto", "smtp", "log":

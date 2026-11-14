@@ -28,6 +28,12 @@ if [ "$STRICT" -eq 0 ] && [ -f "$ROOT/.env.local" ]; then
   . "$ROOT/.env.local"
 fi
 set +a
+CONTACT_NOTIFY_EMAIL="${CONTACT_NOTIFY_EMAIL:-}"
+if [ -n "$CONTACT_NOTIFY_EMAIL" ] &&
+  [[ ! "$CONTACT_NOTIFY_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+$ ]]; then
+  echo "CONTACT_NOTIFY_EMAIL must be a valid email address or empty to disable notifications" >&2
+  exit 1
+fi
 
 ENV_NAME="${APP_ENV:-development}"
 if [ -z "${SMTP_TLS_MODE:-}" ]; then
@@ -44,6 +50,67 @@ case "$SMTP_TLS_MODE" in
     exit 1
     ;;
 esac
+
+TRANSACTIONAL_ENABLED="${TRANSACTIONAL_ENABLED:-false}"
+TRANSACTIONAL_SMTP_ENABLED="${TRANSACTIONAL_SMTP_ENABLED:-false}"
+case "$TRANSACTIONAL_ENABLED" in
+  true|false) ;;
+  *) echo "TRANSACTIONAL_ENABLED must be true or false" >&2; exit 1 ;;
+esac
+case "$TRANSACTIONAL_SMTP_ENABLED" in
+  true|false) ;;
+  *) echo "TRANSACTIONAL_SMTP_ENABLED must be true or false" >&2; exit 1 ;;
+esac
+if [ "$TRANSACTIONAL_SMTP_ENABLED" = "true" ]; then
+  [ "$TRANSACTIONAL_ENABLED" = "true" ] || {
+    echo "TRANSACTIONAL_SMTP_ENABLED requires TRANSACTIONAL_ENABLED=true" >&2
+    exit 1
+  }
+  [ -n "${TRANSACTIONAL_SMTP_HOSTNAME:-}" ] || {
+    echo "TRANSACTIONAL_SMTP_HOSTNAME is required when transactional SMTP is enabled" >&2
+    exit 1
+  }
+fi
+
+validate_positive_integer() {
+  local name="$1"
+  local value="${!name:-}"
+  [ -z "$value" ] && return 0
+  [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -gt 0 ] || {
+    echo "$name must be a positive integer" >&2
+    exit 1
+  }
+}
+for name in \
+  TRANSACTIONAL_MAX_RETRY_HOURS \
+  TRANSACTIONAL_REQUESTS_PER_SECOND \
+  TRANSACTIONAL_DAILY_LIMIT \
+  TRANSACTIONAL_MONTHLY_LIMIT \
+  TRANSACTIONAL_MAX_RECIPIENTS \
+  TRANSACTIONAL_MAX_MESSAGE_BYTES \
+  TRANSACTIONAL_WORKER_CONCURRENCY \
+  TRANSACTIONAL_SMTP_POOL_SIZE \
+  TRANSACTIONAL_MINIMUM_SAMPLE_SIZE; do
+  validate_positive_integer "$name"
+done
+if [ -n "${TRANSACTIONAL_MAX_RETRY_HOURS:-}" ] &&
+  [ "$TRANSACTIONAL_MAX_RETRY_HOURS" -gt 168 ]; then
+  echo "TRANSACTIONAL_MAX_RETRY_HOURS must not exceed 168" >&2
+  exit 1
+fi
+
+# ADMIN_IP_ALLOWLIST is optional. Reject malformed entries before startup;
+# Identity still performs canonical IP/CIDR parsing and fails closed at request time.
+if [ -n "${ADMIN_IP_ALLOWLIST:-}" ]; then
+  IFS=',' read -r -a admin_ips <<< "$ADMIN_IP_ALLOWLIST"
+  for admin_ip in "${admin_ips[@]}"; do
+    admin_ip="$(printf '%s' "$admin_ip" | tr -d '[:space:]')"
+    if [[ ! "$admin_ip" =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]]; then
+      echo "ADMIN_IP_ALLOWLIST must contain comma-separated IP addresses or CIDR ranges" >&2
+      exit 1
+    fi
+  done
+fi
 
 # --- Required names (values are never echoed) --------------------------------
 # SERVICE_TOKEN      service-to-service auth (gateway, api, identity, workspace)

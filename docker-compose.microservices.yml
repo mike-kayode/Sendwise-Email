@@ -147,6 +147,7 @@ services:
       PLATFORM_SMTP_PASSWORD: ${PLATFORM_SMTP_PASSWORD:-}
       PLATFORM_MAIL_API_KEY: ${PLATFORM_MAIL_API_KEY:-}
       WORKSPACE_URL: http://workspace:8080
+      LEGACY_API_URL: http://api:8080
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -25,11 +26,30 @@ type WorkspaceOrganization struct {
 	Slug string `json:"slug"`
 }
 
+type WorkspaceAdminOrganization struct {
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Slug        string                 `json:"slug"`
+	MemberCount int                    `json:"member_count"`
+	CreatedAt   time.Time              `json:"created_at"`
+	Members     []WorkspaceAdminMember `json:"members,omitempty"`
+}
+
+type WorkspaceAdminMember struct {
+	OrganizationID string    `json:"organization_id"`
+	UserID         string    `json:"user_id"`
+	Role           string    `json:"role"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 // WorkspaceClient is the identity→workspace synchronous contract. It is used
-// only for session minting; authoritative membership state stays in Workspace.
+// for session minting and authorized platform-admin metadata reads;
+// authoritative membership state stays in Workspace.
 type WorkspaceClient interface {
 	DefaultMembership(ctx context.Context, userID string) (*WorkspaceMembership, error)
 	Organization(ctx context.Context, organizationID string) (*WorkspaceOrganization, error)
+	AdminOrganizations(ctx context.Context, search string, limit, offset int) ([]WorkspaceAdminOrganization, int, error)
+	AdminOrganization(ctx context.Context, organizationID string) (*WorkspaceAdminOrganization, error)
 }
 
 // ErrWorkspaceUnavailable indicates the workspace service could not be reached.
@@ -69,6 +89,35 @@ func (c *httpWorkspaceClient) Organization(ctx context.Context, organizationID s
 		return nil, err
 	}
 	return &org, nil
+}
+
+func (c *httpWorkspaceClient) AdminOrganizations(ctx context.Context, search string, limit, offset int) ([]WorkspaceAdminOrganization, int, error) {
+	var resp struct {
+		Data       []WorkspaceAdminOrganization `json:"data"`
+		Pagination struct {
+			Total int `json:"total"`
+		} `json:"pagination"`
+	}
+	path := fmt.Sprintf("/internal/admin/organizations?search=%s&limit=%d&offset=%d",
+		url.QueryEscape(search), limit, offset)
+	if err := c.get(ctx, path, &resp); err != nil {
+		return nil, 0, err
+	}
+	return resp.Data, resp.Pagination.Total, nil
+}
+
+func (c *httpWorkspaceClient) AdminOrganization(ctx context.Context, organizationID string) (*WorkspaceAdminOrganization, error) {
+	var resp struct {
+		Workspace WorkspaceAdminOrganization `json:"workspace"`
+		Members   []WorkspaceAdminMember     `json:"members"`
+	}
+	path := "/internal/admin/organizations/" + url.PathEscape(organizationID)
+	if err := c.get(ctx, path, &resp); err != nil {
+		return nil, err
+	}
+	resp.Workspace.Members = resp.Members
+	resp.Workspace.MemberCount = len(resp.Members)
+	return &resp.Workspace, nil
 }
 
 func (c *httpWorkspaceClient) get(ctx context.Context, path string, dst any) error {

@@ -25,6 +25,8 @@ type EmailTheme = {
   link: string;
 };
 
+const emptyBlocks: EmailBlock[] = [];
+
 const defaultTheme: EmailTheme = {
   background: "#f1f5f9",
   content_background: "#ffffff",
@@ -119,12 +121,13 @@ function importedHTMLPreviewDocument(source: string): string {
 const emptyPreviewDocument = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body></body></html>";
 
 export function EmailPreview({
-  blocks = [],
+  blocks = emptyBlocks,
   subject = "A better way to stay in touch",
   preheader = "Automations, faster imports, and a refreshed template library.",
   theme = defaultTheme,
   textContent,
   html,
+  sanitizedDocument,
   viewport = "desktop",
 }: {
   blocks?: EmailBlock[];
@@ -133,16 +136,26 @@ export function EmailPreview({
   theme?: EmailTheme;
   textContent?: string;
   html?: string;
+  sanitizedDocument?: string;
   viewport?: "desktop" | "mobile";
 }) {
   const [customHTMLPreviews, setCustomHTMLPreviews] = useState<Record<string, string>>({});
+  const hasRenderedHTML = sanitizedDocument !== undefined || html !== undefined;
 
   useEffect(() => {
-    setCustomHTMLPreviews(Object.fromEntries(
+    const nextPreviews = Object.fromEntries(
       blocks
         .filter((block) => block.type === "custom_html")
         .map((block) => [block.id, importedHTMLPreviewDocument(block.content)]),
-    ));
+    );
+    setCustomHTMLPreviews((current) => {
+      const currentKeys = Object.keys(current);
+      const nextKeys = Object.keys(nextPreviews);
+      if (currentKeys.length === nextKeys.length && nextKeys.every((key) => current[key] === nextPreviews[key])) {
+        return current;
+      }
+      return nextPreviews;
+    });
   }, [blocks]);
 
   return (
@@ -153,12 +166,12 @@ export function EmailPreview({
         </p>
         <p className="mt-0.5 truncate text-[11px] text-slate-400">{preheader}</p>
       </div>
-      <div className="px-8 py-8" style={{ backgroundColor: theme.background }}>
-        {html !== undefined ? (
+      <div className={hasRenderedHTML ? "p-0" : "px-8 py-8"} style={{ backgroundColor: theme.background }}>
+        {hasRenderedHTML ? (
           <iframe
             title="Email HTML preview"
             sandbox=""
-            srcDoc={importedHTMLPreviewDocument(html)}
+            srcDoc={sanitizedDocument ?? importedHTMLPreviewDocument(html ?? "")}
             className="mx-auto min-h-[480px] w-full max-w-2xl rounded border border-slate-200 bg-white"
           />
         ) : <div className="email-canvas mx-auto max-w-md space-y-3 p-6 text-sm" style={{ backgroundColor: theme.content_background, color: theme.text }}>

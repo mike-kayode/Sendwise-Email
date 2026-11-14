@@ -18,6 +18,7 @@ import (
 	"github.com/khayode/email-platform/internal/observability"
 	"github.com/khayode/email-platform/internal/outbox"
 	"github.com/khayode/email-platform/internal/session"
+	"github.com/khayode/email-platform/internal/transactional"
 )
 
 func main() {
@@ -70,6 +71,14 @@ func main() {
 	campaignService := campaigns.NewService(pool, publisher, logger, cfg.MaxDeliveryAttempts, cfg.RequireVerifiedDomain)
 	apiKeyService := auth.NewAPIKeyService(pool, logger)
 	server := api.New(cfg, pool, tokens, campaignService, apiKeyService, bus, logger)
+	if cfg.TransactionalSMTPEnabled {
+		go func() {
+			if err := transactional.NewSMTPSubmissionServer(cfg, pool).Run(ctx); err != nil {
+				logger.Error("transactional SMTP server stopped", "error", err)
+				stop()
+			}
+		}()
+	}
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,

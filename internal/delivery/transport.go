@@ -18,7 +18,15 @@ type Message struct {
 	HTML         string
 	Text         string
 	Headers      map[string]string
+	Attachments  []Attachment
 	DKIM         *DKIMConfig
+	RequestDSN   bool
+}
+
+type Attachment struct {
+	Filename    string
+	ContentType string
+	Content     []byte
 }
 
 type Result struct {

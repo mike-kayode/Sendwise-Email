@@ -1,23 +1,17 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Button } from "@/components/ui/button";
-import {
-  Field,
-  FieldLabel,
-} from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/components/ui/use-toast";
-import { PageHeader } from "@/components/page-header";
 import { ApiError } from "@/lib/api-errors";
 import { loginErrorMessage } from "@/lib/login-utils";
+import { AuthFrame } from "@/components/marketing/site";
 
 const loginSchema = z.object({
   email: z.string().email("Enter a valid email address."),
@@ -61,63 +55,70 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#f6f8f7] px-4">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>Sign in to Sendwise</CardTitle>
-          <CardDescription>
-            Enter your workspace credentials below.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <PageHeader title="Welcome back" description="Sign in to your workspace." />
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-              <Field>
-                <FieldLabel>Email address</FieldLabel>
-                <Input
-                  {...form.register("email")}
-                  placeholder="you@example.com"
-                  type="email"
-                  autoComplete="username"
-                  disabled={form.formState.isSubmitting}
-                />
-                {form.formState.errors.email && (
-                  <p className="text-sm text-rose-600">{form.formState.errors.email.message}</p>
-                )}
-              </Field>
-              <Field>
-                <FieldLabel>Password</FieldLabel>
-                <Input
-                  type="password"
-                  {...form.register("password")}
-                  placeholder="••••••••"
-                  autoComplete="current-password"
-                  disabled={form.formState.isSubmitting}
-                />
-                {form.formState.errors.password && (
-                  <p className="text-sm text-rose-600">{form.formState.errors.password.message}</p>
-                )}
-              </Field>
-              <div className="flex items-center justify-between">
-                <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-                  {form.formState.isSubmitting ? "Signing in..." : "Sign in"}
-                </Button>
+    <AuthFrame>
+      <div className="wrap split auth-columns">
+        <aside className="dark auth-pitch">
+          <div>
+            <span className="eyebrow eyebrow-dark">Welcome back</span>
+            <h1 className="display">Your campaigns and delivery logs are waiting.</h1>
+            <p className="lead">Sign in to send, check domain status and see what happened to every message.</p>
+          </div>
+          <figure className="auth-image">
+            <Image
+              src="/images/email-performance-dashboard.jpg"
+              alt="Laptop displaying performance charts in an analytics dashboard"
+              width={1400}
+              height={933}
+              sizes="(max-width: 900px) 100vw, 48vw"
+              priority
+            />
+          </figure>
+          <ul className="checks">
+            <li>Live DNS and domain verification status</li>
+            <li>Campaign and transactional reports</li>
+            <li>API keys, SMTP credentials and webhooks</li>
+          </ul>
+        </aside>
+        <section className="card auth-form">
+          <h2 className="title auth-form-title">Sign in</h2>
+          <p className="small auth-form-description">New to Sendwise? <Link href="/register">Create an account</Link></p>
+          <form onSubmit={form.handleSubmit(onSubmit)} className="form-stack">
+            <div>
+              <label className="label" htmlFor="login-email">Email</label>
+              <input
+                {...form.register("email")}
+                className="field"
+                id="login-email"
+                placeholder="you@example.com"
+                type="email"
+                autoComplete="email"
+                disabled={form.formState.isSubmitting}
+              />
+              {form.formState.errors.email && <p className="form-error">{form.formState.errors.email.message}</p>}
+            </div>
+            <div>
+              <div className="auth-password-label">
+                <label className="label" htmlFor="login-password">Password</label>
+                <Link className="small" href="/forgot-password">Forgot password?</Link>
               </div>
-              <p className="text-sm text-center text-slate-500">
-                Don't have an account?{" "}
-                <Link href="/register" className="font-medium text-emerald-800 hover:text-emerald-900">
-                  Create workspace
-                </Link>
-              </p>
-              <p className="text-sm text-center text-slate-500">
-                Forgot your password?{" "}
-                <Link href="/forgot-password" className="font-medium text-emerald-800 hover:text-emerald-900">
-                  Reset password
-                </Link>
-              </p>
+              <input
+                type="password"
+                {...form.register("password")}
+                className="field"
+                id="login-password"
+                placeholder="••••••••"
+                autoComplete="current-password"
+                disabled={form.formState.isSubmitting}
+              />
+              {form.formState.errors.password && <p className="form-error">{form.formState.errors.password.message}</p>}
+            </div>
+            <button type="submit" className="btn btn-ink auth-submit" disabled={form.formState.isSubmitting}>
+              {form.formState.isSubmitting ? "Signing in..." : "Sign in"}
+            </button>
+            <p className="small auth-bottom-link">Don't have an account? <Link href="/register">Create workspace</Link></p>
           </form>
-        </CardContent>
-      </Card>
-    </div>
+        </section>
+      </div>
+    </AuthFrame>
   );
 }

@@ -553,14 +553,14 @@ export default function SettingsPage() {
             <CardHeader>
               <CardTitle>Sender profile</CardTitle>
               <CardDescription>
-                This information is required for campaign sending and is included in every compliance footer.
+                Company, website, and support contact are required. The postal address is optional and appears in the compliance footer when supplied.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <p className={`rounded-lg p-3 text-sm ${senderProfile.complete ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-900"}`}>
                 {senderProfile.complete
                   ? "Profile complete. Campaign sends are enabled."
-                  : "Complete the company, postal address, website, and support email to enable campaign sends."}
+                  : "Complete the company, website, and support email to enable campaign sends."}
               </p>
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="text-sm font-medium text-slate-700">
@@ -572,24 +572,24 @@ export default function SettingsPage() {
                   <Input required className="mt-1" type="email" value={senderProfile.support_email} onChange={(event) => setSenderProfile({ ...senderProfile, support_email: event.target.value })} />
                 </label>
                 <label className="text-sm font-medium text-slate-700 sm:col-span-2">
-                  Street address
-                  <Input required className="mt-1" value={senderProfile.street_address} onChange={(event) => setSenderProfile({ ...senderProfile, street_address: event.target.value })} />
+                  Street address (optional)
+                  <Input className="mt-1" value={senderProfile.street_address} onChange={(event) => setSenderProfile({ ...senderProfile, street_address: event.target.value })} />
                 </label>
                 <label className="text-sm font-medium text-slate-700">
-                  City
-                  <Input required className="mt-1" value={senderProfile.city} onChange={(event) => setSenderProfile({ ...senderProfile, city: event.target.value })} />
+                  City (optional)
+                  <Input className="mt-1" value={senderProfile.city} onChange={(event) => setSenderProfile({ ...senderProfile, city: event.target.value })} />
                 </label>
                 <label className="text-sm font-medium text-slate-700">
-                  Region / state
+                  Region / state (optional)
                   <Input className="mt-1" value={senderProfile.region} onChange={(event) => setSenderProfile({ ...senderProfile, region: event.target.value })} />
                 </label>
                 <label className="text-sm font-medium text-slate-700">
-                  Postal code
-                  <Input required className="mt-1" value={senderProfile.postal_code} onChange={(event) => setSenderProfile({ ...senderProfile, postal_code: event.target.value })} />
+                  Postal code (optional)
+                  <Input className="mt-1" value={senderProfile.postal_code} onChange={(event) => setSenderProfile({ ...senderProfile, postal_code: event.target.value })} />
                 </label>
                 <label className="text-sm font-medium text-slate-700">
-                  Country
-                  <Input required className="mt-1" value={senderProfile.country} onChange={(event) => setSenderProfile({ ...senderProfile, country: event.target.value })} />
+                  Country (optional)
+                  <Input className="mt-1" value={senderProfile.country} onChange={(event) => setSenderProfile({ ...senderProfile, country: event.target.value })} />
                 </label>
                 <label className="text-sm font-medium text-slate-700 sm:col-span-2">
                   Website

@@ -6,16 +6,9 @@ import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Button } from "@/components/ui/button";
-import {
-  Field,
-  FieldLabel,
-} from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiFetch } from "@/lib/auth";
 import { useToast } from "@/components/ui/use-toast";
-import { PageHeader } from "@/components/page-header";
+import { AuthFrame } from "@/components/marketing/site";
 
 const resetPasswordSchema = z.object({
   password: z.string().min(10, "Password must be at least 10 characters."),
@@ -43,19 +36,14 @@ export default function ResetPasswordPage() {
 
   if (!token) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#f6f8f7] px-4">
-        <Card className="w-full max-w-md">
-          <CardHeader>
-            <CardTitle>Invalid reset link</CardTitle>
-            <CardDescription>This password reset link is invalid or missing.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-slate-500">
-              Please request a new reset link or contact support.
-            </p>
-          </CardContent>
-        </Card>
-      </div>
+      <AuthFrame>
+        <section className="wrap card auth-card">
+          <h1 className="title auth-form-title">Invalid reset link</h1>
+          <p className="small auth-form-description">This password reset link is invalid or missing.</p>
+          <p className="small auth-status-note">Please request a new reset link or contact support.</p>
+          <Link className="btn btn-ink auth-submit" href="/forgot-password">Request a new link</Link>
+        </section>
+      </AuthFrame>
     );
   }
 
@@ -80,55 +68,27 @@ export default function ResetPasswordPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#f6f8f7] px-4">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>Set new password</CardTitle>
-          <CardDescription>
-            Enter your new password below.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <PageHeader title="Reset password" description="Create a new password for your Sendwise account." />
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-              <Field>
-                <FieldLabel>New password</FieldLabel>
-                <Input
-                  {...form.register("password")}
-                  placeholder="••••••••••"
-                  type="password"
-                  autoComplete="new-password"
-                  disabled={form.formState.isSubmitting}
-                />
-                {form.formState.errors.password && (
-                  <p className="text-sm text-rose-600">{form.formState.errors.password.message}</p>
-                )}
-              </Field>
-              <Field>
-                <FieldLabel>Confirm password</FieldLabel>
-                <Input
-                  {...form.register("confirmPassword")}
-                  placeholder="••••••••••"
-                  type="password"
-                  autoComplete="new-password"
-                  disabled={form.formState.isSubmitting}
-                />
-                {form.formState.errors.confirmPassword && (
-                  <p className="text-sm text-rose-600">{form.formState.errors.confirmPassword.message}</p>
-                )}
-              </Field>
-              <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-                {form.formState.isSubmitting ? "Resetting password..." : "Reset password"}
-              </Button>
-              <p className="text-sm text-center text-slate-500">
-                Remember your password?{" "}
-                <Link href="/login" className="font-medium text-emerald-800 hover:text-emerald-900">
-                  Sign in
-                </Link>
-              </p>
-          </form>
-        </CardContent>
-      </Card>
-    </div>
+    <AuthFrame>
+      <section className="wrap card auth-card">
+        <h1 className="title auth-form-title">Set new password</h1>
+        <p className="small auth-form-description">Enter your new password below.</p>
+        <form onSubmit={form.handleSubmit(onSubmit)} className="form-stack">
+          <div>
+            <label className="label" htmlFor="reset-password">New password</label>
+            <input {...form.register("password")} id="reset-password" className="field" placeholder="••••••••••" type="password" autoComplete="new-password" disabled={form.formState.isSubmitting} />
+            {form.formState.errors.password && <p className="form-error">{form.formState.errors.password.message}</p>}
+          </div>
+          <div>
+            <label className="label" htmlFor="reset-confirm-password">Confirm password</label>
+            <input {...form.register("confirmPassword")} id="reset-confirm-password" className="field" placeholder="••••••••••" type="password" autoComplete="new-password" disabled={form.formState.isSubmitting} />
+            {form.formState.errors.confirmPassword && <p className="form-error">{form.formState.errors.confirmPassword.message}</p>}
+          </div>
+          <button type="submit" className="btn btn-ink auth-submit" disabled={form.formState.isSubmitting}>
+            {form.formState.isSubmitting ? "Resetting password..." : "Reset password"}
+          </button>
+          <p className="small auth-bottom-link">Remember your password? <Link href="/login">Sign in</Link></p>
+        </form>
+      </section>
+    </AuthFrame>
   );
 }

@@ -18,6 +18,22 @@ import { useToast } from "@/components/ui/use-toast";
 type ContentBlock = { id: string; type: string; content: string; url?: string; src?: string };
 type ContactList = { id: string; name: string };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function campaignDesign(content: unknown): Record<string, unknown> {
+  if (typeof content === "string") {
+    try {
+      const parsed: unknown = JSON.parse(content);
+      return isRecord(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return isRecord(content) ? content : {};
+}
+
 export default function CampaignPreviewPage() {
   const { id } = useParams<{ id: string }>();
   const { toast } = useToast();
@@ -41,6 +57,17 @@ export default function CampaignPreviewPage() {
     queryFn: async () => {
       const res = await apiFetch<{ data: ContactList[] | null }>("/lists");
       return res.data ?? [];
+    },
+  });
+  const renderedPreviewQuery = useQuery({
+    queryKey: ["campaign-render-preview", id, campaignQuery.data?.content],
+    enabled: Boolean(campaignQuery.data),
+    queryFn: async () => {
+      if (!campaignQuery.data) throw new Error("Campaign design is not loaded.");
+      return apiFetch<{ html: string }>("/templates/preview", {
+        method: "POST",
+        body: JSON.stringify({ design: campaignDesign(campaignQuery.data.content) }),
+      });
     },
   });
 
@@ -105,7 +132,7 @@ export default function CampaignPreviewPage() {
     );
   }
 
-  const content = typeof campaign.content === "string" ? JSON.parse(campaign.content) : campaign.content ?? {};
+  const content = campaignDesign(campaign.content);
   const blocks: ContentBlock[] = Array.isArray(content.blocks) ? content.blocks : [];
   const designHTML = typeof content.html === "string" ? content.html : "";
   const plainText = content.mode === "plain" && typeof content.text_content === "string"
@@ -174,13 +201,21 @@ export default function CampaignPreviewPage() {
           <div className="rounded-xl bg-slate-100 p-4 sm:p-8">
             <div className={device === "mobile" ? "mx-auto max-w-sm" : "mx-auto max-w-2xl"}>
               {designHTML || blocks.length > 0 || plainText !== undefined ? (
-                <EmailPreview
-                  subject={campaign.subject || "(no subject)"}
-                  preheader={campaign.preview_text || undefined}
-                  blocks={blocks}
-                  html={plainText === undefined ? designHTML || undefined : undefined}
-                  textContent={plainText}
-                />
+                <>
+                  <EmailPreview
+                    subject={campaign.subject || "(no subject)"}
+                    preheader={campaign.preview_text || undefined}
+                    blocks={blocks}
+                    sanitizedDocument={renderedPreviewQuery.data?.html}
+                    textContent={plainText}
+                  />
+                  {renderedPreviewQuery.error ? (
+                    <p role="alert" className="mt-2 text-sm text-rose-700">{renderedPreviewQuery.error.message}</p>
+                  ) : null}
+                  {renderedPreviewQuery.isLoading ? (
+                    <p role="status" className="mt-2 text-sm text-slate-500">Rendering sanitized send preview…</p>
+                  ) : null}
+                </>
               ) : (
                 <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
                   <p className="text-sm font-medium text-slate-700">This campaign has no content yet.</p>

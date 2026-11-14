@@ -17,6 +17,7 @@ import (
 	"github.com/khayode/email-platform/internal/messaging"
 	"github.com/khayode/email-platform/internal/observability"
 	"github.com/khayode/email-platform/internal/projections"
+	"github.com/khayode/email-platform/internal/transactional"
 	"github.com/khayode/email-platform/internal/worker"
 )
 
@@ -85,6 +86,31 @@ func main() {
 	}
 
 	deliveryWorker := worker.New(cfg, pool, bus, transport, tokens, campaignService, logger)
+	if cfg.TransactionalEnabled {
+		transactionalSMTPPool := delivery.NewSMTPPool(
+			cfg.SMTPAddr,
+			cfg.SMTPHost,
+			cfg.SMTPUsername,
+			cfg.SMTPPassword,
+			cfg.Env == "development" || cfg.Env == "test",
+			cfg.TransactionalSMTPPoolSize,
+		)
+		defer transactionalSMTPPool.Close()
+		transactionalWorker := transactional.NewDeliveryWorker(cfg, pool, transactionalSMTPPool, logger)
+		go func() {
+			if err := transactionalWorker.Run(ctx); err != nil {
+				logger.Error("transactional delivery worker stopped", "error", err)
+				stop()
+			}
+		}()
+		webhookWorker := transactional.NewWebhookWorker(pool, cfg, logger)
+		go func() {
+			if err := webhookWorker.Run(ctx); err != nil {
+				logger.Error("transactional webhook worker stopped", "error", err)
+				stop()
+			}
+		}()
+	}
 
 	runErr := deliveryWorker.Run(ctx)
 	if runErr != nil {

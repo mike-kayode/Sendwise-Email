@@ -19,6 +19,7 @@ tags:
   - name: forms
   - name: campaigns
   - name: templates
+  - name: transactional
   - name: domains
   - name: analytics
   - name: public
@@ -29,6 +30,10 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    TransactionalBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: Sendwise transactional API key
   schemas:
     Error:
       type: object
@@ -200,6 +205,7 @@ components:
         spf_status: { type: string }
         dkim_status: { type: string }
         dmarc_status: { type: string }
+        transactional_enabled: { type: boolean }
     AnalyticsOverview:
       type: object
       properties:
@@ -834,6 +840,246 @@ paths:
       responses:
         '200': { description: Campaign cancelled }
 
+  /api/v1/transactional/messages:
+    post:
+      tags: [transactional]
+      security: [{ TransactionalBearer: [] }]
+      summary: Queue a transactional message
+      description: Send either inline content or a workspace-owned template with string variables. Template content is version-pinned; HTML substitutions are escaped.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          schema: { type: string, maxLength: 200 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to]
+              properties:
+                from: { type: string, format: email }
+                to: { type: array, items: { type: string, format: email } }
+                cc: { type: array, items: { type: string, format: email } }
+                bcc: { type: array, items: { type: string, format: email } }
+                reply_to: { type: string, format: email }
+                subject: { type: string }
+                html: { type: string }
+                text: { type: string }
+                template_id: { type: string, format: uuid }
+                variables:
+                  type: object
+                  additionalProperties: { type: string }
+                headers:
+                  type: object
+                  additionalProperties: { type: string }
+                attachments: { type: array, items: { type: object } }
+                tags: { type: array, items: { type: string } }
+                metadata: { type: object, additionalProperties: true }
+      responses:
+        '202': { description: Message queued or accepted in test mode }
+        '400': { description: Invalid message or template variables }
+        '403': { description: Workspace disabled or paused }
+        '429': { description: Workspace quota exceeded }
+    get:
+      tags: [transactional]
+      security: [{ TransactionalBearer: [] }]
+      summary: List messages (requires read scope)
+      responses:
+        '200': { description: Workspace messages }
+  /api/v1/transactional/messages/{id}:
+    get:
+      tags: [transactional]
+      security: [{ TransactionalBearer: [] }]
+      summary: Read a message and recipient delivery statuses (requires read scope)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Message details and per-recipient statuses }
+        '404': { description: Message not found in the current workspace }
+  /api/v1/transactional/dashboard/messages:
+    get:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: List workspace messages for the dashboard
+      responses:
+        '200': { description: Recent transactional messages }
+  /api/v1/transactional/usage:
+    get:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Read transactional delivery usage and workspace limits
+      responses:
+        '200': { description: Current-day and current-month usage }
+  /api/v1/transactional/settings:
+    get:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Read workspace transactional settings
+      responses:
+        '200': { description: Settings and sending limits }
+    put:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Enable, disable, or pause transactional sending
+      responses:
+        '200': { description: Updated settings }
+  /api/v1/transactional/api-keys:
+    get:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: List workspace transactional API keys
+      responses:
+        '200': { description: API key metadata; secret values are never returned }
+    post:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Create a transactional API key
+      description: Returns the full key once in plain_key. Store it securely.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 100 }
+                scopes: { type: array, items: { type: string, enum: [send, read] } }
+                ip_allowlist: { type: array, items: { type: string } }
+                test_mode: { type: boolean, default: false }
+                expires_at: { type: string, format: date-time }
+      responses:
+        '201': { description: API key created with one-time secret }
+  /api/v1/transactional/api-keys/{id}/rotate:
+    post:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Rotate an API key with a 24-hour grace period
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '201': { description: Replacement key returned once }
+  /api/v1/transactional/api-keys/{id}:
+    delete:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Revoke a transactional API key
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: API key revoked }
+  /api/v1/transactional/smtp-credentials:
+    get:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: List workspace SMTP submission credentials
+      responses:
+        '200': { description: Credential metadata; passwords are never returned }
+    post:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Create an SMTP submission credential
+      description: Returns the username and password once. Only a hash of the password is stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 100 }
+      responses:
+        '201': { description: Credential created with one-time password }
+  /api/v1/transactional/smtp-credentials/{id}:
+    delete:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Revoke an SMTP submission credential
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: SMTP credential revoked }
+  /api/v1/transactional/webhooks:
+    get:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: List transactional webhook endpoints
+      responses:
+        '200': { description: Workspace webhook metadata }
+    post:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Create a transactional webhook endpoint
+      description: Requires HTTPS and a public destination; returns the signing secret once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, events]
+              properties:
+                url: { type: string, format: uri }
+                events: { type: array, items: { type: string } }
+      responses:
+        '201': { description: Webhook created with one-time signing secret }
+  /api/v1/transactional/webhooks/{id}:
+    put:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Update a webhook endpoint
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Updated webhook metadata }
+    delete:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Delete a webhook endpoint
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Webhook deleted }
+  /api/v1/transactional/webhooks/{id}/rotate-secret:
+    post:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Rotate a webhook signing secret
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: One-time signing secret }
+  /api/v1/transactional/templates:
+    get:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: List versioned transactional templates
+      responses:
+        '200': { description: Workspace template summaries }
+    post:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Create a transactional template
+      responses:
+        '201': { description: Template and initial version created }
+  /api/v1/transactional/templates/{id}:
+    get:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Read the current transactional template version
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Template details and variables }
+    patch:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Update template metadata or append a new immutable content version
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Updated transactional template }
+    delete:
+      tags: [transactional]
+      security: [{ BearerAuth: [] }]
+      summary: Delete a workspace transactional template
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Template deleted }
+
   /api/v1/domains:
     get:
       tags: [domains]
@@ -856,6 +1102,25 @@ paths:
       responses:
         '204': { description: Sending domain and associated sender identities deleted }
         '404': { description: Sending domain not found in the current workspace }
+  /api/v1/domains/{id}/transactional:
+    put:
+      tags: [domains]
+      security: [{ BearerAuth: [] }]
+      summary: Enable or disable transactional sending for a domain
+      description: Enabling requires an owned domain with verified SPF and DKIM. DMARC remains advisory.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200': { description: Updated sending domain }
+        '409': { description: Domain is not ready for transactional sending }
   /api/v1/domains/{id}/verify:
     post:
       tags: [domains]

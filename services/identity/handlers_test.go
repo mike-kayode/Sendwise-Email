@@ -353,8 +353,10 @@ type fakeWorkspace struct {
 	mu           sync.Mutex
 	memberships  map[string]WorkspaceMembership
 	orgs         map[string]WorkspaceOrganization
+	adminOrgs    []WorkspaceAdminOrganization
 	defaultErr   error
 	orgErr       error
+	adminErr     error
 	defaultCalls int
 }
 
@@ -390,6 +392,47 @@ func (f *fakeWorkspace) Organization(_ context.Context, orgID string) (*Workspac
 		return nil, ErrNotFound
 	}
 	return &org, nil
+}
+
+func (f *fakeWorkspace) AdminOrganizations(_ context.Context, search string, limit, offset int) ([]WorkspaceAdminOrganization, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.adminErr != nil {
+		return nil, 0, f.adminErr
+	}
+	query := strings.ToLower(search)
+	matches := make([]WorkspaceAdminOrganization, 0, len(f.adminOrgs))
+	for _, org := range f.adminOrgs {
+		if query == "" || strings.Contains(strings.ToLower(org.Name), query) ||
+			strings.Contains(strings.ToLower(org.Slug), query) {
+			matches = append(matches, org)
+		}
+	}
+	total := len(matches)
+	if offset >= total {
+		return []WorkspaceAdminOrganization{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return append([]WorkspaceAdminOrganization(nil), matches[offset:end]...), total, nil
+}
+
+func (f *fakeWorkspace) AdminOrganization(_ context.Context, organizationID string) (*WorkspaceAdminOrganization, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.adminErr != nil {
+		return nil, f.adminErr
+	}
+	for _, org := range f.adminOrgs {
+		if org.ID == organizationID {
+			copy := org
+			copy.Members = append([]WorkspaceAdminMember(nil), org.Members...)
+			return &copy, nil
+		}
+	}
+	return nil, ErrNotFound
 }
 
 // --- helpers ---------------------------------------------------------------

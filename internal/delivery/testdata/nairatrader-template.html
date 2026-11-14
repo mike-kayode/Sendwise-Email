@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    .price-row { letter-spacing: 0.02em; }
+    @media screen and (max-width: 620px) {
+      .email-shell { width: 100% !important; }
+      .price-row td { white-space: normal; }
+    }
+    @import url("https://unsafe.example/tracker.css");
+  </style>
+</head>
+<body>
+  <table class="email-shell" width="600" cellpadding="0" cellspacing="0" bgcolor="#ffffff">
+    <tr>
+      <td align="center">
+        <a href="https://nairatrader.example" target="_blank">
+          <img src="https://images.example-cdn.test/nairatrader-logo.webp" alt="NairaTrader" width="180">
+        </a>
+      </td>
+    </tr>
+    <tr class="price-row" bgcolor="#f7f7f7">
+      <td>
+        <table width="100%">
+          <tr><td class="price-name">Market update</td><td class="price-value">₦1,250.00</td></tr>
+          <tr><td class="price-name">Transaction fee</td><td class="price-value">₦25.00</td></tr>
+          <tr><td class="price-name">Total</td><td class="price-value">₦1,275.00</td></tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

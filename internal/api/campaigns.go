@@ -443,7 +443,8 @@ func (s *Server) validateCampaign(w http.ResponseWriter, r *http.Request) {
 			add("sender", "error", err.Error())
 		case errors.Is(err, errSenderProfileIncomplete):
 			add("sender_profile", "error", err.Error())
-		case errors.Is(err, errSenderDomainUnverified), errors.Is(err, errSenderDomainConflict), errors.Is(err, errSenderDomainMissing):
+		case errors.Is(err, errSenderDomainUnverified), errors.Is(err, errSenderDomainConflict),
+			errors.Is(err, errSenderDomainMissing), errors.Is(err, errSenderDomainDisabled):
 			add("sender", "error", err.Error())
 		default:
 			add("sender", "error", "Could not verify the sender identity and profile.")
@@ -767,37 +768,12 @@ func (s *Server) cancelCampaign(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
-	tag, err := tx.Exec(r.Context(), `
-		UPDATE campaigns
-		SET status = 'cancelled', completed_at = now(), updated_at = now()
-		WHERE id = $1 AND organization_id = $2
-		  AND status IN ('draft', 'ready', 'scheduled', 'processing', 'sending', 'paused')
-	`, campaignID, orgID)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not cancel the campaign.")
-		return
-	}
-	if tag.RowsAffected() == 0 {
+	if err := cancelCampaignInTx(r.Context(), tx, campaignID, orgID); errors.Is(err, errCampaignNotCancellable) {
 		httpx.Error(w, http.StatusConflict, "campaign_not_cancellable", "The campaign cannot be cancelled in its current state.")
 		return
-	}
-
-	if _, err := tx.Exec(r.Context(), `
-		UPDATE delivery_jobs
-		SET status = 'cancelled', last_error = 'campaign_cancelled', updated_at = now()
-		WHERE campaign_id = $1 AND organization_id = $2
-		  AND status IN ('queued', 'processing', 'deferred')
-	`, campaignID, orgID); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not cancel pending deliveries.")
-		return
-	}
-
-	if _, err := tx.Exec(r.Context(), `
-		UPDATE campaign_recipients
-		SET status = 'skipped'
-		WHERE campaign_id = $1 AND organization_id = $2 AND status = 'pending'
-	`, campaignID, orgID); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not update pending recipients.")
+	} else if err != nil {
+		s.logger.Error("cancel campaign", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not cancel the campaign.")
 		return
 	}
 
@@ -807,6 +783,39 @@ func (s *Server) cancelCampaign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.JSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+var errCampaignNotCancellable = errors.New("campaign is not cancellable")
+
+func cancelCampaignInTx(ctx context.Context, tx pgx.Tx, campaignID, organizationID string) error {
+	tag, err := tx.Exec(ctx, `
+		UPDATE campaigns
+		SET status = 'cancelled', completed_at = now(), updated_at = now()
+		WHERE id = $1 AND organization_id = $2
+		  AND status IN ('draft', 'ready', 'scheduled', 'processing', 'sending', 'paused')
+	`, campaignID, organizationID)
+	if err != nil {
+		return fmt.Errorf("mark campaign cancelled: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return errCampaignNotCancellable
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE delivery_jobs
+		SET status = 'cancelled', last_error = 'campaign_cancelled', updated_at = now()
+		WHERE campaign_id = $1 AND organization_id = $2
+		  AND status IN ('queued', 'processing', 'deferred')
+	`, campaignID, organizationID); err != nil {
+		return fmt.Errorf("cancel pending delivery jobs: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE campaign_recipients
+		SET status = 'skipped'
+		WHERE campaign_id = $1 AND organization_id = $2 AND status = 'pending'
+	`, campaignID, organizationID); err != nil {
+		return fmt.Errorf("skip pending campaign recipients: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) writeQueueError(w http.ResponseWriter, err error) {

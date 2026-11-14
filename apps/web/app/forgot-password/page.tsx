@@ -5,17 +5,9 @@ import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Button } from "@/components/ui/button";
-import {
-  Field,
-  FieldLabel,
-} from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiFetch } from "@/lib/auth";
 import { useToast } from "@/components/ui/use-toast";
-import { Mail } from "lucide-react";
-import { PageHeader } from "@/components/page-header";
+import { AuthFrame } from "@/components/marketing/site";
 
 const forgotPasswordSchema = z.object({
   email: z.string().email("Enter a valid email address."),
@@ -53,42 +45,22 @@ export default function ForgotPasswordPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#f6f8f7] px-4">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>Reset your password</CardTitle>
-          <CardDescription>
-            Enter your email address and we’ll send you a reset link.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <PageHeader title="Forgot password" description="Reset your Sendwise account password." />
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-              <Field>
-                <FieldLabel>Email address</FieldLabel>
-                <Input
-                  {...form.register("email")}
-                  placeholder="you@example.com"
-                  type="email"
-                  autoComplete="email"
-                  disabled={form.formState.isSubmitting}
-                />
-                {form.formState.errors.email && (
-                  <p className="text-sm text-rose-600">{form.formState.errors.email.message}</p>
-                )}
-              </Field>
-              <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-                {form.formState.isSubmitting ? "Sending..." : "Send reset link"}
-              </Button>
-              <p className="text-sm text-center text-slate-500">
-                Remember your password?{" "}
-                <Link href="/login" className="font-medium text-emerald-800 hover:text-emerald-900">
-                  Sign in
-                </Link>
-              </p>
-          </form>
-        </CardContent>
-      </Card>
-    </div>
+    <AuthFrame>
+      <section className="wrap card auth-card">
+        <h1 className="title auth-form-title">Reset your password</h1>
+        <p className="small auth-form-description">Enter your email address and we’ll send you a reset link.</p>
+        <form onSubmit={form.handleSubmit(onSubmit)} className="form-stack">
+          <div>
+            <label className="label" htmlFor="forgot-email">Email address</label>
+            <input {...form.register("email")} className="field" id="forgot-email" placeholder="you@example.com" type="email" autoComplete="email" disabled={form.formState.isSubmitting} />
+            {form.formState.errors.email && <p className="form-error">{form.formState.errors.email.message}</p>}
+          </div>
+          <button type="submit" className="btn btn-ink auth-submit" disabled={form.formState.isSubmitting}>
+            {form.formState.isSubmitting ? "Sending..." : "Send reset link"}
+          </button>
+          <p className="small auth-bottom-link">Remember your password? <Link href="/login">Sign in</Link></p>
+        </form>
+      </section>
+    </AuthFrame>
   );
 }

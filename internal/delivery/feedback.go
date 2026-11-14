@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
 	"net/mail"
 	"net/textproto"
 	"regexp"
@@ -29,6 +33,7 @@ const (
 	FeedbackHardBounce FeedbackType = "hard_bounce"
 	FeedbackSoftBounce FeedbackType = "soft_bounce"
 	FeedbackComplaint  FeedbackType = "complaint"
+	FeedbackDelivered  FeedbackType = "delivered"
 )
 
 type Feedback struct {
@@ -122,12 +127,17 @@ func ParseFeedbackMessage(reader io.Reader) (Feedback, error) {
 			_, _ = fields.WriteString("\n")
 		}
 	}
-	body, err := io.ReadAll(io.LimitReader(message.Body, maxFeedbackMessageSize))
-	if err != nil {
+	if err := appendFeedbackBody(&fields, textproto.MIMEHeader(message.Header), message.Body); err != nil {
 		return feedback, fmt.Errorf("read feedback body: %w", err)
 	}
-	_, _ = fields.Write(body)
-	all := fields.String()
+	all := strings.NewReplacer(
+		"\r\n ", "", "\r\n\t", "",
+		"\n ", "", "\n\t", "",
+	).Replace(fields.String())
+	all, err = new(mime.WordDecoder).DecodeHeader(all)
+	if err != nil {
+		return feedback, fmt.Errorf("decode MIME-encoded feedback fields: %w", err)
+	}
 
 	feedback.ReturnPath = verpAddressPattern.FindString(all)
 	if feedback.ReturnPath == "" {
@@ -141,12 +151,14 @@ func ParseFeedbackMessage(reader io.Reader) (Feedback, error) {
 	} else {
 		feedback.EnhancedCode = enhancedStatusCode.FindString(all)
 		feedback.Action = strings.ToLower(fieldValue(all, "Action"))
-		if strings.HasPrefix(feedback.EnhancedCode, "5.") {
+		if feedback.Action == "delivered" && strings.HasPrefix(feedback.EnhancedCode, "2.") {
+			feedback.Type = FeedbackDelivered
+		} else if strings.HasPrefix(feedback.EnhancedCode, "5.") {
 			feedback.Type = FeedbackHardBounce
 		} else if strings.HasPrefix(feedback.EnhancedCode, "4.") || feedback.Action == "delayed" {
 			feedback.Type = FeedbackSoftBounce
 		} else {
-			return feedback, errors.New("feedback report has no supported 4.x.x, 5.x.x, or ARF complaint classification")
+			return feedback, errors.New("feedback report has no supported 2.x.x delivery, 4.x.x delay, 5.x.x failure, or ARF complaint classification")
 		}
 	}
 	feedback.Recipient = firstRecipient(all)
@@ -155,6 +167,70 @@ func ParseFeedbackMessage(reader io.Reader) (Feedback, error) {
 		return feedback, errors.New("ARF complaint report has no Feedback-Type")
 	}
 	return feedback, nil
+}
+
+func appendFeedbackBody(fields *strings.Builder, header textproto.MIMEHeader, body io.Reader) error {
+	if fields.Len() > maxFeedbackMessageSize {
+		return fmt.Errorf("decoded feedback body exceeds %d bytes", maxFeedbackMessageSize)
+	}
+	contentType := header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "text/plain"
+	}
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return fmt.Errorf("parse feedback MIME content type: %w", err)
+	}
+	if strings.HasPrefix(mediaType, "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return errors.New("multipart feedback has no boundary")
+		}
+		reader := multipart.NewReader(body, boundary)
+		for {
+			part, err := reader.NextPart()
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("read feedback MIME part: %w", err)
+			}
+			err = appendFeedbackBody(fields, part.Header, part)
+			_ = part.Close()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if !strings.HasPrefix(mediaType, "text/") && !strings.HasPrefix(mediaType, "message/") {
+		return nil
+	}
+	var decoded io.Reader = body
+	switch strings.ToLower(strings.TrimSpace(header.Get("Content-Transfer-Encoding"))) {
+	case "", "7bit", "8bit", "binary":
+	case "base64":
+		decoded = base64.NewDecoder(base64.StdEncoding, body)
+	case "quoted-printable":
+		decoded = quotedprintable.NewReader(body)
+	default:
+		return fmt.Errorf("unsupported feedback transfer encoding %q", header.Get("Content-Transfer-Encoding"))
+	}
+	content, err := io.ReadAll(io.LimitReader(decoded, int64(maxFeedbackMessageSize-fields.Len())+1))
+	if err != nil {
+		return fmt.Errorf("decode feedback MIME body: %w", err)
+	}
+	separatorSize := 0
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		separatorSize = 1
+	}
+	if fields.Len()+len(content)+separatorSize > maxFeedbackMessageSize {
+		return fmt.Errorf("decoded feedback body exceeds %d bytes", maxFeedbackMessageSize)
+	}
+	_, _ = fields.Write(content)
+	if separatorSize > 0 {
+		fields.WriteByte('\n')
+	}
+	return nil
 }
 
 func fieldValue(message, wanted string) string {

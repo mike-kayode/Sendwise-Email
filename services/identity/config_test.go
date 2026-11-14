@@ -24,6 +24,7 @@ func TestLoadConfigValid(t *testing.T) {
 	t.Setenv("IDENTITY_ACCESS_TOKEN_TTL", "10m")
 	t.Setenv("IDENTITY_REFRESH_TOKEN_TTL", "48h")
 	t.Setenv("APP_BASE_URL", "https://app.example.com/")
+	t.Setenv("LEGACY_API_URL", "http://legacy-api:8080/")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -43,6 +44,9 @@ func TestLoadConfigValid(t *testing.T) {
 	}
 	if cfg.AppBaseURL != "https://app.example.com" {
 		t.Errorf("AppBaseURL = %q, want trailing slash trimmed", cfg.AppBaseURL)
+	}
+	if cfg.LegacyAPIURL != "http://legacy-api:8080" {
+		t.Errorf("LegacyAPIURL = %q, want trailing slash trimmed", cfg.LegacyAPIURL)
 	}
 	if cfg.CookieSecure {
 		t.Error("CookieSecure = true in test environment without COOKIE_SECURE")

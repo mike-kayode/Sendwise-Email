@@ -29,6 +29,7 @@ export default function DomainsPage() {
   const [verifyingAll, setVerifyingAll] = useState(false);
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [updatingTransactionalId, setUpdatingTransactionalId] = useState<string | null>(null);
   const [showFullNames, setShowFullNames] = useState(false);
   const dnsSectionRef = useRef<HTMLDivElement>(null);
   const pollingStartedAt = useRef(new Map<string, number>());
@@ -105,6 +106,32 @@ export default function DomainsPage() {
       });
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const handleTransactionalToggle = async (domain: SendingDomain) => {
+    if (updatingTransactionalId) return;
+    setUpdatingTransactionalId(domain.id);
+    try {
+      await apiFetch<SendingDomain>(`/domains/${domain.id}/transactional`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: !domain.transactional_enabled }),
+      });
+      await queryClient.invalidateQueries({ queryKey: ["domains"] });
+      toast({
+        title: domain.transactional_enabled ? "Transactional sending disabled" : "Transactional sending enabled",
+        description: domain.transactional_enabled
+          ? `${domain.domain} can no longer be used for transactional messages.`
+          : `${domain.domain} is available for transactional messages.`,
+      });
+    } catch (error) {
+      toast({
+        title: "Could not update transactional domain access",
+        description: error instanceof Error ? error.message : "The domain setting could not be updated.",
+        variant: "destructive",
+      });
+    } finally {
+      setUpdatingTransactionalId(null);
     }
   };
 
@@ -416,6 +443,27 @@ export default function DomainsPage() {
                       );
                     })}
                   </div>
+
+                  <label
+                    className="mt-4 flex items-center gap-2 border-t border-slate-100 pt-3 text-xs text-slate-700"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={Boolean(domain.transactional_enabled)}
+                      disabled={
+                        updatingTransactionalId !== null ||
+                        (!isReady || domain.spf_status !== "verified" || domain.dkim_status !== "verified") &&
+                          !domain.transactional_enabled
+                      }
+                      onChange={() => void handleTransactionalToggle(domain)}
+                    />
+                    <span>
+                      Allow transactional email
+                      {updatingTransactionalId === domain.id ? " (saving...)" : ""}
+                      <span className="ml-1 text-slate-500">Verified SPF and DKIM required; DMARC is advisory.</span>
+                    </span>
+                  </label>
 
                   <button
                     onClick={(e) => {

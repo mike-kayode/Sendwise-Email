@@ -128,7 +128,7 @@ export default function CampaignDetailPage() {
           <CardContent className="space-y-3 text-sm">
             <div className="flex justify-between gap-4"><span className="text-slate-500">Sender</span><span className="text-right font-medium text-slate-900">{campaign.sender_email}</span></div>
             <div className="flex justify-between gap-4"><span className="text-slate-500">Reply-to</span><span className="text-right font-medium text-slate-900">{campaign.reply_to || "Same as sender"}</span></div>
-            <div className="flex justify-between gap-4"><span className="text-slate-500">Postal address</span><span className="text-right font-medium text-slate-900">{campaign.sender_postal_address || "Required before sending"}</span></div>
+            <div className="flex justify-between gap-4"><span className="text-slate-500">Postal address</span><span className="text-right font-medium text-slate-900">{campaign.sender_postal_address || "Not provided (optional)"}</span></div>
             <div className="flex justify-between gap-4"><span className="text-slate-500">Open tracking</span><span className="text-right font-medium text-slate-900">{campaign.track_opens ? "On" : "Off"}</span></div>
             <div className="flex justify-between gap-4"><span className="text-slate-500">Click tracking</span><span className="text-right font-medium text-slate-900">{campaign.track_clicks ? "On" : "Off"}</span></div>
           </CardContent>

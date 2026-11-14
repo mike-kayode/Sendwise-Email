@@ -31,6 +31,8 @@ func route(path string) (target, upstreamPath string) {
 	switch {
 	case trimmed == "auth" || strings.HasPrefix(rest, "/auth/"):
 		return TargetIdentity, rest
+	case trimmed == "admin" || strings.HasPrefix(rest, "/admin/"):
+		return TargetIdentity, rest
 	case trimmed == "organizations" || strings.HasPrefix(rest, "/organizations/"),
 		trimmed == "members" || strings.HasPrefix(rest, "/members/"),
 		trimmed == "invitations" || strings.HasPrefix(rest, "/invitations/"):

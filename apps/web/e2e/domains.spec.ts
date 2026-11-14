@@ -131,7 +131,7 @@ test("sending domains load from the real API without browser errors", async ({
   const registrationResponse = page.waitForResponse(
     (response) => new URL(response.url()).pathname.endsWith("/auth/register"),
   );
-  await page.getByRole("button", { name: "Create workspace" }).click();
+  await page.getByRole("button", { name: "Create account" }).click();
   const registered = await registrationResponse;
   expect(registered.status(), await registered.text()).toBe(201);
   await page.waitForURL(/\/auth\/verify\?email=/);

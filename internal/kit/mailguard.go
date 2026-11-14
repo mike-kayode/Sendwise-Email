@@ -3,6 +3,7 @@ package kit
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 )
 
@@ -68,4 +69,33 @@ func ValidateProductionMail(env, provider, smtpAddr, smtpHost string) error {
 		return fmt.Errorf("SMTP target %q is a development-only relay and must not be used in APP_ENV=%s; set SMTP_ADDR and SMTP_HOST to a real relay", host, env)
 	}
 	return nil
+}
+
+func IsPublicIP(ip net.IP) bool {
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() ||
+		address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() ||
+		address.IsMulticast() || address.IsUnspecified() {
+		return false
+	}
+	blockedRanges := []netip.Prefix{
+		netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("192.0.0.0/24"),
+		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("198.18.0.0/15"),
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("203.0.113.0/24"),
+		netip.MustParsePrefix("240.0.0.0/4"),
+		netip.MustParsePrefix("2001:db8::/32"),
+	}
+	for _, prefix := range blockedRanges {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
 }

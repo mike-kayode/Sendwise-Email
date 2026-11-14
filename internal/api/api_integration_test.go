@@ -3,12 +3,16 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/smtp"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +28,7 @@ import (
 	"github.com/khayode/email-platform/internal/delivery"
 	"github.com/khayode/email-platform/internal/kit"
 	"github.com/khayode/email-platform/internal/observability"
+	"github.com/khayode/email-platform/internal/transactional"
 	"github.com/khayode/email-platform/services/gateway"
 )
 
@@ -65,6 +70,7 @@ func TestMain(m *testing.M) {
 			JWTIssuer:             "email-platform-test",
 			AccessTokenTTL:        15 * time.Minute,
 			RequireVerifiedDomain: false,
+			ServiceToken:          "integration-service-token",
 			SMTPFrom:              "test@example.com",
 			BounceDomain:          "bounces.example.test",
 			WebhookSecret:         strings.Repeat("w", 32),
@@ -147,6 +153,954 @@ func seedVerifiedSender(t *testing.T, organizationID, localPart string) (string,
 		t.Fatalf("seed sender profile: %v", err)
 	}
 	return identityID, localPart + "@" + domain
+}
+
+func TestInternalAdminDomainDirectoryRequiresServiceTokenAndReturnsMetadataOnly(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	organizationID := uuid.NewString()
+	domainID := uuid.NewString()
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO organizations (id, name, slug)
+		VALUES ($1, 'Admin Directory Workspace', $2)
+	`, organizationID, "admin-domain-"+strings.ReplaceAll(organizationID, "-", "")); err != nil {
+		t.Fatalf("insert admin domain workspace: %v", err)
+	}
+	defer integrationPool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1`, organizationID)
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO sending_domains (
+			id, organization_id, domain, status, dkim_public_key, verification_token,
+			spf_status, dkim_status, dmarc_status, verification_status, dns_check_details
+		) VALUES ($1, $2, 'admin-directory.example.test', 'pending', 'public-key-value',
+		          'private-verification-token', 'verified', 'pending', 'unknown', 'pending',
+		          '{"records":{"spf":{"resolvers":[{"resolver":"1.1.1.1","status":"found"}]}}}'::jsonb)
+	`, domainID, organizationID); err != nil {
+		t.Fatalf("insert admin domain: %v", err)
+	}
+	apiServer := newIntegrationServer(t)
+	apiServer.dnsResolver = &fakeDNSResolver{records: map[string][]string{}}
+	server := httptest.NewServer(apiServer.Handler())
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/internal/admin/domains?search=admin-directory&limit=1", nil)
+	if err != nil {
+		t.Fatalf("build unauthenticated admin domain request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send unauthenticated admin domain request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated admin domain status = %d, want 401", response.StatusCode)
+	}
+
+	request, err = http.NewRequest(http.MethodGet, server.URL+"/internal/admin/domains?search=admin-directory&limit=1", nil)
+	if err != nil {
+		t.Fatalf("build admin domain request: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send admin domain request: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read admin domain response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("admin domain status = %d, want 200: %s", response.StatusCode, body)
+	}
+	for _, privateValue := range []string{"private-verification-token", "verification_token", "dkim_public_key", "public-key-value"} {
+		if strings.Contains(string(body), privateValue) {
+			t.Errorf("admin domain response contains excluded key material %q: %s", privateValue, body)
+		}
+	}
+	var result struct {
+		Data       []adminSendingDomain `json:"data"`
+		Pagination struct {
+			Total  int `json:"total"`
+			Limit  int `json:"limit"`
+			Offset int `json:"offset"`
+		} `json:"pagination"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("decode admin domain response: %v", err)
+	}
+	if len(result.Data) != 1 || result.Data[0].ID != domainID ||
+		result.Data[0].WorkspaceID != organizationID ||
+		result.Data[0].WorkspaceName != "Admin Directory Workspace" ||
+		result.Data[0].Domain != "admin-directory.example.test" ||
+		result.Pagination.Total < 1 || result.Pagination.Limit != 1 {
+		t.Fatalf("admin domain result = %+v; want matching, paginated workspace/domain metadata", result)
+	}
+
+	request, err = http.NewRequest(http.MethodGet, server.URL+"/internal/admin/domains/"+domainID, nil)
+	if err != nil {
+		t.Fatalf("build admin domain details request: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send admin domain details request: %v", err)
+	}
+	defer response.Body.Close()
+	detailBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read admin domain details response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK ||
+		!strings.Contains(string(detailBody), `"resolver":"1.1.1.1"`) ||
+		strings.Contains(string(detailBody), "private-verification-token") ||
+		strings.Contains(string(detailBody), "public-key-value") {
+		t.Fatalf("admin domain details response = %d %s; want resolver metadata without keys", response.StatusCode, detailBody)
+	}
+
+	request, err = http.NewRequest(http.MethodPost, server.URL+"/internal/admin/domains/"+domainID+"/verify", nil)
+	if err != nil {
+		t.Fatalf("build unauthenticated domain re-check request: %v", err)
+	}
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send unauthenticated domain re-check request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated domain re-check status = %d, want 401", response.StatusCode)
+	}
+	request, err = http.NewRequest(http.MethodPost, server.URL+"/internal/admin/domains/"+domainID+"/verify", nil)
+	if err != nil {
+		t.Fatalf("build domain re-check request: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send domain re-check request: %v", err)
+	}
+	recheckBody, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read domain re-check response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(recheckBody), `"last_checked_at"`) {
+		t.Fatalf("domain re-check status = %d; body %s", response.StatusCode, recheckBody)
+	}
+	var checkedAt *time.Time
+	if err := integrationPool.QueryRow(ctx, `SELECT last_checked_at FROM sending_domains WHERE id = $1`, domainID).Scan(&checkedAt); err != nil {
+		t.Fatalf("read persisted domain re-check time: %v", err)
+	}
+	if checkedAt == nil {
+		t.Fatal("domain re-check did not persist last_checked_at")
+	}
+	if _, err := integrationPool.Exec(ctx, `UPDATE sending_domains SET owner_conflict = true WHERE id = $1`, domainID); err != nil {
+		t.Fatalf("mark domain owner conflict: %v", err)
+	}
+	request, err = http.NewRequest(http.MethodPost, server.URL+"/internal/admin/domains/"+domainID+"/verify", nil)
+	if err != nil {
+		t.Fatalf("build conflicting domain re-check request: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send conflicting domain re-check request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("owner-conflict domain re-check status = %d, want 409", response.StatusCode)
+	}
+	var checkedAfterConflict *time.Time
+	if err := integrationPool.QueryRow(ctx, `SELECT last_checked_at FROM sending_domains WHERE id = $1`, domainID).Scan(&checkedAfterConflict); err != nil {
+		t.Fatalf("read domain re-check time after owner-conflict rejection: %v", err)
+	}
+	if checkedAfterConflict == nil || !checkedAfterConflict.Equal(*checkedAt) {
+		t.Fatalf("owner-conflict re-check changed last_checked_at: before %v, after %v", checkedAt, checkedAfterConflict)
+	}
+}
+
+func TestInternalAdminDomainStatusAndRemovalRequireServiceTokenAndBlockSending(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	organizationID := uuid.NewString()
+	domainID := uuid.NewString()
+	slug := "admin-domain-disable-" + strings.ReplaceAll(organizationID, "-", "")
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO organizations (id, name, slug) VALUES ($1, 'Domain Disable Workspace', $2)
+	`, organizationID, slug); err != nil {
+		t.Fatalf("insert domain-disable workspace: %v", err)
+	}
+	defer integrationPool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1`, organizationID)
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO sending_domains (id, organization_id, domain, status)
+		VALUES ($1, $2, 'disable-me.example.test', 'verified')
+	`, domainID, organizationID); err != nil {
+		t.Fatalf("insert verified sending domain: %v", err)
+	}
+	senderID := uuid.NewString()
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO sender_identities (id, organization_id, domain, local_part, display_name, is_default)
+		VALUES ($1, $2, 'disable-me.example.test', 'support', 'Support', true)
+	`, senderID, organizationID); err != nil {
+		t.Fatalf("insert sending identity: %v", err)
+	}
+	server := httptest.NewServer(newIntegrationServer(t).Handler())
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/internal/admin/domains/"+domainID+"/disabled",
+		strings.NewReader(`{"disabled":true}`))
+	if err != nil {
+		t.Fatalf("build unauthenticated domain-disable request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send unauthenticated domain-disable request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated domain-disable status = %d, want 401", response.StatusCode)
+	}
+
+	request, err = http.NewRequest(http.MethodPatch, server.URL+"/internal/admin/domains/"+domainID+"/disabled",
+		strings.NewReader(`{"disabled":true}`))
+	if err != nil {
+		t.Fatalf("build authorized domain-disable request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send authorized domain-disable request: %v", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read domain-disable response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("domain-disable status = %d, want 200: %s", response.StatusCode, body)
+	}
+	var result struct {
+		Data adminSendingDomain `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("decode domain-disable response: %v", err)
+	}
+	if result.Data.AdminDisabledAt == nil {
+		t.Fatal("domain-disable response has no disabled timestamp")
+	}
+	tx, err := integrationPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin domain send-guard transaction: %v", err)
+	}
+	if err := requireVerifiedOwnedDomain(ctx, tx, organizationID, "disable-me.example.test"); !errors.Is(err, errSenderDomainDisabled) {
+		t.Fatalf("verified-domain guard = %v, want disabled-domain rejection", err)
+	}
+	_ = tx.Rollback(ctx)
+
+	request, err = http.NewRequest(http.MethodPatch, server.URL+"/internal/admin/domains/"+domainID+"/disabled",
+		strings.NewReader(`{"disabled":false}`))
+	if err != nil {
+		t.Fatalf("build domain-enable request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send domain-enable request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("domain-enable status = %d, want 200", response.StatusCode)
+	}
+	tx, err = integrationPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin enabled-domain verification transaction: %v", err)
+	}
+	if err := requireVerifiedOwnedDomain(ctx, tx, organizationID, "disable-me.example.test"); err != nil {
+		t.Fatalf("verified-domain guard after enable = %v, want success", err)
+	}
+	_ = tx.Rollback(ctx)
+
+	conflictDomainID := uuid.NewString()
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO sending_domains (id, organization_id, domain, status, owner_conflict)
+		VALUES ($1, $2, 'conflicted.example.test', 'verified', true)
+	`, conflictDomainID, organizationID); err != nil {
+		t.Fatalf("insert owner-conflicted domain: %v", err)
+	}
+	request, err = http.NewRequest(http.MethodDelete, server.URL+"/internal/admin/domains/"+conflictDomainID, nil)
+	if err != nil {
+		t.Fatalf("build owner-conflicted domain removal request: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send owner-conflicted domain removal request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("owner-conflicted domain removal status = %d, want 409", response.StatusCode)
+	}
+
+	request, err = http.NewRequest(http.MethodDelete, server.URL+"/internal/admin/domains/"+domainID, nil)
+	if err != nil {
+		t.Fatalf("build unauthenticated domain removal request: %v", err)
+	}
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send unauthenticated domain removal request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated domain removal status = %d, want 401", response.StatusCode)
+	}
+	request, err = http.NewRequest(http.MethodDelete, server.URL+"/internal/admin/domains/"+domainID, nil)
+	if err != nil {
+		t.Fatalf("build authorized domain removal request: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send authorized domain removal request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("domain removal status = %d, want 204", response.StatusCode)
+	}
+	var remainingDomains, remainingSenders int
+	if err := integrationPool.QueryRow(ctx, `SELECT count(*) FROM sending_domains WHERE id = $1`, domainID).Scan(&remainingDomains); err != nil {
+		t.Fatalf("count removed sending domain: %v", err)
+	}
+	if err := integrationPool.QueryRow(ctx, `SELECT count(*) FROM sender_identities WHERE id = $1`, senderID).Scan(&remainingSenders); err != nil {
+		t.Fatalf("count removed sender identity: %v", err)
+	}
+	if remainingDomains != 0 || remainingSenders != 0 {
+		t.Fatalf("removed domain records remain: domains=%d sender identities=%d", remainingDomains, remainingSenders)
+	}
+}
+
+func TestInternalAdminWorkspaceStatusRequiresServiceTokenAndCanSuspendWorkspace(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	organizationID := uuid.NewString()
+	slug := "admin-workspace-status-" + strings.ReplaceAll(organizationID, "-", "")
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO organizations (id, name, slug, status) VALUES ($1, 'Workspace Status Test', $2, 'active')
+	`, organizationID, slug); err != nil {
+		t.Fatalf("insert workspace: %v", err)
+	}
+	defer integrationPool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1`, organizationID)
+	server := httptest.NewServer(newIntegrationServer(t).Handler())
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/internal/admin/workspaces/"+organizationID+"/status", nil)
+	if err != nil {
+		t.Fatalf("build unauthenticated status request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send unauthenticated status request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status request = %d, want 401", response.StatusCode)
+	}
+
+	request, err = http.NewRequest(http.MethodPatch, server.URL+"/internal/admin/workspaces/"+organizationID+"/status",
+		strings.NewReader(`{"expected_status":"active","status":"suspended"}`))
+	if err != nil {
+		t.Fatalf("build workspace suspension request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send workspace suspension request: %v", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read workspace suspension response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"suspended"`) {
+		t.Fatalf("workspace suspension response = %d: %s", response.StatusCode, body)
+	}
+	var status string
+	if err := integrationPool.QueryRow(ctx, `SELECT status FROM organizations WHERE id = $1`, organizationID).Scan(&status); err != nil {
+		t.Fatalf("read workspace status: %v", err)
+	}
+	if status != "suspended" {
+		t.Fatalf("workspace database status = %q, want suspended", status)
+	}
+}
+
+func TestInternalAdminDomainConflictResolutionSelectsOneOwnerAtomically(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	firstOrganizationID, secondOrganizationID := uuid.NewString(), uuid.NewString()
+	firstDomainID, secondDomainID := uuid.NewString(), uuid.NewString()
+	firstSlug := "admin-conflict-first-" + strings.ReplaceAll(firstOrganizationID, "-", "")
+	secondSlug := "admin-conflict-second-" + strings.ReplaceAll(secondOrganizationID, "-", "")
+	for _, workspace := range []struct {
+		id, name, slug string
+	}{
+		{firstOrganizationID, "First conflict workspace", firstSlug},
+		{secondOrganizationID, "Second conflict workspace", secondSlug},
+	} {
+		if _, err := integrationPool.Exec(ctx, `
+			INSERT INTO organizations (id, name, slug) VALUES ($1, $2, $3)
+		`, workspace.id, workspace.name, workspace.slug); err != nil {
+			t.Fatalf("insert conflict workspace: %v", err)
+		}
+		defer integrationPool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1`, workspace.id)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO sending_domains (id, organization_id, domain, owner_conflict)
+		VALUES ($1, $2, 'shared-conflict.example.test', false),
+		       ($3, $4, 'shared-conflict.example.test', true)
+	`, firstDomainID, firstOrganizationID, secondDomainID, secondOrganizationID); err != nil {
+		t.Fatalf("insert conflicting domains: %v", err)
+	}
+	server := httptest.NewServer(newIntegrationServer(t).Handler())
+	defer server.Close()
+	payload := `{"rightful_domain_id":"` + secondDomainID + `"}`
+	request, err := http.NewRequest(http.MethodPost,
+		server.URL+"/internal/admin/domains/"+firstDomainID+"/resolve-conflict", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("build unauthenticated conflict resolution request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send unauthenticated conflict resolution request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated ownership resolution = %d, want 401", response.StatusCode)
+	}
+
+	request, err = http.NewRequest(http.MethodPost,
+		server.URL+"/internal/admin/domains/"+firstDomainID+"/resolve-conflict", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("build authorized conflict resolution request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send authorized conflict resolution request: %v", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read ownership resolution response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("ownership resolution = %d, want 200: %s", response.StatusCode, body)
+	}
+	var result struct {
+		Data adminSendingDomain `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("decode ownership resolution: %v", err)
+	}
+	if result.Data.ID != secondDomainID || result.Data.OwnerConflict {
+		t.Fatalf("resolved owner = %+v, want selected owner without conflict", result.Data)
+	}
+	var firstConflict, secondConflict bool
+	if err := integrationPool.QueryRow(ctx, `SELECT owner_conflict FROM sending_domains WHERE id = $1`, firstDomainID).Scan(&firstConflict); err != nil {
+		t.Fatalf("read former owner conflict status: %v", err)
+	}
+	if err := integrationPool.QueryRow(ctx, `SELECT owner_conflict FROM sending_domains WHERE id = $1`, secondDomainID).Scan(&secondConflict); err != nil {
+		t.Fatalf("read selected owner conflict status: %v", err)
+	}
+	if !firstConflict || secondConflict {
+		t.Fatalf("owner conflict flags after resolution: former owner=%t selected owner=%t", firstConflict, secondConflict)
+	}
+}
+
+func TestInternalAdminCampaignDirectoryRequiresServiceTokenAndReturnsMetadataOnly(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	organizationID := uuid.NewString()
+	campaignID := uuid.NewString()
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO organizations (id, name, slug)
+		VALUES ($1, 'Campaign Admin Workspace', $2)
+	`, organizationID, "admin-campaign-"+strings.ReplaceAll(organizationID, "-", "")); err != nil {
+		t.Fatalf("insert admin campaign workspace: %v", err)
+	}
+	defer integrationPool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1`, organizationID)
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO campaigns (
+			id, organization_id, name, subject, status, recipient_count
+		) VALUES ($1, $2, 'Admin campaign fixture', 'private subject text', 'completed', 4)
+	`, campaignID, organizationID); err != nil {
+		t.Fatalf("insert admin campaign: %v", err)
+	}
+	for _, status := range []string{"accepted", "bounced", "complained", "failed"} {
+		if _, err := integrationPool.Exec(ctx, `
+			INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, status, message_id)
+			VALUES ($1, $2, $3, $4, $5)
+		`, organizationID, campaignID, uuid.NewString(), status, "private-message-"+status); err != nil {
+			t.Fatalf("insert admin campaign delivery %s: %v", status, err)
+		}
+	}
+	apiServer := newIntegrationServer(t)
+	server := httptest.NewServer(apiServer.Handler())
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/internal/admin/campaigns?search=Admin+campaign+fixture&status=completed&workspace_id="+organizationID+"&limit=1", nil)
+	if err != nil {
+		t.Fatalf("build unauthenticated admin campaign request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send unauthenticated admin campaign request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated admin campaign status = %d, want 401", response.StatusCode)
+	}
+
+	request, err = http.NewRequest(http.MethodGet, server.URL+"/internal/admin/campaigns?search=Admin+campaign+fixture&status=completed&workspace_id="+organizationID+"&limit=1", nil)
+	if err != nil {
+		t.Fatalf("build admin campaign request: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send admin campaign request: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read admin campaign response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("admin campaign status = %d, want 200: %s", response.StatusCode, body)
+	}
+	for _, expected := range []string{
+		"Admin campaign fixture", "Campaign Admin Workspace", `"recipient_count":4`,
+		`"submitted_count":1`, `"bounced_count":1`, `"complaint_count":1`, `"failed_count":1`,
+		`"total":1`,
+	} {
+		if !strings.Contains(string(body), expected) {
+			t.Errorf("admin campaign response missing %q: %s", expected, body)
+		}
+	}
+	for _, privateValue := range []string{"private subject text", "private-message-", "email"} {
+		if strings.Contains(string(body), privateValue) {
+			t.Errorf("admin campaign metadata exposed %q: %s", privateValue, body)
+		}
+	}
+	request, err = http.NewRequest(http.MethodGet,
+		server.URL+"/internal/admin/campaigns?search=private-message-accepted&status=completed&workspace_id="+organizationID, nil)
+	if err != nil {
+		t.Fatalf("build message-ID admin campaign lookup: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send message-ID admin campaign lookup: %v", err)
+	}
+	messageLookupBody, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read message-ID admin campaign lookup: %v", err)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(messageLookupBody), "Admin campaign fixture") {
+		t.Fatalf("message-ID admin campaign lookup = %d, want campaign metadata: %s", response.StatusCode, messageLookupBody)
+	}
+	if strings.Contains(string(messageLookupBody), "private-message-accepted") {
+		t.Fatalf("message-ID admin campaign lookup exposed the searched identifier: %s", messageLookupBody)
+	}
+}
+
+func TestInternalAdminCampaignStopRequiresServiceTokenAndCancelsPendingWork(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	organizationID := uuid.NewString()
+	campaignID := uuid.NewString()
+	contactID := uuid.NewString()
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO organizations (id, name, slug)
+		VALUES ($1, 'Campaign Stop Workspace', $2)
+	`, organizationID, "admin-stop-"+strings.ReplaceAll(organizationID, "-", "")); err != nil {
+		t.Fatalf("insert admin campaign stop workspace: %v", err)
+	}
+	defer integrationPool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1`, organizationID)
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO campaigns (id, organization_id, name, status, recipient_count)
+		VALUES ($1, $2, 'Campaign to stop', 'sending', 1)
+	`, campaignID, organizationID); err != nil {
+		t.Fatalf("insert campaign to stop: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, status, message_id)
+		VALUES ($1, $2, $3, 'queued', 'admin-stop-message')
+	`, organizationID, campaignID, contactID); err != nil {
+		t.Fatalf("insert queued delivery: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO campaign_recipients (organization_id, campaign_id, contact_id, email, status)
+		VALUES ($1, $2, $3, 'private-recipient@example.test', 'pending')
+	`, organizationID, campaignID, contactID); err != nil {
+		t.Fatalf("insert pending campaign recipient: %v", err)
+	}
+	server := httptest.NewServer(newIntegrationServer(t).Handler())
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/internal/admin/campaigns/"+campaignID+"/stop", nil)
+	if err != nil {
+		t.Fatalf("build unauthenticated admin campaign stop: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send unauthenticated admin campaign stop: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated admin campaign stop = %d, want 401", response.StatusCode)
+	}
+
+	request, err = http.NewRequest(http.MethodPost, server.URL+"/internal/admin/campaigns/"+campaignID+"/stop", nil)
+	if err != nil {
+		t.Fatalf("build admin campaign stop: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send admin campaign stop: %v", err)
+	}
+	stopBody, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read admin campaign stop response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(stopBody), `"status":"cancelled"`) {
+		t.Fatalf("admin campaign stop = %d, want cancelled: %s", response.StatusCode, stopBody)
+	}
+	var campaignStatus, deliveryStatus, recipientStatus string
+	if err := integrationPool.QueryRow(ctx, `SELECT status FROM campaigns WHERE id = $1`, campaignID).Scan(&campaignStatus); err != nil {
+		t.Fatalf("read stopped campaign status: %v", err)
+	}
+	if err := integrationPool.QueryRow(ctx, `SELECT status FROM delivery_jobs WHERE campaign_id = $1`, campaignID).Scan(&deliveryStatus); err != nil {
+		t.Fatalf("read cancelled delivery status: %v", err)
+	}
+	if err := integrationPool.QueryRow(ctx, `SELECT status FROM campaign_recipients WHERE campaign_id = $1`, campaignID).Scan(&recipientStatus); err != nil {
+		t.Fatalf("read skipped campaign recipient status: %v", err)
+	}
+	if campaignStatus != "cancelled" || deliveryStatus != "cancelled" || recipientStatus != "skipped" {
+		t.Fatalf("stop states = campaign %q, delivery %q, recipient %q", campaignStatus, deliveryStatus, recipientStatus)
+	}
+
+	request, err = http.NewRequest(http.MethodPost, server.URL+"/internal/admin/campaigns/"+campaignID+"/stop", nil)
+	if err != nil {
+		t.Fatalf("build repeated admin campaign stop: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send repeated admin campaign stop: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("repeated admin campaign stop = %d, want 409", response.StatusCode)
+	}
+}
+
+func TestInternalAdminTransactionalMessageSearchRequiresServiceTokenAndReturnsMetadataOnly(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	organizationID := uuid.NewString()
+	messageID := uuid.NewString()
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO organizations (id, name, slug)
+		VALUES ($1, 'Transactional Admin Workspace', $2)
+	`, organizationID, "admin-transactional-"+strings.ReplaceAll(organizationID, "-", "")); err != nil {
+		t.Fatalf("insert transactional search workspace: %v", err)
+	}
+	defer integrationPool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1`, organizationID)
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO transactional_messages (
+			id, organization_id, message_id, status, from_email, subject, html, text_content
+		) VALUES ($1, $2, 'admin-search-message@example.test', 'delivered',
+		          'mailer@example.test', 'private subject', '<p>private html body</p>', 'private text body')
+	`, messageID, organizationID); err != nil {
+		t.Fatalf("insert transactional message: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO transactional_message_recipients (message_id, email, recipient_type)
+		VALUES ($1, 'private-recipient@example.test', 'to')
+	`, messageID); err != nil {
+		t.Fatalf("insert transactional recipient: %v", err)
+	}
+	server := httptest.NewServer(newIntegrationServer(t).Handler())
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodGet,
+		server.URL+"/internal/admin/transactional-messages?search=admin-search-message%40example.test&limit=2&offset=0", nil)
+	if err != nil {
+		t.Fatalf("build unauthenticated transactional search: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send unauthenticated transactional search: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated transactional search = %d, want 401", response.StatusCode)
+	}
+
+	request, err = http.NewRequest(http.MethodGet,
+		server.URL+"/internal/admin/transactional-messages?search=admin-search-message%40example.test&limit=2&offset=0", nil)
+	if err != nil {
+		t.Fatalf("build transactional search: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send transactional search: %v", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read transactional search response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("transactional search = %d, want 200: %s", response.StatusCode, body)
+	}
+	for _, expected := range []string{
+		"admin-search-message@example.test", "Transactional Admin Workspace",
+		`"status":"delivered"`, `"total":1`,
+	} {
+		if !strings.Contains(string(body), expected) {
+			t.Errorf("transactional search missing %q: %s", expected, body)
+		}
+	}
+	for _, privateValue := range []string{
+		"private subject", "private html body", "private text body",
+		"private-recipient@example.test", "mailer@example.test", `"recipients"`,
+	} {
+		if strings.Contains(string(body), privateValue) {
+			t.Errorf("transactional admin search exposed %q: %s", privateValue, body)
+		}
+	}
+}
+
+func TestInternalAdminOverviewRequiresServiceTokenAndReturnsLiveMetrics(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	server := httptest.NewServer(newIntegrationServer(t).Handler())
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/internal/admin/overview", nil)
+	if err != nil {
+		t.Fatalf("build unauthenticated admin overview request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send unauthenticated admin overview request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated admin overview = %d, want 401", response.StatusCode)
+	}
+
+	request, err = http.NewRequest(http.MethodGet, server.URL+"/internal/admin/overview", nil)
+	if err != nil {
+		t.Fatalf("build admin overview request: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send admin overview request: %v", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read admin overview response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("admin overview = %d, want 200: %s", response.StatusCode, body)
+	}
+	var result struct {
+		Data adminOperationalMetrics `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("decode admin overview metrics: %v", err)
+	}
+	metrics := result.Data
+	if metrics.UpdatedAt.IsZero() || metrics.DomainCount < 0 || metrics.CampaignCount < 0 ||
+		metrics.MessagesToday < 0 || metrics.Messages7Days < metrics.MessagesToday ||
+		metrics.Messages30Days < metrics.Messages7Days || metrics.QueueDepth < 0 {
+		t.Fatalf("invalid live admin metrics: %+v", metrics)
+	}
+	if metrics.DeliveryRate30d < 0 || metrics.DeliveryRate30d > 100 ||
+		metrics.BounceRate30d < 0 || metrics.BounceRate30d > 100 ||
+		metrics.ComplaintRate30d < 0 || metrics.ComplaintRate30d > 100 {
+		t.Fatalf("invalid operational rate percentages: %+v", metrics)
+	}
+}
+
+func TestInternalAdminSuppressionsRequireServiceTokenAndSupportAuditedOperations(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	organizationID := uuid.NewString()
+	slug := "admin-suppression-" + strings.ReplaceAll(organizationID, "-", "")
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO organizations (id, name, slug) VALUES ($1, 'Suppression Admin Workspace', $2)
+	`, organizationID, slug); err != nil {
+		t.Fatalf("insert admin suppression workspace: %v", err)
+	}
+	defer integrationPool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1`, organizationID)
+	email := "admin-suppression@example.test"
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO contacts (organization_id, email, status) VALUES ($1, $2, 'subscribed')
+	`, organizationID, email); err != nil {
+		t.Fatalf("insert suppression contact: %v", err)
+	}
+	server := httptest.NewServer(newIntegrationServer(t).Handler())
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/internal/admin/suppressions", nil)
+	if err != nil {
+		t.Fatalf("build unauthenticated suppression request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send unauthenticated suppression request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated suppression list = %d, want 401", response.StatusCode)
+	}
+
+	payload, err := json.Marshal(map[string]string{"workspace_id": organizationID, "email": email})
+	if err != nil {
+		t.Fatalf("encode suppression request: %v", err)
+	}
+	request, err = http.NewRequest(http.MethodPost, server.URL+"/internal/admin/suppressions", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("build suppression create request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send suppression create request: %v", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read suppression create response: %v", err)
+	}
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("suppression create = %d, want 201: %s", response.StatusCode, body)
+	}
+	var created struct {
+		Data adminSuppression `json:"data"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("decode created suppression: %v", err)
+	}
+	if created.Data.ID == "" || created.Data.WorkspaceID != organizationID ||
+		created.Data.Email != email || created.Data.Source != "admin" {
+		t.Fatalf("unexpected created suppression: %+v", created.Data)
+	}
+	request, err = http.NewRequest(http.MethodPost, server.URL+"/internal/admin/suppressions", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("build duplicate suppression request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send duplicate suppression request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate suppression create = %d, want 409", response.StatusCode)
+	}
+	var contactStatus string
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT status FROM contacts WHERE organization_id = $1 AND lower(email) = lower($2)
+	`, organizationID, email).Scan(&contactStatus); err != nil {
+		t.Fatalf("read suppressed contact status: %v", err)
+	}
+	if contactStatus != "subscribed" {
+		t.Fatalf("admin suppression changed consent status to %q, want subscribed", contactStatus)
+	}
+
+	request, err = http.NewRequest(http.MethodGet,
+		server.URL+"/internal/admin/suppressions?workspace_id="+organizationID, nil)
+	if err != nil {
+		t.Fatalf("build suppression list request: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send suppression list request: %v", err)
+	}
+	body, err = io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read suppression list response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("suppression list = %d, want 200: %s", response.StatusCode, body)
+	}
+	var listed struct {
+		Data []adminSuppression `json:"data"`
+	}
+	if err := json.Unmarshal(body, &listed); err != nil {
+		t.Fatalf("decode suppression list: %v", err)
+	}
+	if len(listed.Data) != 1 || listed.Data[0].ID != created.Data.ID {
+		t.Fatalf("suppression list = %+v, want the created record", listed.Data)
+	}
+
+	request, err = http.NewRequest(http.MethodDelete,
+		server.URL+"/internal/admin/suppressions/"+created.Data.ID, nil)
+	if err != nil {
+		t.Fatalf("build suppression delete request: %v", err)
+	}
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("send suppression delete request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("suppression delete = %d, want 204", response.StatusCode)
+	}
+	var count int
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT count(*) FROM suppressions WHERE organization_id = $1 AND lower(email) = lower($2)
+	`, organizationID, email).Scan(&count); err != nil {
+		t.Fatalf("count deleted suppression: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("suppression count after delete = %d, want 0", count)
+	}
 }
 
 func TestLegacyActorSelfHealsThroughGateway(t *testing.T) {
@@ -1099,6 +2053,549 @@ func TestStalwartFeedbackHardSoftComplaintIsolationAndIdempotency(t *testing.T) 
 	`, other.Organization.ID, hardCampaign).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("cross-workspace feedback rows = %d, err=%v", count, err)
 	}
+}
+
+func TestStalwartTransactionalDeliveryReportUpdatesRecipient(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	server := newIntegrationServer(t)
+	owner := seedIntegrationUser(t, "transactional-feedback-"+uuid.NewString()+"@example.test",
+		"feedback-password", "Transactional Feedback", "Transactional Feedback Workspace")
+	store := transactional.NewStore(integrationPool)
+	recipientEmail := "recipient-" + uuid.NewString() + "@example.test"
+	receipt, err := store.Enqueue(ctx, transactional.EnqueueOptions{OrganizationID: owner.Organization.ID},
+		transactional.MessageInput{
+			From: "receipts@example.test", To: []string{recipientEmail},
+			Subject: "Receipt", Text: "Your receipt",
+		})
+	if err != nil {
+		t.Fatalf("enqueue transactional message: %v", err)
+	}
+	var recipientID string
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT id::text FROM transactional_message_recipients WHERE message_id = $1
+	`, receipt.ID).Scan(&recipientID); err != nil {
+		t.Fatalf("load transactional recipient: %v", err)
+	}
+	job := &transactional.Job{
+		Organization: owner.Organization.ID, MessageUUID: receipt.ID,
+		RecipientID: recipientID, To: recipientEmail,
+	}
+	if err := store.TransitionRecipient(ctx, job.RecipientID, transactional.StatusSending,
+		"system", 0, "", "test submission in progress", time.Time{}, nil); err != nil {
+		t.Fatalf("mark transactional message sending: %v", err)
+	}
+	if err := store.MarkAccepted(ctx, job, "<smtp-accepted@example.test>"); err != nil {
+		t.Fatalf("record SMTP acceptance: %v", err)
+	}
+	token, returnPath, err := transactional.NewVERPForRecipient(
+		integrationCfg.JWTSecret, integrationCfg.BounceDomain,
+		owner.Organization.ID, receipt.ID, job.To,
+	)
+	if err != nil {
+		t.Fatalf("create transactional VERP address: %v", err)
+	}
+	if err := store.SaveVERPToken(ctx, job, token, job.To); err != nil {
+		t.Fatalf("store transactional VERP token: %v", err)
+	}
+	raw := fmt.Sprintf(
+		"From: mailer-daemon@example.test\r\nTo: %s\r\n"+
+			"Content-Type: multipart/report; report-type=delivery-status; boundary=x\r\n\r\n"+
+			"--x\r\nContent-Type: message/delivery-status\r\n\r\n"+
+			"Final-Recipient: rfc822; %s\r\nAction: delivered\r\n"+
+			"Status: 2.0.0\r\nDiagnostic-Code: smtp; 250 accepted\r\n--x--\r\n",
+		returnPath, job.To,
+	)
+	for attempt := 0; attempt < 2; attempt++ {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/stalwart-feedback", strings.NewReader(raw))
+		request.Header.Set("X-Webhook-Signature",
+			computeWebhookSignature(integrationCfg.WebhookSecret, time.Now().Unix(), raw))
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("delivery report attempt %d status = %d, body=%s; want 204",
+				attempt+1, response.Code, response.Body.String())
+		}
+	}
+
+	var messageStatus, recipientStatus string
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT m.status, r.status
+		FROM transactional_messages m
+		JOIN transactional_message_recipients r ON r.message_id = m.id
+		WHERE m.id = $1
+	`, receipt.ID).Scan(&messageStatus, &recipientStatus); err != nil {
+		t.Fatalf("load transactional status: %v", err)
+	}
+	if messageStatus != "delivered" || recipientStatus != "delivered" {
+		t.Fatalf("statuses = message %q, recipient %q; want delivered", messageStatus, recipientStatus)
+	}
+	var feedbackCount int
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT count(*) FROM transactional_feedback_ingest WHERE message_id = $1
+	`, receipt.ID).Scan(&feedbackCount); err != nil || feedbackCount != 1 {
+		t.Fatalf("transactional feedback rows = %d, err=%v; want one idempotent event", feedbackCount, err)
+	}
+}
+
+func TestTransactionalAPIKeySendReadRotateAndRevoke(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	owner := seedIntegrationUser(t, "transactional-api-"+uuid.NewString()+"@example.test",
+		"transactional-password", "Transactional API", "Transactional API Workspace")
+	server := newIntegrationServer(t)
+	server.cfg.TransactionalEnabled = true
+	if _, err := integrationPool.Exec(context.Background(), `
+		UPDATE transactional_settings
+		SET enabled = true, status = 'active', daily_limit = 1, monthly_limit = 10
+		WHERE organization_id = $1
+	`, owner.Organization.ID); err != nil {
+		t.Fatalf("enable transactional workspace: %v", err)
+	}
+
+	createKeyBody := `{"name":"integration key","scopes":["send","read"],"test_mode":true}`
+	createKeyResponse := doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/api-keys", createKeyBody, owner.AccessToken)
+	assertStatus(t, createKeyResponse, http.StatusCreated)
+	var createdKey transactionalAPIKeyResponse
+	if err := json.Unmarshal(createKeyResponse.Body.Bytes(), &createdKey); err != nil {
+		t.Fatalf("decode transactional API key: %v", err)
+	}
+	if createdKey.PlainKey == "" || !strings.HasPrefix(createdKey.PlainKey, "sw_tx_test_") {
+		t.Fatalf("created key did not return a one-time test secret: %+v", createdKey)
+	}
+
+	messageBody, err := json.Marshal(transactional.MessageInput{
+		From: "receipts@example.test", To: []string{"recipient@example.test"},
+		Subject: "Test receipt", Text: "This must not be delivered",
+	})
+	if err != nil {
+		t.Fatalf("encode transactional message: %v", err)
+	}
+	sendResponse := doRequest(t, server, http.MethodPost, "/api/v1/transactional/messages",
+		string(messageBody), createdKey.PlainKey)
+	assertStatus(t, sendResponse, http.StatusAccepted)
+	var receipt transactional.MessageReceipt
+	if err := json.Unmarshal(sendResponse.Body.Bytes(), &receipt); err != nil {
+		t.Fatalf("decode transactional message receipt: %v", err)
+	}
+	if receipt.Status != transactional.StatusRejected {
+		t.Fatalf("test-mode receipt status = %q, want rejected without delivery", receipt.Status)
+	}
+
+	readResponse := doRequest(t, server, http.MethodGet,
+		"/api/v1/transactional/messages/"+receipt.ID, "", createdKey.PlainKey)
+	assertStatus(t, readResponse, http.StatusOK)
+	var readMessage transactionalMessageResponse
+	if err := json.Unmarshal(readResponse.Body.Bytes(), &readMessage); err != nil {
+		t.Fatalf("decode transactional message: %v", err)
+	}
+	if readMessage.ID != receipt.ID || readMessage.Status != string(transactional.StatusRejected) {
+		t.Fatalf("read transactional message = %+v", readMessage)
+	}
+	dashboardMessagesResponse := doRequest(t, server, http.MethodGet,
+		"/api/v1/transactional/dashboard/messages?limit=20", "", owner.AccessToken)
+	assertStatus(t, dashboardMessagesResponse, http.StatusOK)
+	var dashboardMessages struct {
+		Data []transactionalMessageResponse `json:"data"`
+	}
+	if err := json.Unmarshal(dashboardMessagesResponse.Body.Bytes(), &dashboardMessages); err != nil {
+		t.Fatalf("decode transactional dashboard messages: %v", err)
+	}
+	if len(dashboardMessages.Data) != 1 || dashboardMessages.Data[0].ID != receipt.ID {
+		t.Fatalf("transactional dashboard messages = %+v; want message %s", dashboardMessages.Data, receipt.ID)
+	}
+	usageResponse := doRequest(t, server, http.MethodGet,
+		"/api/v1/transactional/usage", "", owner.AccessToken)
+	assertStatus(t, usageResponse, http.StatusOK)
+	var usage map[string]int64
+	if err := json.Unmarshal(usageResponse.Body.Bytes(), &usage); err != nil {
+		t.Fatalf("decode transactional usage: %v", err)
+	}
+	if _, ok := usage["daily_limit"]; !ok {
+		t.Fatalf("transactional usage omitted daily_limit: %+v", usage)
+	}
+
+	liveKeyResponse := doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/api-keys", `{"name":"send-only key","scopes":["send"]}`, owner.AccessToken)
+	assertStatus(t, liveKeyResponse, http.StatusCreated)
+	var liveKey transactionalAPIKeyResponse
+	if err := json.Unmarshal(liveKeyResponse.Body.Bytes(), &liveKey); err != nil {
+		t.Fatalf("decode live transactional API key: %v", err)
+	}
+	assertStatus(t, doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/messages", string(messageBody), liveKey.PlainKey), http.StatusAccepted)
+	assertStatus(t, doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/messages", string(messageBody), liveKey.PlainKey), http.StatusTooManyRequests)
+	assertStatus(t, doRequest(t, server, http.MethodGet,
+		"/api/v1/transactional/messages/"+receipt.ID, "", liveKey.PlainKey), http.StatusForbidden)
+
+	rotateResponse := doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/api-keys/"+createdKey.ID+"/rotate", "", owner.AccessToken)
+	assertStatus(t, rotateResponse, http.StatusCreated)
+	var rotatedKey transactionalAPIKeyResponse
+	if err := json.Unmarshal(rotateResponse.Body.Bytes(), &rotatedKey); err != nil {
+		t.Fatalf("decode rotated transactional API key: %v", err)
+	}
+	if rotatedKey.PlainKey == "" || rotatedKey.ID == createdKey.ID {
+		t.Fatalf("rotation did not issue a new key: %+v", rotatedKey)
+	}
+	assertStatus(t, doRequest(t, server, http.MethodGet,
+		"/api/v1/transactional/messages/"+receipt.ID, "", createdKey.PlainKey), http.StatusOK)
+	assertStatus(t, doRequest(t, server, http.MethodGet,
+		"/api/v1/transactional/messages/"+receipt.ID, "", rotatedKey.PlainKey), http.StatusOK)
+
+	revokeResponse := doRequest(t, server, http.MethodDelete,
+		"/api/v1/transactional/api-keys/"+createdKey.ID, "", owner.AccessToken)
+	assertStatus(t, revokeResponse, http.StatusNoContent)
+	assertStatus(t, doRequest(t, server, http.MethodGet,
+		"/api/v1/transactional/messages/"+receipt.ID, "", createdKey.PlainKey), http.StatusUnauthorized)
+}
+
+func TestTransactionalSMTPCredentialLifecycle(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	owner := seedIntegrationUser(t, "transactional-smtp-"+uuid.NewString()+"@example.test",
+		"smtp-credential-password", "Transactional SMTP", "Transactional SMTP Workspace")
+	server := newIntegrationServer(t)
+
+	createdResponse := doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/smtp-credentials", `{"name":"app server"}`, owner.AccessToken)
+	assertStatus(t, createdResponse, http.StatusCreated)
+	var credential transactionalSMTPCredentialResponse
+	if err := json.Unmarshal(createdResponse.Body.Bytes(), &credential); err != nil {
+		t.Fatalf("decode SMTP credential: %v", err)
+	}
+	if credential.Username == "" || credential.Password == "" {
+		t.Fatalf("SMTP credential response omitted one-time login: %+v", credential)
+	}
+	if _, err := transactional.AuthenticateSMTP(context.Background(), integrationPool, credential.Username, credential.Password); err != nil {
+		t.Fatalf("authenticate newly created SMTP credential: %v", err)
+	}
+
+	listResponse := doRequest(t, server, http.MethodGet,
+		"/api/v1/transactional/smtp-credentials", "", owner.AccessToken)
+	assertStatus(t, listResponse, http.StatusOK)
+	if strings.Contains(listResponse.Body.String(), credential.Password) {
+		t.Fatal("SMTP credential listing returned its one-time password")
+	}
+
+	otherOwner := seedIntegrationUser(t, "transactional-smtp-other-"+uuid.NewString()+"@example.test",
+		"smtp-other-password", "Other SMTP Owner", "Other SMTP Workspace")
+	crossWorkspace := doRequest(t, server, http.MethodDelete,
+		"/api/v1/transactional/smtp-credentials/"+credential.ID, "", otherOwner.AccessToken)
+	assertStatus(t, crossWorkspace, http.StatusNotFound)
+
+	revokeResponse := doRequest(t, server, http.MethodDelete,
+		"/api/v1/transactional/smtp-credentials/"+credential.ID, "", owner.AccessToken)
+	assertStatus(t, revokeResponse, http.StatusNoContent)
+	if _, err := transactional.AuthenticateSMTP(context.Background(), integrationPool, credential.Username, credential.Password); !errors.Is(err, transactional.ErrInvalidSMTPCredentials) {
+		t.Fatalf("revoked credential authentication error = %v; want invalid credentials", err)
+	}
+}
+
+func TestTransactionalSMTPSubmissionRequiresTLSAuthAndEnqueues(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	owner := seedIntegrationUser(t, "transactional-smtp-submit-"+uuid.NewString()+"@example.test",
+		"smtp-submit-password", "Transactional SMTP Submit", "Transactional SMTP Submit Workspace")
+	domain := "smtp-" + uuid.NewString() + ".example.test"
+	if _, err := integrationPool.Exec(context.Background(), `
+		INSERT INTO sending_domains (organization_id, domain, status, spf_status, dkim_status, transactional_enabled)
+		VALUES ($1, $2, 'verified', 'verified', 'verified', true)
+	`, owner.Organization.ID, domain); err != nil {
+		t.Fatalf("seed active transactional sending domain: %v", err)
+	}
+	if _, err := integrationPool.Exec(context.Background(), `
+		UPDATE transactional_settings SET enabled = true, status = 'active'
+		WHERE organization_id = $1
+	`, owner.Organization.ID); err != nil {
+		t.Fatalf("enable transactional sending: %v", err)
+	}
+	server := newIntegrationServer(t)
+	server.cfg.TransactionalEnabled = true
+	server.cfg.TransactionalRequestsPerSecond = 5
+	createdResponse := doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/smtp-credentials", `{"name":"network test"}`, owner.AccessToken)
+	assertStatus(t, createdResponse, http.StatusCreated)
+	var credential transactionalSMTPCredentialResponse
+	if err := json.Unmarshal(createdResponse.Body.Bytes(), &credential); err != nil {
+		t.Fatalf("decode SMTP credential: %v", err)
+	}
+
+	startTLSListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for test SMTP server: %v", err)
+	}
+	implicitTLSListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		startTLSListener.Close()
+		t.Fatalf("listen for implicit TLS test SMTP server: %v", err)
+	}
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	certificate := tlsServer.TLS.Certificates[0]
+	tlsServer.Close()
+	smtpConfig := integrationCfg
+	smtpConfig.TransactionalEnabled = true
+	smtpConfig.TransactionalSMTPEnabled = true
+	smtpConfig.TransactionalSMTPHostname = "localhost"
+	smtpConfig.TransactionalMaxRecipients = 10
+	smtpConfig.TransactionalMaxMessageBytes = 1 << 20
+	submissionServer := transactional.NewSMTPSubmissionServer(smtpConfig, integrationPool)
+	go func() {
+		if err := submissionServer.ServeListeners(ctx, startTLSListener, implicitTLSListener, &tls.Config{
+			Certificates: []tls.Certificate{certificate},
+			MinVersion:   tls.VersionTLS12,
+		}); err != nil && ctx.Err() == nil {
+			t.Errorf("run test SMTP server: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = startTLSListener.Close()
+		_ = implicitTLSListener.Close()
+	})
+
+	client, err := smtp.Dial(startTLSListener.Addr().String())
+	if err != nil {
+		t.Fatalf("connect to SMTP submission listener: %v", err)
+	}
+	defer client.Close()
+	if err := client.StartTLS(&tls.Config{ServerName: "localhost", InsecureSkipVerify: true}); err != nil {
+		t.Fatalf("negotiate STARTTLS: %v", err)
+	}
+	if err := client.Auth(smtp.PlainAuth("", credential.Username, credential.Password, "127.0.0.1")); err != nil {
+		t.Fatalf("authenticate SMTP credential: %v", err)
+	}
+	if err := client.Mail("sender@" + domain); err != nil {
+		t.Fatalf("specify authorized sender: %v", err)
+	}
+	recipient := "recipient@example.test"
+	if err := client.Rcpt(recipient); err != nil {
+		t.Fatalf("specify recipient: %v", err)
+	}
+	data, err := client.Data()
+	if err != nil {
+		t.Fatalf("start SMTP message data: %v", err)
+	}
+	_, err = io.WriteString(data, "From: sender@"+domain+"\r\nTo: "+recipient+
+		"\r\nSubject: SMTP submission integration proof\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nQueued through authenticated SMTP.\r\n")
+	if err != nil {
+		t.Fatalf("write SMTP message: %v", err)
+	}
+	if err := data.Close(); err != nil {
+		t.Fatalf("submit SMTP message: %v", err)
+	}
+	if err := client.Quit(); err != nil {
+		t.Fatalf("close SMTP session: %v", err)
+	}
+
+	var queued int
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT count(*) FROM transactional_messages
+		WHERE organization_id = $1 AND subject = 'SMTP submission integration proof'
+	`, owner.Organization.ID).Scan(&queued); err != nil {
+		t.Fatalf("query SMTP-submitted message: %v", err)
+	}
+	if queued != 1 {
+		t.Fatalf("SMTP-submitted messages = %d; want one queued message", queued)
+	}
+}
+
+func TestTransactionalTemplateVersionsRenderInMessageSend(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	owner := seedIntegrationUser(t, "transactional-template-"+uuid.NewString()+"@example.test",
+		"transactional-password", "Transactional Template", "Transactional Template Workspace")
+	server := newIntegrationServer(t)
+	server.cfg.TransactionalEnabled = true
+	if _, err := integrationPool.Exec(context.Background(), `
+		UPDATE transactional_settings SET enabled = true, status = 'active'
+		WHERE organization_id = $1
+	`, owner.Organization.ID); err != nil {
+		t.Fatalf("enable transactional workspace: %v", err)
+	}
+
+	createResponse := doRequest(t, server, http.MethodPost, "/api/v1/transactional/templates",
+		`{"name":"Receipt","subject":"Receipt for {{name}}","html":"<p>Hello {{name}}</p>","text":"Hello {{name}}"}`,
+		owner.AccessToken)
+	assertStatus(t, createResponse, http.StatusCreated)
+	var template transactionalTemplateResponse
+	if err := json.Unmarshal(createResponse.Body.Bytes(), &template); err != nil {
+		t.Fatalf("decode transactional template: %v", err)
+	}
+	if template.CurrentVersion != 1 || len(template.Variables) != 1 || template.Variables[0] != "name" {
+		t.Fatalf("created transactional template = %+v", template)
+	}
+
+	updateResponse := doRequest(t, server, http.MethodPatch,
+		"/api/v1/transactional/templates/"+template.ID,
+		`{"subject":"Updated receipt for {{name}}"}`, owner.AccessToken)
+	assertStatus(t, updateResponse, http.StatusOK)
+	if err := json.Unmarshal(updateResponse.Body.Bytes(), &template); err != nil {
+		t.Fatalf("decode updated transactional template: %v", err)
+	}
+	if template.CurrentVersion != 2 || template.Subject != "Updated receipt for {{name}}" {
+		t.Fatalf("updated transactional template = %+v; want version 2", template)
+	}
+
+	createKeyResponse := doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/api-keys", `{"name":"template test","test_mode":true}`, owner.AccessToken)
+	assertStatus(t, createKeyResponse, http.StatusCreated)
+	var key transactionalAPIKeyResponse
+	if err := json.Unmarshal(createKeyResponse.Body.Bytes(), &key); err != nil {
+		t.Fatalf("decode transactional API key: %v", err)
+	}
+	messageBody, err := json.Marshal(transactional.MessageInput{
+		From: "receipts@example.test", To: []string{"recipient@example.test"},
+		TemplateID: template.ID, Variables: map[string]string{"name": "<Mike>"},
+	})
+	if err != nil {
+		t.Fatalf("encode template message: %v", err)
+	}
+	sendResponse := doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/messages", string(messageBody), key.PlainKey)
+	assertStatus(t, sendResponse, http.StatusAccepted)
+	var receipt transactional.MessageReceipt
+	if err := json.Unmarshal(sendResponse.Body.Bytes(), &receipt); err != nil {
+		t.Fatalf("decode template message receipt: %v", err)
+	}
+	readResponse := doRequest(t, server, http.MethodGet,
+		"/api/v1/transactional/messages/"+receipt.ID, "", key.PlainKey)
+	assertStatus(t, readResponse, http.StatusOK)
+	var message transactionalMessageResponse
+	if err := json.Unmarshal(readResponse.Body.Bytes(), &message); err != nil {
+		t.Fatalf("decode rendered template message: %v", err)
+	}
+	if message.Subject != "Updated receipt for <Mike>" || message.HTML != "<p>Hello &lt;Mike&gt;</p>" {
+		t.Fatalf("rendered message subject/html = %q / %q", message.Subject, message.HTML)
+	}
+	var storedTemplateID string
+	var storedVersion int
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT template_id::text, template_version
+		FROM transactional_messages WHERE id = $1
+	`, receipt.ID).Scan(&storedTemplateID, &storedVersion); err != nil {
+		t.Fatalf("load message template version: %v", err)
+	}
+	if storedTemplateID != template.ID || storedVersion != 2 {
+		t.Fatalf("stored template reference = %s version %d; want %s version 2",
+			storedTemplateID, storedVersion, template.ID)
+	}
+
+	messageBody, err = json.Marshal(transactional.MessageInput{
+		From: "receipts@example.test", To: []string{"another@example.test"}, TemplateID: template.ID,
+	})
+	if err != nil {
+		t.Fatalf("encode missing-variable template message: %v", err)
+	}
+	assertStatus(t, doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/messages", string(messageBody), key.PlainKey), http.StatusBadRequest)
+}
+
+func TestTransactionalSendingDomainRequiresVerifiedSPFAndDKIM(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	owner := seedIntegrationUser(t, "transactional-domain-"+uuid.NewString()+"@example.test",
+		"transactional-password", "Transactional Domain", "Transactional Domain Workspace")
+	server := newIntegrationServer(t)
+	domainID := uuid.NewString()
+	domainName := "mail-" + uuid.NewString() + ".example.test"
+	if _, err := integrationPool.Exec(context.Background(), `
+		INSERT INTO sending_domains (id, organization_id, domain, status, spf_status, dkim_status)
+		VALUES ($1, $2, $3, 'verified', 'verified', 'verified')
+	`, domainID, owner.Organization.ID, domainName); err != nil {
+		t.Fatalf("insert verified sending domain: %v", err)
+	}
+
+	enableResponse := doRequest(t, server, http.MethodPut,
+		"/api/v1/domains/"+domainID+"/transactional", `{"enabled":true}`, owner.AccessToken)
+	assertStatus(t, enableResponse, http.StatusOK)
+	var domain sendingDomain
+	if err := json.Unmarshal(enableResponse.Body.Bytes(), &domain); err != nil {
+		t.Fatalf("decode transactional sending domain: %v", err)
+	}
+	if !domain.TransactionalEnabled {
+		t.Fatalf("transactional_enabled = false after successful enable: %+v", domain)
+	}
+
+	if _, err := integrationPool.Exec(context.Background(), `
+		UPDATE sending_domains SET status = 'pending' WHERE id = $1
+	`, domainID); err != nil {
+		t.Fatalf("make sending domain pending: %v", err)
+	}
+	assertStatus(t, doRequest(t, server, http.MethodPut,
+		"/api/v1/domains/"+domainID+"/transactional", `{"enabled":false}`, owner.AccessToken), http.StatusOK)
+	assertStatus(t, doRequest(t, server, http.MethodPut,
+		"/api/v1/domains/"+domainID+"/transactional", `{"enabled":true}`, owner.AccessToken), http.StatusConflict)
+}
+
+func TestTransactionalWebhookManagementEncryptsSecretsAndRejectsPrivateURLs(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	owner := seedIntegrationUser(t, "transactional-webhook-"+uuid.NewString()+"@example.test",
+		"transactional-password", "Transactional Webhook", "Transactional Webhook Workspace")
+	server := newIntegrationServer(t)
+
+	createResponse := doRequest(t, server, http.MethodPost, "/api/v1/transactional/webhooks",
+		`{"url":"https://hooks.example.test/events","events":["message.delivered","message.bounced"]}`,
+		owner.AccessToken)
+	assertStatus(t, createResponse, http.StatusCreated)
+	var webhook transactionalWebhookResponse
+	if err := json.Unmarshal(createResponse.Body.Bytes(), &webhook); err != nil {
+		t.Fatalf("decode transactional webhook: %v", err)
+	}
+	if webhook.ID == "" || webhook.SigningSecret == "" || !webhook.Enabled {
+		t.Fatalf("created webhook omitted its one-time signing secret or enabled state: %+v", webhook)
+	}
+
+	var encrypted []byte
+	if err := integrationPool.QueryRow(context.Background(), `
+		SELECT encrypted_secret FROM transactional_webhooks WHERE id = $1
+	`, webhook.ID).Scan(&encrypted); err != nil {
+		t.Fatalf("load encrypted webhook secret: %v", err)
+	}
+	if strings.Contains(string(encrypted), webhook.SigningSecret) {
+		t.Fatal("webhook signing secret was stored in plaintext")
+	}
+	decrypted, err := transactional.DecryptWebhookSecret(integrationCfg.DKIMEncryptionKey, encrypted)
+	if err != nil || decrypted != webhook.SigningSecret {
+		t.Fatalf("decrypt stored webhook secret = %q, err=%v", decrypted, err)
+	}
+
+	listResponse := doRequest(t, server, http.MethodGet, "/api/v1/transactional/webhooks", "", owner.AccessToken)
+	assertStatus(t, listResponse, http.StatusOK)
+	if strings.Contains(listResponse.Body.String(), webhook.SigningSecret) {
+		t.Fatal("webhook list exposed the one-time signing secret")
+	}
+	assertStatus(t, doRequest(t, server, http.MethodPost, "/api/v1/transactional/webhooks",
+		`{"url":"https://127.0.0.1/admin","events":["message.delivered"]}`, owner.AccessToken),
+		http.StatusBadRequest)
+
+	rotateResponse := doRequest(t, server, http.MethodPost,
+		"/api/v1/transactional/webhooks/"+webhook.ID+"/rotate-secret", "", owner.AccessToken)
+	assertStatus(t, rotateResponse, http.StatusOK)
+	var rotated struct {
+		SigningSecret string `json:"signing_secret"`
+	}
+	if err := json.Unmarshal(rotateResponse.Body.Bytes(), &rotated); err != nil {
+		t.Fatalf("decode rotated webhook secret: %v", err)
+	}
+	if rotated.SigningSecret == "" || rotated.SigningSecret == webhook.SigningSecret {
+		t.Fatal("webhook secret rotation did not issue a new secret")
+	}
+	assertStatus(t, doRequest(t, server, http.MethodDelete,
+		"/api/v1/transactional/webhooks/"+webhook.ID, "", owner.AccessToken), http.StatusNoContent)
 }
 
 type feedbackTestPublisher struct{}

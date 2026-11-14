@@ -270,7 +270,7 @@ export default function NewCampaignPage() {
             </div>
             <div>
               <p className="text-xs text-slate-500">
-                Postal address, support contact, and unsubscribe details are added from your sender profile.
+                Optional postal details, support contact, and the required unsubscribe link are added to the footer.
               </p>
             </div>
           </CardContent>

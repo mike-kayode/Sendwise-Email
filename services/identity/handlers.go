@@ -35,6 +35,7 @@ type Handler struct {
 	store     Store
 	tokens    *kit.Manager
 	workspace WorkspaceClient
+	legacyAPI LegacyAPIAdminClient
 	mailer    Mailer
 	cfg       Config
 	logger    *slog.Logger
@@ -101,6 +102,7 @@ func NewHandler(store Store, tokens *kit.Manager, workspace WorkspaceClient, mai
 		store:              store,
 		tokens:             tokens.WithSessionStore(localSessionStore{store: store}),
 		workspace:          workspace,
+		legacyAPI:          NewHTTPLegacyAPIAdminClient(cfg.LegacyAPIURL, cfg.ServiceToken),
 		mailer:             mailer,
 		cfg:                cfg,
 		logger:             logger,
@@ -361,6 +363,7 @@ func (h *Handler) Routes() http.Handler {
 	r.Handle("POST /auth/reset-password", authRate(http.HandlerFunc(h.resetPassword)))
 	r.Handle("POST /auth/logout", http.HandlerFunc(h.logout))
 	r.Handle("GET /auth/me", h.tokens.Middleware(http.HandlerFunc(h.me)))
+	r.Handle("/admin/", h.adminRoutes())
 	r.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		kit.JSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "identity"})
 	})
@@ -570,7 +573,11 @@ func (h *Handler) audit(r *http.Request, userID *string, action string, metadata
 	}
 }
 
-func (h *Handler) setRefreshCookie(w http.ResponseWriter, token string) {
+func (h *Handler) setRefreshCookie(w http.ResponseWriter, token string, expiresAt time.Time) {
+	maxAge := int(time.Until(expiresAt).Seconds())
+	if maxAge < 0 {
+		maxAge = 0
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     refreshCookieName,
 		Value:    token,
@@ -578,8 +585,8 @@ func (h *Handler) setRefreshCookie(w http.ResponseWriter, token string) {
 		HttpOnly: true,
 		Secure:   h.cfg.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Now().Add(h.cfg.RefreshTokenTTL),
-		MaxAge:   int(h.cfg.RefreshTokenTTL.Seconds()),
+		Expires:  expiresAt,
+		MaxAge:   maxAge,
 	})
 }
 
@@ -632,6 +639,10 @@ func (h *Handler) issueSession(r *http.Request, user *User, membership *Workspac
 	if err != nil {
 		return nil, sessionResponse{}, "", err
 	}
+	sessionTTL := h.cfg.RefreshTokenTTL
+	if isPlatformAdmin(user.PlatformRole) {
+		sessionTTL = adminRefreshSessionTTL
+	}
 	session, err := h.store.CreateSession(r.Context(), SessionCreate{
 		UserID:           user.ID,
 		OrganizationID:   membership.OrganizationID,
@@ -642,7 +653,7 @@ func (h *Handler) issueSession(r *http.Request, user *User, membership *Workspac
 		IPAddress:        clientIP(r),
 		UserAgent:        r.UserAgent(),
 		RefreshTokenHash: HashToken(refreshRaw),
-		ExpiresAt:        time.Now().Add(h.cfg.RefreshTokenTTL),
+		ExpiresAt:        time.Now().Add(sessionTTL),
 	})
 	if err != nil {
 		return nil, sessionResponse{}, "", fmt.Errorf("create session: %w", err)
@@ -818,7 +829,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	h.audit(r, &user.ID, "login", map[string]any{"session_id": session.ID, "organization_id": membership.OrganizationID})
 
-	h.setRefreshCookie(w, refreshToken)
+	h.setRefreshCookie(w, refreshToken, session.ExpiresAt)
 	kit.JSON(w, http.StatusOK, resp)
 }
 
@@ -897,7 +908,12 @@ func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
 		kit.Error(w, http.StatusInternalServerError, "internal_error", "An unexpected error occurred.")
 		return
 	}
-	err = h.store.RotateRefreshToken(r.Context(), session.ID, presentedHash, newHash, time.Now().Add(h.cfg.RefreshTokenTTL))
+	refreshTTL := h.cfg.RefreshTokenTTL
+	if isPlatformAdmin(user.PlatformRole) {
+		refreshTTL = adminRefreshSessionTTL
+	}
+	refreshExpiresAt := time.Now().Add(refreshTTL)
+	err = h.store.RotateRefreshToken(r.Context(), session.ID, presentedHash, newHash, refreshExpiresAt)
 	if errors.Is(err, ErrRefreshReuse) {
 		h.logger.Warn("refresh token reuse detected", "session_id", session.ID, "user_id", session.UserID)
 		h.audit(r, &user.ID, "refresh_reuse_detected", map[string]any{"session_id": session.ID})
@@ -918,7 +934,7 @@ func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
 
 	h.audit(r, &user.ID, "refresh", map[string]any{"session_id": session.ID})
 
-	h.setRefreshCookie(w, refreshRaw)
+	h.setRefreshCookie(w, refreshRaw, refreshExpiresAt)
 	kit.JSON(w, http.StatusOK, sessionResponse{
 		AccessToken: access,
 		TokenType:   "bearer",
@@ -1104,27 +1120,13 @@ func (h *Handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.store.GetUserByEmail(r.Context(), email)
 	if err == nil {
-		token, tokenErr := randomToken()
-		if tokenErr == nil {
-			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
-			defer cancel()
-			if storeErr := h.store.CreateVerificationToken(ctx, user.ID, user.Email, HashToken(token), "password_reset", time.Now().Add(resetTokenTTL)); storeErr != nil {
-				h.logger.Error("store reset token", "error", storeErr)
-			} else {
-				link := h.cfg.AppBaseURL + "/auth/reset-password?token=" + token
-				msg := MailMessage{
-					To:      user.Email,
-					Subject: "Reset your password",
-					HTML:    resetEmailHTML(user.Name, link, h.cfg.AppBaseURL),
-					Text: "Hi " + user.Name + ",\n\nReset your password by opening this link:\n\n" + link +
-						"\n\nIf you did not request this, you can ignore this message.\n",
-				}
-				sendCtx, sendCancel := context.WithTimeout(ctx, 10*time.Second)
-				defer sendCancel()
-				if sendErr := h.deliverMail(sendCtx, "send reset email", msg); sendErr != nil && !errors.Is(sendErr, ErrMailRetryQueued) {
-					h.logger.Error("enqueue reset email retry", "recipient_domain", mailRecipientDomain(user.Email), "error", sendErr)
-				}
-			}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+		defer cancel()
+		if resetErr := h.queuePasswordReset(ctx, user); resetErr != nil {
+			h.logger.Error("queue password reset email",
+				"recipient_domain", mailRecipientDomain(user.Email),
+				"error", resetErr,
+			)
 		}
 	} else if !errors.Is(err, ErrNotFound) {
 		h.logger.Error("lookup user for reset", "error", err)
@@ -1134,6 +1136,28 @@ func (h *Handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	kit.JSON(w, http.StatusOK, map[string]string{
 		"message": "If that address has an account, a reset link will be sent. If it does not arrive shortly, try again.",
 	})
+}
+
+func (h *Handler) queuePasswordReset(ctx context.Context, user *User) error {
+	token, err := randomToken()
+	if err != nil {
+		return fmt.Errorf("generate password reset token: %w", err)
+	}
+	if err := h.store.CreateVerificationToken(ctx, user.ID, user.Email, HashToken(token), "password_reset", time.Now().Add(resetTokenTTL)); err != nil {
+		return fmt.Errorf("store password reset token: %w", err)
+	}
+	link := h.cfg.AppBaseURL + "/auth/reset-password?token=" + token
+	message := MailMessage{
+		To:      user.Email,
+		Subject: "Reset your password",
+		HTML:    resetEmailHTML(user.Name, link, h.cfg.AppBaseURL),
+		Text: "Hi " + user.Name + ",\n\nReset your password by opening this link:\n\n" + link +
+			"\n\nIf you did not request this, you can ignore this message.\n",
+	}
+	if err := h.deliverMail(ctx, "send reset email", message); err != nil && !errors.Is(err, ErrMailRetryQueued) {
+		return fmt.Errorf("deliver password reset email: %w", err)
+	}
+	return nil
 }
 
 func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {

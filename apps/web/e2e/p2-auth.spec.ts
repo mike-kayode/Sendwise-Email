@@ -57,7 +57,7 @@ test("P2 account email, password reset, and logout journey", async ({ page, requ
   await page.getByPlaceholder("you@example.com").fill(email);
   await page.getByPlaceholder("Workspace name").fill(workspaceName);
   await page.getByPlaceholder("••••••••••").fill(initialPassword);
-  await page.getByRole("button", { name: "Create workspace" }).click();
+  await page.getByRole("button", { name: "Create account" }).click();
   await page.waitForURL("**/auth/verify?email=**");
   await expect(page.getByRole("heading", { name: "Check your inbox" })).toBeVisible();
 

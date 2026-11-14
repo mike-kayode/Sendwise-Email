@@ -90,6 +90,87 @@ PASS
 ok  	github.com/khayode/email-platform/services/identity	1.649s
 ```
 
+## Transactional email API and dashboard
+
+**Backend locally verified against the Compose Postgres database.** Transactional
+API keys support creation, rotation, revocation, scopes, test mode, and quotas.
+Workspace templates have tenant-scoped CRUD; content changes append immutable
+versions, and sends render and record the selected version. Delivery feedback,
+webhook dispatch, and their retry/outbox data are covered by Go tests.
+
+The web dashboard now reads live workspace settings, usage, keys, webhooks, and
+recent messages. It passed typecheck and production build. A browser-driven
+transactional credential lifecycle journey is recorded in the follow-up
+evidence below.
+Sending domains expose an owner/admin control for transactional use; it can only
+be enabled after SPF and DKIM verification, while DMARC remains advisory.
+Focused Postgres tests include
+`TestTransactionalAPIKeySendReadRotateAndRevoke`,
+`TestTransactionalTemplateVersionsRenderInMessageSend`, and
+`TestTransactionalSendingDomainRequiresVerifiedSPFAndDKIM`.
+
+Verification:
+
+```text
+$ set -o pipefail && TEST_DATABASE_URL='postgres://email:email@127.0.0.1:55432/email?sslmode=disable' go test -count=1 -p 1 -timeout 45m ./... 2>&1 | grep -E '^(\?|ok|FAIL)'
+?   	github.com/khayode/email-platform/cmd/api	[no test files]
+?   	github.com/khayode/email-platform/cmd/backfill	[no test files]
+?   	github.com/khayode/email-platform/cmd/migrate	[no test files]
+?   	github.com/khayode/email-platform/cmd/worker	[no test files]
+ok  	github.com/khayode/email-platform/internal/api	21.354s
+ok  	github.com/khayode/email-platform/internal/auth	0.303s
+ok  	github.com/khayode/email-platform/internal/automations	0.784s
+ok  	github.com/khayode/email-platform/internal/backfill	8.260s
+ok  	github.com/khayode/email-platform/internal/campaigns	0.577s
+ok  	github.com/khayode/email-platform/internal/config	0.554s
+ok  	github.com/khayode/email-platform/internal/contacts	0.431s
+ok  	github.com/khayode/email-platform/internal/db	0.620s
+ok  	github.com/khayode/email-platform/internal/delivery	1.224s
+?   	github.com/khayode/email-platform/internal/httpx	[no test files]
+ok  	github.com/khayode/email-platform/internal/kit	0.502s
+?   	github.com/khayode/email-platform/internal/messaging	[no test files]
+?   	github.com/khayode/email-platform/internal/observability	[no test files]
+ok  	github.com/khayode/email-platform/internal/outbox	1.610s
+ok  	github.com/khayode/email-platform/internal/projections	0.523s
+?   	github.com/khayode/email-platform/internal/session	[no test files]
+?   	github.com/khayode/email-platform/internal/testutil	[no test files]
+ok  	github.com/khayode/email-platform/internal/transactional	5.188s
+ok  	github.com/khayode/email-platform/internal/worker	4.733s
+ok  	github.com/khayode/email-platform/services/gateway	0.603s
+?   	github.com/khayode/email-platform/services/gateway/cmd/gateway	[no test files]
+ok  	github.com/khayode/email-platform/services/identity	3.369s
+ok  	github.com/khayode/email-platform/services/identity/cmd/devseed	0.569s
+?   	github.com/khayode/email-platform/services/identity/cmd/identity	[no test files]
+ok  	github.com/khayode/email-platform/services/workspace	0.591s
+?   	github.com/khayode/email-platform/services/workspace/cmd/workspace	[no test files]
+ok  	github.com/khayode/email-platform/shared/contracts/events	0.616s
+
+$ go vet ./... && echo 'go vet: exit 0' && go build ./... && echo 'go build: exit 0'
+go vet: exit 0
+go build: exit 0
+
+$ cd apps/web && npm run typecheck && npm run lint && npm test && npm run build
+> @email-platform/web@0.1.0 typecheck
+> tsc --noEmit
+
+> @email-platform/web@0.1.0 lint
+> tsc --noEmit
+ℹ tests 11
+ℹ pass 11
+ℹ fail 0
+✓ Compiled successfully in 1638ms
+✓ Finished TypeScript in 5.4s
+✓ Generating static pages using 7 workers (27/27) in 642ms
+├ ○ /transactional
+
+```
+
+The SMTP listener and local Stalwart failure-DSN path are verified in the
+follow-up evidence below. No external-inbox delivery was performed, and no
+production systems were accessed or changed. Production DSN collection remains
+unconfigured; the local test polls Stalwart over JMAP and submits the report to
+the signed webhook directly.
+
 ### Web checks
 
 Commands: `npm --prefix apps/web run typecheck`,
@@ -241,3 +322,485 @@ spec ran and passed.
   artwork.
 - Any unrelated legacy module not demonstrated by the commands above. Prior
   status claims outside this report are not treated as current evidence.
+
+## Follow-up verification — 2026-11-14
+
+The local authenticated SMTP submission path is implemented. Its
+Postgres-backed tests, `TestTransactionalSMTPCredentialLifecycle` and
+`TestTransactionalSMTPSubmissionRequiresTLSAuthAndEnqueues`, ran as part of the
+full Go suite. They cover credential lifecycle, TLS-required authentication,
+sender validation, and enqueuing. The SMTP listener is disabled by default;
+Compose uses loopback-only host bindings on ports 2587 (STARTTLS) and 2465
+(implicit TLS), distinct from Stalwart's ports.
+
+The opt-in integration test exercised a real local Stalwart failure report:
+the test submitted a message to a reserved `.invalid` recipient, retrieved the
+resulting DSN via JMAP, posted it to the feedback webhook, and checked the
+Postgres message and recipient statuses. Temporary credentials were generated
+for this loopback-only run and were not recorded.
+
+```text
+$ RUN_STALWART_INTEGRATION=1 TEST_DATABASE_URL='postgres://email:email@127.0.0.1:5432/email?sslmode=disable' go test -count=1 -p 1 -timeout 45m ./internal/api -run '^TestLocalStalwartDSNUpdatesTransactionalRecipient$' -v
+=== RUN   TestLocalStalwartDSNUpdatesTransactionalRecipient
+{"time":"2026-11-14T11:02:56.337284+01:00","level":"INFO","msg":"http request","service":"api","env":"test","method":"POST","path":"/api/v1/webhooks/stalwart-feedback","status":204,"duration_ms":17,"request_id":"a0ec899e-bfec-46a5-9ab5-68aa7d2bcd93"}
+--- PASS: TestLocalStalwartDSNUpdatesTransactionalRecipient (0.83s)
+PASS
+ok  	github.com/khayode/email-platform/internal/api	1.534s
+```
+
+The SMTP credential and authenticated submission integration checks also
+passed against local Postgres:
+
+```text
+$ TEST_DATABASE_URL='postgres://email:email@127.0.0.1:5432/email?sslmode=disable' go test -count=1 -p 1 -timeout 45m ./internal/api -run '^TestTransactionalSMTP(CredentialLifecycle|SubmissionRequiresTLSAuthAndEnqueues)$' -v
+=== RUN   TestTransactionalSMTPCredentialLifecycle
+--- PASS: TestTransactionalSMTPCredentialLifecycle (0.12s)
+=== RUN   TestTransactionalSMTPSubmissionRequiresTLSAuthAndEnqueues
+--- PASS: TestTransactionalSMTPSubmissionRequiresTLSAuthAndEnqueues (0.07s)
+PASS
+ok  	github.com/khayode/email-platform/internal/api	1.545s
+```
+
+The browser-driven transactional dashboard journey registered and verified a
+local owner through Mailpit, signed in, created an SMTP credential, confirmed
+the one-time username/password display and dismissal, then revoked the
+credential.
+
+```text
+$ cd apps/web && npm run test:e2e -- e2e/transactional-dashboard.spec.ts --reporter=line
+Running 1 test using 1 worker
+[1/1] [chromium] › e2e/transactional-dashboard.spec.ts:30:1 › owner manages transactional SMTP credentials in the dashboard
+  1 passed (7.1s)
+```
+
+Final local validation:
+
+```text
+$ TEST_DATABASE_URL='postgres://email:email@127.0.0.1:5432/email?sslmode=disable' go test -count=1 -p 1 -timeout 45m ./...
+?   	github.com/khayode/email-platform/cmd/api	[no test files]
+?   	github.com/khayode/email-platform/cmd/backfill	[no test files]
+?   	github.com/khayode/email-platform/cmd/migrate	[no test files]
+?   	github.com/khayode/email-platform/cmd/worker	[no test files]
+ok  	github.com/khayode/email-platform/internal/api	16.237s
+ok  	github.com/khayode/email-platform/internal/auth	0.872s
+ok  	github.com/khayode/email-platform/internal/automations	3.313s
+ok  	github.com/khayode/email-platform/internal/backfill	8.789s
+ok  	github.com/khayode/email-platform/internal/campaigns	0.668s
+ok  	github.com/khayode/email-platform/internal/config	0.498s
+ok  	github.com/khayode/email-platform/internal/contacts	0.475s
+ok  	github.com/khayode/email-platform/internal/db	0.583s
+ok  	github.com/khayode/email-platform/internal/delivery	0.890s
+?   	github.com/khayode/email-platform/internal/httpx	[no test files]
+ok  	github.com/khayode/email-platform/internal/kit	0.597s
+?   	github.com/khayode/email-platform/internal/messaging	[no test files]
+?   	github.com/khayode/email-platform/internal/observability	[no test files]
+ok  	github.com/khayode/email-platform/internal/outbox	1.448s
+ok  	github.com/khayode/email-platform/internal/projections	0.548s
+?   	github.com/khayode/email-platform/internal/session	[no test files]
+?   	github.com/khayode/email-platform/internal/testutil	[no test files]
+ok  	github.com/khayode/email-platform/internal/transactional	5.146s
+ok  	github.com/khayode/email-platform/internal/worker	4.976s
+ok  	github.com/khayode/email-platform/services/gateway	0.675s
+?   	github.com/khayode/email-platform/services/gateway/cmd/gateway	[no test files]
+ok  	github.com/khayode/email-platform/services/identity	3.451s
+ok  	github.com/khayode/email-platform/services/identity/cmd/devseed	0.571s
+?   	github.com/khayode/email-platform/services/identity/cmd/identity	[no test files]
+ok  	github.com/khayode/email-platform/services/workspace	0.565s
+?   	github.com/khayode/email-platform/services/workspace/cmd/workspace	[no test files]
+ok  	github.com/khayode/email-platform/shared/contracts/events	0.615s
+$ go vet ./... && go build ./... && test -z "$(gofmt -l cmd internal services shared)"
+go vet, build, and gofmt: passed
+$ cd apps/web && npm run typecheck && npm run lint && npm test && npm run build
+typecheck and lint passed
+tests: 11 passed, 0 failed
+Next.js production build completed successfully
+```
+
+This proves only the local Compose/Stalwart flow and dashboard journey. It is
+not proof of external inbox delivery, production SMTP configuration, or
+automatic production DSN collection; those remain unverified/not configured.
+
+## HTML templates and admin security follow-up — 2026-11-14
+
+The HTML editor now retains original full-document imports without GrapesJS
+parsing, offers exact find-and-replace for source text/links/image URLs/colors,
+and shows server-rendered desktop/mobile send previews with the editable
+compliance footer. A delayed visual-editor update is prevented from replacing
+an original-mode design. The browser journey uses the repository's
+representative NairaTrader-style fixture; the original supplied attachment was
+not present in the workspace, so that exact file is not independently
+verified.
+
+Focused browser proof against local Compose, Gateway, API, worker, Postgres,
+and Mailpit:
+
+```text
+$ E2E_COMPOSE_PROJECT=email-platform npm --prefix apps/web run test:e2e -- --grep "register, import an audience"
+Running 1 test using 1 worker
+  ✓  [chromium] › e2e/template-delivery.spec.ts:86:1 › register, import an audience, edit a template, send, and verify campaign reports (17.1s)
+  1 passed (18.5s)
+```
+
+The complete Go suite ran with `TEST_DATABASE_URL` set against local Postgres
+and passed. `services/identity` also passed its append-only audit integration
+test against an isolated Postgres schema:
+
+```text
+$ TEST_DATABASE_URL='<local Identity Postgres URL>' go test ./services/identity -run TestPostgresAdminAuditIsAppendOnly -count=1 -v
+=== RUN   TestPostgresAdminAuditIsAppendOnly
+--- PASS: TestPostgresAdminAuditIsAppendOnly (0.24s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity	1.580s
+```
+
+The Super Admin security foundation, a limited Identity/Workspace-backed
+overview, read-only user search/list/detail,
+reasoned verification resend and manual verification, user activation/
+suspension and session revocation, workspace and
+membership metadata, global domain metadata/details and audited DNS re-check,
+audited domain disable/enable enforced across campaign and transactional
+sending paths, audited Sendwise record/sender-identity removal, and
+super_admin domain-conflict resolution,
+privacy-safe global campaign metadata/delivery counts and super_admin campaign
+cancellation, limited live operational counts/rates/queue depth, metadata search
+across users/workspaces/domains/campaigns and delivery identifiers, and
+super_admin-only global suppression listing/add/removal with reasoned, fresh-MFA
+writes are verified, as are audit-log filtering/export, but the
+full console is **not done**. User reads require fresh MFA and exclude password
+hashes and customer content. Account status, manual verification, and session
+revocation require super_admin, a reason, and MFA re-verification within five
+minutes; support_admin can request a reasoned verification resend. Suspension
+revokes active sessions, and state changes/session revocation commit atomically
+with their audit entry.
+The Workspace service exposes privacy-safe name, slug, creation time, member
+counts, and membership roles/user IDs through a service-token-protected
+internal endpoint. The web UI provides MFA enrollment/verification, user
+metadata and account controls, workspace detail, audit views, global metadata
+search, and reasoned campaign cancellation.
+
+```text
+$ TEST_DATABASE_URL='<local Identity Postgres URL>' go test ./services/identity -run 'TestPostgresAdmin(UserStatusChangeRevokesSessionsAndAuditsAtomically|EmailVerificationWritesOutboxAndAuditAtomically|UsersSearchIsPaginatedAndMetadataOnly)|Test(AdminUser(SuspensionRequiresRecentMFAReasonAndRevokesSessions|DetailRequiresFreshMFAAndReturnsOnlyMetadata)|SupportAdminCanReasonablyResendPendingUserVerification|SuperAdminCanManuallyVerifyPendingUserEmailWithReason|RevokedAdminSessionCannotAccessAdminRoutes)' -count=1 -v
+=== RUN   TestPostgresAdminUsersSearchIsPaginatedAndMetadataOnly
+--- PASS: TestPostgresAdminUsersSearchIsPaginatedAndMetadataOnly
+=== RUN   TestPostgresAdminUserStatusChangeRevokesSessionsAndAuditsAtomically
+--- PASS: TestPostgresAdminUserStatusChangeRevokesSessionsAndAuditsAtomically
+=== RUN   TestPostgresAdminEmailVerificationWritesOutboxAndAuditAtomically
+--- PASS: TestPostgresAdminEmailVerificationWritesOutboxAndAuditAtomically
+=== RUN   TestRevokedAdminSessionCannotAccessAdminRoutes
+--- PASS: TestRevokedAdminSessionCannotAccessAdminRoutes
+=== RUN   TestAdminUserDetailRequiresFreshMFAAndReturnsOnlyMetadata
+--- PASS: TestAdminUserDetailRequiresFreshMFAAndReturnsOnlyMetadata
+=== RUN   TestAdminUserSuspensionRequiresRecentMFAReasonAndRevokesSessions
+--- PASS: TestAdminUserSuspensionRequiresRecentMFAReasonAndRevokesSessions
+=== RUN   TestSupportAdminCanReasonablyResendPendingUserVerification
+--- PASS: TestSupportAdminCanReasonablyResendPendingUserVerification
+=== RUN   TestSuperAdminCanManuallyVerifyPendingUserEmailWithReason
+--- PASS: TestSuperAdminCanManuallyVerifyPendingUserEmailWithReason
+PASS
+ok  	github.com/khayode/email-platform/services/identity
+
+$ TEST_DATABASE_URL='<local Postgres URL>' go test ./internal/api -run 'TestInternalAdminCampaign(DirectoryRequiresServiceTokenAndReturnsMetadataOnly|StopRequiresServiceTokenAndCancelsPendingWork)' -count=1 -v
+=== RUN   TestInternalAdminCampaignDirectoryRequiresServiceTokenAndReturnsMetadataOnly
+--- PASS: TestInternalAdminCampaignDirectoryRequiresServiceTokenAndReturnsMetadataOnly (0.27s)
+=== RUN   TestInternalAdminCampaignStopRequiresServiceTokenAndCancelsPendingWork
+--- PASS: TestInternalAdminCampaignStopRequiresServiceTokenAndCancelsPendingWork (0.12s)
+PASS
+ok  	github.com/khayode/email-platform/internal/api 2.380s
+$ TEST_DATABASE_URL='<local Identity Postgres URL>' go test ./services/identity -run 'TestAdminCampaign(DirectoryRequiresPlatformPermissionAndForwardsFilters|StopIsSuperAdminOnlyReasonedAndAudited)|TestHTTPAdminCampaign' -count=1 -v
+=== RUN   TestAdminCampaignDirectoryRequiresPlatformPermissionAndForwardsFilters
+--- PASS: TestAdminCampaignDirectoryRequiresPlatformPermissionAndForwardsFilters (0.31s)
+=== RUN   TestAdminCampaignStopIsSuperAdminOnlyReasonedAndAudited
+--- PASS: TestAdminCampaignStopIsSuperAdminOnlyReasonedAndAudited (0.20s)
+=== RUN   TestHTTPAdminCampaignClientUsesServiceAuthAndFilters
+--- PASS: TestHTTPAdminCampaignClientUsesServiceAuthAndFilters (0.00s)
+=== RUN   TestHTTPAdminCampaignStopUsesServiceAuthAndMapsConflicts
+--- PASS: TestHTTPAdminCampaignStopUsesServiceAuthAndMapsConflicts (0.00s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity 1.698s
+
+$ TEST_DATABASE_URL='<local Identity Postgres URL>' go test ./services/identity -run 'TestPostgresAdminAuditIsAppendOnly|TestAdminWorkspaceListingRequiresMFAAndUsesWorkspaceService' -count=1 -v
+=== RUN   TestPostgresAdminAuditIsAppendOnly
+--- PASS: TestPostgresAdminAuditIsAppendOnly
+=== RUN   TestAdminWorkspaceListingRequiresMFAAndUsesWorkspaceService
+--- PASS: TestAdminWorkspaceListingRequiresMFAAndUsesWorkspaceService
+PASS
+ok  	github.com/khayode/email-platform/services/identity
+
+$ TEST_DATABASE_URL='<local Workspace Postgres URL>' go test ./services/workspace -run 'TestPostgresAdminOrganizationListingFiltersAndCountsMembers|TestInternalAdminOrganizationListingRequiresServiceToken' -count=1 -v
+=== RUN   TestPostgresAdminOrganizationListingFiltersAndCountsMembers
+--- PASS: TestPostgresAdminOrganizationListingFiltersAndCountsMembers
+=== RUN   TestInternalAdminOrganizationListingRequiresServiceToken
+--- PASS: TestInternalAdminOrganizationListingRequiresServiceToken
+PASS
+ok  	github.com/khayode/email-platform/services/workspace
+
+$ TEST_DATABASE_URL='<local Identity Postgres URL>' go test ./services/identity -run 'TestAdminOverviewRequiresMFAAndReturnsServiceOwnedCounts|TestPostgresAdminUsersSearchIsPaginatedAndMetadataOnly' -count=1 -v
+=== RUN   TestPostgresAdminUsersSearchIsPaginatedAndMetadataOnly
+--- PASS: TestPostgresAdminUsersSearchIsPaginatedAndMetadataOnly
+=== RUN   TestAdminOverviewRequiresMFAAndReturnsServiceOwnedCounts
+--- PASS: TestAdminOverviewRequiresMFAAndReturnsServiceOwnedCounts
+PASS
+ok  	github.com/khayode/email-platform/services/identity
+
+$ npm --prefix apps/web run typecheck
+> tsc --noEmit
+
+$ npm --prefix apps/web test
+ℹ tests 11
+ℹ pass 11
+ℹ fail 0
+
+$ npm --prefix apps/web run build
+✓ Compiled successfully
+✓ Generating static pages
+Routes include /admin/campaigns and /admin/search.
+```
+
+Workspace suspend/resume is now wired through the admin detail page, Identity's
+super_admin/fresh-MFA/reason/audit boundary, and the API service's
+service-token-protected status endpoint. The campaign worker rejects suspended
+workspaces; transactional API/SMTP enqueue and worker validation also reject
+them. Identity unit tests and HTTP client contract tests pass. The API's real
+Postgres integration case is present but was skipped because no
+`TEST_DATABASE_URL`/`INTEGRATION_DATABASE_URL` was available:
+
+```text
+$ go test ./internal/api -run TestInternalAdminWorkspaceStatusRequiresServiceTokenAndCanSuspendWorkspace -count=1 -v
+=== RUN   TestInternalAdminWorkspaceStatusRequiresServiceTokenAndCanSuspendWorkspace
+    api_integration_test.go:489: no database available
+--- SKIP: TestInternalAdminWorkspaceStatusRequiresServiceTokenAndCanSuspendWorkspace (0.00s)
+PASS
+ok  	github.com/khayode/email-platform/internal/api
+```
+
+Full workspace management beyond audited suspension/resumption, Stalwart/NATS/worker health and sender rankings,
+campaign controls beyond stop/cancel and message operations, remaining
+capability navigation, transactional
+message actions beyond metadata search, impersonation,
+destructive-action flows beyond implemented user status/session/role removal,
+and admin Playwright flows remain unimplemented. Admin role promotion remains
+operator-CLI-only; super_admin role removal is available through the audited
+user detail action and cannot remove the last active super_admin. The role
+demotion handler and store have unit and local Postgres integration coverage:
+
+```text
+$ go test ./services/identity -run TestSuperAdminCanOnlyDemotePlatformRolesWithReason -count=1 -v
+=== RUN   TestSuperAdminCanOnlyDemotePlatformRolesWithReason
+--- PASS: TestSuperAdminCanOnlyDemotePlatformRolesWithReason (0.09s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity 1.268s
+
+$ TEST_DATABASE_URL='<local Identity Postgres URL>' go test ./services/identity -run TestPostgresAdminRoleDemotionRevokesSessionsAndProtectsLastSuperAdmin -count=1 -v
+=== RUN   TestPostgresAdminRoleDemotionRevokesSessionsAndProtectsLastSuperAdmin
+--- PASS: TestPostgresAdminRoleDemotionRevokesSessionsAndProtectsLastSuperAdmin (0.17s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity 0.664s
+```
+
+Workspace internal notes are now append-only records in the Identity admin
+audit log. Only super_admin can read or add them; adding a note requires a
+separate reason and recent MFA. Support-admin audit results redact note text and
+reasons. The handler authorization/redaction test and real-Postgres workspace
+scoping test are included in the Identity suite:
+
+```text
+$ TEST_DATABASE_URL='<local Identity Postgres URL>' go test ./services/identity -run 'TestWorkspaceNotesAreAuditedAndSuperAdminOnly|TestPostgresAdminWorkspaceNotesAreAuditedAndWorkspaceScoped' -count=1 -v
+=== RUN   TestPostgresAdminWorkspaceNotesAreAuditedAndWorkspaceScoped
+--- PASS: TestPostgresAdminWorkspaceNotesAreAuditedAndWorkspaceScoped (0.65s)
+=== RUN   TestWorkspaceNotesAreAuditedAndSuperAdminOnly
+--- PASS: TestWorkspaceNotesAreAuditedAndSuperAdminOnly (0.10s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity 1.444s
+```
+
+Super admins can also request a standard one-hour password-reset link for an
+active, verified account. The action is rate limited, recent-MFA protected, and
+audited with its required reason; only the token hash is persisted. The
+`TestSuperAdminCanSendPasswordResetToActiveVerifiedUser` Identity handler test
+and real-Postgres single-use token test passed:
+
+```text
+$ TEST_DATABASE_URL='<local Identity Postgres URL>' go test ./services/identity -run TestPostgresAdminPasswordResetUsesHashedSingleUseToken -count=1 -v
+=== RUN   TestPostgresAdminPasswordResetUsesHashedSingleUseToken
+--- PASS: TestPostgresAdminPasswordResetUsesHashedSingleUseToken (0.18s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity 1.029s
+```
+
+The global domain directory now reads from the API service's database through
+an internal service-token route and exposes only workspace/domain status
+metadata. A separate detail endpoint returns stored resolver results, and
+super_admin can request an audited DNS re-check. List/detail responses omit
+verification tokens and direct DKIM key material. These flows were verified
+against local Postgres:
+
+```text
+$ TEST_DATABASE_URL='<local legacy Postgres URL>' go test ./internal/api -run TestInternalAdminDomainDirectoryRequiresServiceTokenAndReturnsMetadataOnly -count=1 -v
+=== RUN   TestInternalAdminDomainDirectoryRequiresServiceTokenAndReturnsMetadataOnly
+--- PASS: TestInternalAdminDomainDirectoryRequiresServiceTokenAndReturnsMetadataOnly (0.13s)
+PASS
+ok  	github.com/khayode/email-platform/internal/api 1.513s
+
+$ TEST_DATABASE_URL='<local Identity Postgres URL>' go test ./services/identity -run 'TestAdminSendingDomainDirectoryUsesAPIServiceMetadata|TestHTTPAdminDomainDetailsClientReturnsResolversAndMapsNotFound' -count=1 -v
+=== RUN   TestAdminSendingDomainDirectoryUsesAPIServiceMetadata
+--- PASS: TestAdminSendingDomainDirectoryUsesAPIServiceMetadata (0.07s)
+=== RUN   TestHTTPAdminDomainDetailsClientReturnsResolversAndMapsNotFound
+--- PASS: TestHTTPAdminDomainDetailsClientReturnsResolversAndMapsNotFound (0.00s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity 1.065s
+```
+
+No production systems were accessed or changed.
+
+Global suppression management was verified against local Postgres and the
+Identity permission/audit tests:
+
+```text
+$ TEST_DATABASE_URL='<local Postgres URL>' go test ./internal/api -run TestInternalAdminSuppressionsRequireServiceTokenAndSupportAuditedOperations -count=1 -v
+=== RUN   TestInternalAdminSuppressionsRequireServiceTokenAndSupportAuditedOperations
+--- PASS: TestInternalAdminSuppressionsRequireServiceTokenAndSupportAuditedOperations (0.15s)
+PASS
+ok  	github.com/khayode/email-platform/internal/api	1.370s
+
+$ go test ./services/identity -run 'TestAdminSuppressionsAreSuperAdminOnlyReasonedAndAudited|TestHTTPAdminSuppressionClientUsesServiceAuthAndMapsConflicts|TestAdminPermissionMatrixSeparatesPlatformAndWorkspaceRoles' -count=1 -v
+=== RUN   TestAdminPermissionMatrixSeparatesPlatformAndWorkspaceRoles
+--- PASS: TestAdminPermissionMatrixSeparatesPlatformAndWorkspaceRoles (0.00s)
+=== RUN   TestAdminSuppressionsAreSuperAdminOnlyReasonedAndAudited
+--- PASS: TestAdminSuppressionsAreSuperAdminOnlyReasonedAndAudited (0.21s)
+=== RUN   TestHTTPAdminSuppressionClientUsesServiceAuthAndMapsConflicts
+--- PASS: TestHTTPAdminSuppressionClientUsesServiceAuthAndMapsConflicts (0.01s)
+PASS
+ok  	github.com/khayode/email-platform/services/identity	1.695s
+
+$ npm --prefix apps/web run typecheck
+# exited 0
+$ npm --prefix apps/web run lint
+# exited 0
+```
+
+Earlier full verification for the campaign, global-search, and overview
+changes:
+
+```text
+$ TEST_DATABASE_URL='<local Postgres URL>' go test ./internal/api ./services/identity ./services/workspace ./cmd/admin-bootstrap -count=1
+ok  	github.com/khayode/email-platform/internal/api	48.667s
+ok  	github.com/khayode/email-platform/services/identity	38.707s
+ok  	github.com/khayode/email-platform/services/workspace	2.018s
+?   	github.com/khayode/email-platform/cmd/admin-bootstrap	[no test files]
+
+$ go vet ./internal/api ./services/identity ./services/workspace ./cmd/admin-bootstrap
+$ git diff --check
+$ gofmt -l <changed Go files>
+# all exited successfully; gofmt reported no files
+
+$ npm --prefix apps/web run typecheck
+# exited 0
+$ npm --prefix apps/web run lint
+# exited 0
+$ npm --prefix apps/web test
+ℹ tests 11
+ℹ pass 11
+ℹ fail 0
+$ npm --prefix apps/web run build
+✓ Compiled successfully
+✓ Generating static pages
+```
+
+Latest full verification, including migration `0031_admin_disable_sending_domains.sql`,
+global suppression management, domain disable/enable/removal, and delivery guards:
+
+```text
+$ TEST_DATABASE_URL='<local Postgres URL>' go test ./... -count=1
+ok   github.com/khayode/email-platform/internal/api	53.656s
+ok   github.com/khayode/email-platform/internal/auth	2.544s
+ok   github.com/khayode/email-platform/internal/automations	10.898s
+ok   github.com/khayode/email-platform/internal/backfill	62.371s
+ok   github.com/khayode/email-platform/internal/campaigns	0.790s
+ok   github.com/khayode/email-platform/internal/config	0.735s
+ok   github.com/khayode/email-platform/internal/contacts	0.714s
+ok   github.com/khayode/email-platform/internal/db	1.142s
+ok   github.com/khayode/email-platform/internal/delivery	2.257s
+ok   github.com/khayode/email-platform/internal/kit	0.760s
+ok  	github.com/khayode/email-platform/internal/outbox	4.716s
+ok  	github.com/khayode/email-platform/internal/projections	0.646s
+ok  	github.com/khayode/email-platform/internal/transactional	52.598s
+ok  	github.com/khayode/email-platform/internal/worker	49.423s
+ok  	github.com/khayode/email-platform/services/gateway	0.661s
+ok  	github.com/khayode/email-platform/services/identity	54.491s
+ok  	github.com/khayode/email-platform/services/identity/cmd/devseed	1.874s
+ok  	github.com/khayode/email-platform/services/workspace	6.888s
+ok  	github.com/khayode/email-platform/shared/contracts/events	0.497s
+# all remaining packages reported [no test files]
+
+$ go vet ./...
+# exited 0
+$ git diff --check
+# exited 0
+$ gofmt -l <changed Go files>
+# no files reported
+
+$ npm --prefix apps/web run typecheck
+# exited 0
+$ npm --prefix apps/web run lint
+# exited 0
+$ npm --prefix apps/web test
+ℹ tests 11
+ℹ pass 11
+ℹ fail 0
+$ npm --prefix apps/web run build
+✓ Compiled successfully
+✓ Generating static pages
+Route table includes /admin/suppressions and /admin/domains/[domainID].
+```
+
+PostgreSQL-backed verification of the newly added conflict-resolution
+integration case could not be rerun in the current environment: the local
+Postgres listener at `127.0.0.1:5432` refused connections, and the Docker
+daemon socket was unavailable. The new API integration test is present but is
+not claimed as passed. The full Go suite below passes with database-dependent
+integration tests skipped; targeted Identity policy/client tests and web
+checks ran normally:
+
+```text
+$ go test ./... -count=1
+ok   github.com/khayode/email-platform/internal/api 2.659s
+ok   github.com/khayode/email-platform/internal/auth 1.631s
+ok   github.com/khayode/email-platform/internal/automations 1.276s
+ok   github.com/khayode/email-platform/internal/backfill 1.198s
+ok   github.com/khayode/email-platform/internal/campaigns 1.221s
+ok   github.com/khayode/email-platform/internal/config 1.190s
+ok   github.com/khayode/email-platform/internal/contacts 1.104s
+ok   github.com/khayode/email-platform/internal/db 1.196s
+ok   github.com/khayode/email-platform/internal/delivery 1.351s
+ok   github.com/khayode/email-platform/internal/kit 0.707s
+ok   github.com/khayode/email-platform/internal/outbox 0.807s
+ok   github.com/khayode/email-platform/internal/projections 0.749s
+ok   github.com/khayode/email-platform/internal/transactional 0.800s
+ok   github.com/khayode/email-platform/internal/worker 1.330s
+ok   github.com/khayode/email-platform/services/gateway 0.622s
+ok   github.com/khayode/email-platform/services/identity 6.452s
+ok   github.com/khayode/email-platform/services/identity/cmd/devseed 0.628s
+ok   github.com/khayode/email-platform/services/workspace 0.744s
+ok   github.com/khayode/email-platform/shared/contracts/events 0.443s
+# all remaining packages reported [no test files]
+
+$ go vet ./...
+# exited 0
+$ git diff --check
+# exited 0
+$ gofmt -l <changed Go files>
+# no files reported
+
+$ npm --prefix apps/web run typecheck
+# exited 0
+$ npm --prefix apps/web run lint
+# exited 0
+$ npm --prefix apps/web test
+ℹ tests 11
+ℹ pass 11
+ℹ fail 0
+$ npm --prefix apps/web run build
+✓ Compiled successfully
+✓ Generating static pages
+Route table includes /admin/suppressions and /admin/domains/[domainID].
+```

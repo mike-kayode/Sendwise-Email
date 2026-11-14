@@ -1,5 +1,6 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { execFileSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const API_ORIGIN = process.env.E2E_API_ORIGIN ?? "http://localhost:8084";
@@ -100,7 +101,7 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await page.getByPlaceholder("you@example.com").fill(email);
   await page.getByPlaceholder("Workspace name").fill(`Task Five Workspace ${stamp}`);
   await page.getByPlaceholder("••••••••••").fill(password);
-  await page.getByRole("button", { name: "Create workspace" }).click();
+  await page.getByRole("button", { name: "Create account" }).click();
   await page.waitForURL("**/auth/verify?email=**");
 
   const verificationLink = await findVerificationLink(request, email);
@@ -244,11 +245,6 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await expect(page).toHaveURL(/\/settings#sender-profile$/);
   await page.getByLabel("Company name").fill("Task Five E2E");
   await page.getByLabel("Support email").fill(`support@${sendingDomain}`);
-  await page.getByLabel("Street address").fill("1 Test Road");
-  await page.getByLabel("City").fill("Test City");
-  await page.getByLabel("Region / state").fill("Test Region");
-  await page.getByLabel("Postal code").fill("10001");
-  await page.getByLabel("Country").fill("Test Country");
   await page.getByLabel("Website").fill("https://example.test");
   await page.getByLabel("Optional footer text").fill("A useful update from our team.");
   const senderProfileSave = page.waitForResponse((response) =>
@@ -258,6 +254,8 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await page.getByRole("button", { name: "Save sender profile" }).click();
   const savedProfileResponse = await senderProfileSave;
   expect(savedProfileResponse.status(), await savedProfileResponse.text()).toBe(200);
+  const savedSenderProfile = await savedProfileResponse.json() as { complete: boolean };
+  expect(savedSenderProfile.complete).toBe(true);
   await expect(page.getByText("Profile complete. Campaign sends are enabled.")).toBeVisible();
   const foreignFromCampaignResponse = await request.post(`${API_ORIGIN}/api/v1/campaigns`, {
     headers: { Authorization: ["Bearer", accessToken].join(" ") },
@@ -294,16 +292,40 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await templateMode.selectOption("html");
   await expect(page.getByTestId("grapes-email-editor")).toBeVisible();
   await expect(page.getByTestId("email-html-import-input")).toBeEnabled();
-  await page.getByTestId("email-html-import-input").setInputFiles({
-    name: "beefree-export.html",
-    mimeType: "text/html",
-    buffer: Buffer.from(
-      '<table role="presentation" width="100%"><tr><td><h1>Welcome {{organization}}</h1><p>This message started from an imported email design.</p><a href="https://example.test">Read more</a></td></tr></table>',
-    ),
+  await page.route("**/api/v1/assets/import", async (route) => {
+    const imageURL = (route.request().postDataJSON() as { url: string }).url;
+    const assetName = imageURL.endsWith("/logo.png") ? "fixture-logo" : "fixture-mark";
+    await route.fulfill({ status: 201, json: { url: `/api/v1/public/assets/${assetName}` } });
   });
-  await expect(page.frameLocator("iframe.gjs-frame").locator("h1").filter({ hasText: "Welcome {{organization}}" })).toBeVisible();
+  const fundedFixture = resolve(process.cwd(), "e2e/fixtures/nairatrader-get-funded.html");
+  await page.getByTestId("email-html-import-input").setInputFiles({
+    name: "nairatrader-get-funded.html",
+    mimeType: "text/html",
+    buffer: await readFile(fundedFixture),
+  });
+  await expect(page.getByText("Keep original HTML mode preserves the imported table structure.")).toBeVisible();
+  await expect(page.getByLabel("HTML source")).toHaveValue(/fixture-logo/);
+  await expect(page.getByLabel("HTML source")).toHaveValue(/fixture-mark/);
+  await page.getByLabel("Find in original HTML").fill("/api/v1/public/assets/fixture-logo");
+  await page.getByLabel("Replace in original HTML").fill("/api/v1/public/assets/edited-logo");
+  await page.getByRole("button", { name: "Replace all" }).click();
+  await expect(page.getByLabel("HTML source")).toHaveValue(/edited-logo/);
+  await expect(page.getByRole("status").filter({ hasText: "Replaced" })).toBeVisible();
+  await page.getByLabel("HTML import mode").selectOption("visual");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByTestId("email-html-import-input").setInputFiles(fundedFixture);
+  await expect(page.getByLabel("HTML conversion comparison")).toBeVisible();
+  await expect(page.getByTitle("Original HTML preview")).toBeVisible();
+  await expect(page.getByTitle("Converted HTML preview")).toBeVisible();
+  await page.getByLabel("HTML import mode").selectOption("original");
+  await page.getByTestId("email-html-import-input").setInputFiles(fundedFixture);
+  await expect(page.getByTestId("email-html-import-input")).toBeEnabled();
+  await expect(page.getByLabel("HTML source")).toHaveValue(/Welcome {{organization}} - Get Funded/);
   await page.getByRole("button", { name: "Save template" }).click();
   await expect(page.getByText("Your design is ready to use in a campaign.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Sanitized send preview" })).toBeVisible();
+  await page.getByRole("button", { name: "Mobile" }).click();
+  await expect(page.frameLocator('iframe[title="Email HTML preview"]').locator("body")).toContainText(/unsubscribe/i);
   const templateID = page.url().split("/").at(-1);
   expect(templateID).toBeTruthy();
   const savedTemplateResponse = await request.get(`${API_ORIGIN}/api/v1/templates/${templateID}`, {
@@ -315,8 +337,11 @@ test("register, import an audience, edit a template, send, and verify campaign r
     ? JSON.parse(savedTemplate.design) as Record<string, unknown>
     : savedTemplate.design as Record<string, unknown>;
   expect(savedDesign.editor).toBe("grapesjs");
-  expect(savedDesign.editor_project).toMatchObject({ pages: expect.any(Array) });
-  expect(savedDesign.html).toContain("Welcome {{organization}}");
+  expect(savedDesign.editor_project).toBeNull();
+  expect(savedDesign.html_mode).toBe("original");
+  expect(savedDesign.html).toContain("Welcome {{organization}} - Get Funded");
+  expect(savedDesign.html).toContain("/api/v1/public/assets/fixture-logo");
+  expect(savedDesign.html).toContain("/api/v1/public/assets/fixture-mark");
 
   const testRecipient = `task5-test-${stamp}@example.test`;
   await page.getByLabel("Test recipient").fill(testRecipient);
@@ -340,11 +365,13 @@ test("register, import an audience, edit a template, send, and verify campaign r
   await page.waitForURL(/\/campaigns\/[0-9a-f-]+\/editor$/);
   const campaignID = page.url().match(/\/campaigns\/([0-9a-f-]+)\/editor$/)?.[1];
   expect(campaignID).toBeTruthy();
-  await expect(page.getByTestId("grapes-email-editor")).toBeVisible();
+  await expect(page.getByText("Keep original HTML mode preserves the imported table structure.")).toBeVisible();
+  await expect(page.getByLabel("HTML source")).toHaveValue(/Welcome {{organization}} - Get Funded/);
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("All changes saved.")).toBeVisible();
   await page.getByRole("link", { name: "Preview & send" }).click();
-  await expect(page.frameLocator('iframe[title="Email HTML preview"]').locator("h1").filter({ hasText: "Welcome {{organization}}" })).toBeVisible();
+  await expect(page).toHaveURL(/\/campaigns\/[0-9a-f-]+\/preview$/);
+  await expect(page.frameLocator('iframe[title="Email HTML preview"]').locator("h1").filter({ hasText: "Get Funded" })).toBeVisible();
   await expect(page.getByText("All required checks passed.")).toBeVisible();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Send now" }).click();

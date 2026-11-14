@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -39,6 +38,8 @@ type Worker struct {
 	domainInFlight map[string]int
 	recipientRates map[string]*rate.Limiter
 }
+
+var errWorkspaceSuspended = errors.New("workspace is suspended")
 
 type jobRow struct {
 	ID                  string
@@ -231,6 +232,19 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	if ownerConflict {
 		return 0, w.failJob(ctx, row, fmt.Errorf("sending domain %q is already owned by another workspace", domainOf(row.SenderEmail)))
 	}
+	var domainDisabled bool
+	if err := w.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM sending_domains
+			WHERE organization_id = $1 AND lower(domain) = lower($2)
+			  AND admin_disabled_at IS NOT NULL
+		)
+	`, row.OrganizationID, domainOf(row.SenderEmail)).Scan(&domainDisabled); err != nil {
+		return 0, fmt.Errorf("check platform sending-domain disable: %w", err)
+	}
+	if domainDisabled {
+		return 0, w.failJob(ctx, row, fmt.Errorf("sending domain %q has been disabled by a platform administrator", domainOf(row.SenderEmail)))
+	}
 
 	var authorizedSender bool
 	if err := w.pool.QueryRow(ctx, `
@@ -244,6 +258,7 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 			WHERE cp.id = $1 AND cp.organization_id = $2
 			  AND lower(si.local_part || '@' || si.domain) = lower(cp.sender_email)
 			  AND sd.status = 'verified' AND NOT sd.owner_conflict
+			  AND sd.admin_disabled_at IS NULL
 		)
 	`, row.CampaignID, row.OrganizationID).Scan(&authorizedSender); err != nil {
 		return 0, fmt.Errorf("check campaign sender identity: %w", err)
@@ -261,7 +276,8 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		if err := w.pool.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1 FROM sending_domains
-				WHERE organization_id = $1 AND lower(domain) = lower($2) AND status = 'verified'
+				WHERE organization_id = $1 AND lower(domain) = lower($2)
+				  AND status = 'verified' AND admin_disabled_at IS NULL
 			)
 		`, row.OrganizationID, senderDomain).Scan(&verified); err != nil {
 			return 0, fmt.Errorf("check sending domain: %w", err)
@@ -274,6 +290,9 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	// Tenant quota and abuse pause: reject sends for paused organizations or
 	// organizations that have exceeded their daily email quota.
 	if err := w.checkTenantQuota(ctx, row.OrganizationID); err != nil {
+		if errors.Is(err, errWorkspaceSuspended) {
+			return time.Minute, nil
+		}
 		return 0, w.failJob(ctx, row, err)
 	}
 
@@ -301,6 +320,12 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 
 	data := personalizationData(row, unsubscribeURL)
 	data["app_base_url"] = w.cfg.AppBaseURL
+	data["sender_company"] = row.SenderCompany
+	data["sender_postal_address"] = senderPostalAddress(row)
+	data["sender_website"] = row.SenderWebsite
+	data["sender_support_email"] = row.SenderSupportEmail
+	data["sender_footer_text"] = row.SenderFooterText
+	data["sender_social_links"] = string(row.SenderSocialLinks)
 	htmlBody, textBody, err := w.renderer.RenderDesign(json.RawMessage(row.Content), data)
 	if err != nil {
 		return 0, w.failJob(ctx, row, err)
@@ -312,26 +337,20 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		})
 	}
 
-	address := senderPostalAddress(row)
-	profileFooter, err := senderProfileFooter(row)
-	if err != nil {
-		return 0, w.failJob(ctx, row, err)
+	if row.TrackOpens {
+		trackingToken, err := w.tokens.IssueTracking(row.ID, row.OrganizationID, row.CampaignID, row.ContactID)
+		if err == nil {
+			pixel := fmt.Sprintf(`<img src="%s/t/open/%s.gif" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0;">`,
+				strings.TrimRight(w.cfg.TrackingBaseURL, "/"), trackingToken)
+			htmlBody = appendBeforeBodyClose(htmlBody, pixel)
+		}
 	}
-	footer := fmt.Sprintf(
-		`<div style="margin-top:32px;padding-top:24px;border-top:1px solid #e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;color:#94a3b8;">
-<p style="margin:0 0 8px;">You are receiving this email because you subscribed to updates from %s.</p>
-%s
-%s
-<p style="margin:0;"><a href="%s" style="color:#64748b;text-decoration:underline;">Unsubscribe</a></p>
-</div>`,
-		html.EscapeString(row.SenderCompany),
-		postalAddressFooter(address),
-		profileFooter,
-		html.EscapeString(unsubscribeURL),
-	)
-	htmlBody = appendBeforeBodyClose(htmlBody, footer)
+
+	address := senderPostalAddress(row)
 	textBody += "\n\nYou are receiving this email because you subscribed to updates from " + row.SenderCompany + ".\n"
-	textBody += address + "\n"
+	if address != "" {
+		textBody += address + "\n"
+	}
 	if strings.TrimSpace(row.SenderFooterText) != "" {
 		textBody += strings.TrimSpace(row.SenderFooterText) + "\n"
 	}
@@ -342,15 +361,6 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		textBody += "Support: " + strings.TrimSpace(row.SenderSupportEmail) + "\n"
 	}
 	textBody += "Unsubscribe: " + unsubscribeURL + "\n"
-
-	if row.TrackOpens {
-		trackingToken, err := w.tokens.IssueTracking(row.ID, row.OrganizationID, row.CampaignID, row.ContactID)
-		if err == nil {
-			pixel := fmt.Sprintf(`<img src="%s/t/open/%s.gif" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0;">`,
-				strings.TrimRight(w.cfg.TrackingBaseURL, "/"), trackingToken)
-			htmlBody = appendBeforeBodyClose(htmlBody, pixel)
-		}
-	}
 
 	sender := row.SenderEmail
 	if row.SenderName != "" {
@@ -770,6 +780,21 @@ func (w *Worker) suppressContact(ctx context.Context, organizationID, email, rea
 
 // checkTenantQuota enforces daily email quotas and abuse pauses.
 func (w *Worker) checkTenantQuota(ctx context.Context, organizationID string) error {
+	var workspaceStatus string
+	if err := w.pool.QueryRow(ctx, `
+		SELECT status FROM organizations WHERE id = $1
+	`, organizationID).Scan(&workspaceStatus); err != nil {
+		if err == pgx.ErrNoRows {
+			return errors.New("workspace is unavailable")
+		}
+		return fmt.Errorf("load workspace status: %w", err)
+	}
+	if workspaceStatus == "suspended" {
+		return fmt.Errorf("%w: %s", errWorkspaceSuspended, workspaceStatus)
+	}
+	if workspaceStatus != "active" {
+		return fmt.Errorf("workspace is %s", workspaceStatus)
+	}
 	var settings struct {
 		MaxDailyEmails int
 		PausedUntil    *time.Time
@@ -937,19 +962,8 @@ func (w *Worker) recipientLimiter(domain string) *rate.Limiter {
 	return limiter
 }
 
-func postalAddressFooter(address string) string {
-	if strings.TrimSpace(address) == "" {
-		return ""
-	}
-	return `<p style="margin:0 0 8px;">` + html.EscapeString(strings.TrimSpace(address)) + `</p>`
-}
-
 func completeSenderProfile(row *jobRow) bool {
 	return strings.TrimSpace(row.SenderCompany) != "" &&
-		strings.TrimSpace(row.SenderStreet) != "" &&
-		strings.TrimSpace(row.SenderCity) != "" &&
-		strings.TrimSpace(row.SenderPostalCode) != "" &&
-		strings.TrimSpace(row.SenderCountry) != "" &&
 		strings.TrimSpace(row.SenderWebsite) != "" &&
 		strings.TrimSpace(row.SenderSupportEmail) != ""
 }
@@ -971,56 +985,6 @@ func senderPostalAddress(row *jobRow) string {
 		}
 	}
 	return strings.Join(values, ", ")
-}
-
-func senderProfileFooter(row *jobRow) (string, error) {
-	var socialLinks []struct {
-		Label string `json:"label"`
-		URL   string `json:"url"`
-	}
-	if err := json.Unmarshal(row.SenderSocialLinks, &socialLinks); err != nil {
-		return "", fmt.Errorf("decode sender profile social links: %w", err)
-	}
-	var footer strings.Builder
-	if text := strings.TrimSpace(row.SenderFooterText); text != "" {
-		footer.WriteString(`<p style="margin:0 0 8px;">`)
-		footer.WriteString(html.EscapeString(text))
-		footer.WriteString(`</p>`)
-	}
-	if website := strings.TrimSpace(row.SenderWebsite); website != "" {
-		parsed, err := url.Parse(website)
-		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-			return "", errors.New("sender profile website is not a valid HTTP or HTTPS URL")
-		}
-		footer.WriteString(`<p style="margin:0 0 8px;"><a href="`)
-		footer.WriteString(html.EscapeString(parsed.String()))
-		footer.WriteString(`" style="color:#64748b;text-decoration:underline;">`)
-		footer.WriteString(html.EscapeString(website))
-		footer.WriteString(`</a></p>`)
-	}
-	if support := strings.TrimSpace(row.SenderSupportEmail); support != "" {
-		footer.WriteString(`<p style="margin:0 0 8px;"><a href="mailto:`)
-		footer.WriteString(url.QueryEscape(support))
-		footer.WriteString(`" style="color:#64748b;text-decoration:underline;">`)
-		footer.WriteString(html.EscapeString(support))
-		footer.WriteString(`</a></p>`)
-	}
-	for _, link := range socialLinks {
-		parsed, err := url.Parse(strings.TrimSpace(link.URL))
-		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-			return "", errors.New("sender profile contains an invalid social link URL")
-		}
-		label := strings.TrimSpace(link.Label)
-		if label == "" {
-			label = parsed.Host
-		}
-		footer.WriteString(`<a href="`)
-		footer.WriteString(html.EscapeString(parsed.String()))
-		footer.WriteString(`" style="margin-right:12px;color:#64748b;text-decoration:underline;">`)
-		footer.WriteString(html.EscapeString(label))
-		footer.WriteString(`</a>`)
-	}
-	return footer.String(), nil
 }
 
 func (w *Worker) checkCampaignReputation(ctx context.Context, campaignID, organizationID string) error {
@@ -1192,6 +1156,11 @@ func personalizationData(row *jobRow, unsubscribeURL string) map[string]string {
 }
 
 func appendBeforeBodyClose(document, fragment string) string {
+	if marker := strings.Index(document, `data-sendwise-compliance-footer="true"`); marker >= 0 {
+		if start := strings.LastIndex(document[:marker], "<"); start >= 0 {
+			return document[:start] + fragment + document[start:]
+		}
+	}
 	if idx := strings.LastIndex(strings.ToLower(document), "</body>"); idx >= 0 {
 		return document[:idx] + fragment + document[idx:]
 	}

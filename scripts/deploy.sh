@@ -101,14 +101,14 @@ validate_env_keys() {
   local missing
   missing="$(
     comm -23 \
-      <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ROOT/.env.example" | cut -d= -f1 | sort -u) \
+      <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ROOT/.env.example" | cut -d= -f1 | grep -v '^TRANSACTIONAL_' | sort -u) \
       <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | cut -d= -f1 | sort -u)
   )"
   if [ -n "$missing" ]; then
     printf '%s\n' "$missing" | sed 's/^/  missing from .env: /' >&2
     fail "declare every variable above in .env (copy .env.example)"
   fi
-  log "  every .env.example variable name is declared in .env"
+  log "  every required .env.example variable name is declared in .env; transactional settings use safe Compose defaults"
 }
 
 validate_config() {

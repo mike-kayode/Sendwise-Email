@@ -236,6 +236,7 @@ export type SendingDomain = {
   last_checked_at?: string;
   verified_at?: string;
   created_at: string;
+  transactional_enabled?: boolean;
 };
 
 export type AnalyticsOverview = {

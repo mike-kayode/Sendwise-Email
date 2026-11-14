@@ -3,14 +3,9 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Field, FieldLabel } from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/auth";
 import { useToast } from "@/components/ui/use-toast";
-import { PageHeader } from "@/components/page-header";
-import { CheckCircle2, XCircle } from "lucide-react";
+import { AuthFrame } from "@/components/marketing/site";
 
 type VerifyState = "loading" | "success" | "error" | "pending";
 
@@ -111,71 +106,41 @@ export default function VerifyEmailPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#f6f8f7] px-4">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>Verify your email</CardTitle>
-          <CardDescription>Confirm your address to activate your Sendwise workspace.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <PageHeader
-            title={
-              state === "loading"
-                ? "Verifying…"
-                : state === "success"
-                  ? "Verified"
-                  : state === "pending"
-                    ? "Check your inbox"
-                    : "Verification failed"
-            }
-            description={state === "loading" ? "Checking your verification link." : message}
-          />
-          {state === "success" && (
-            <div className="flex items-center justify-center rounded-lg bg-emerald-50 p-6">
-              <CheckCircle2 className="h-10 w-10 text-emerald-600" aria-hidden />
+    <AuthFrame>
+      <section className="wrap card auth-card" aria-live="polite">
+        <span className={`auth-status-icon auth-state-${state}`} aria-hidden="true">
+          {state === "success" ? "✓" : state === "error" ? "!" : state === "loading" ? "…" : "✉"}
+        </span>
+        <h1 className="title auth-form-title">
+          {state === "loading" ? "Verifying…" : state === "success" ? "Verified" : state === "pending" ? "Check your inbox" : "Verification failed"}
+        </h1>
+        <p className="small auth-form-description">
+          {state === "loading" ? "Checking your verification link." : message}
+        </p>
+        {(state === "error" || state === "pending") && (
+          <form onSubmit={resend} className="form-stack">
+            <div>
+              <label className="label" htmlFor="verify-email">Email address</label>
+              <input
+                id="verify-email"
+                className="field"
+                type="email"
+                autoComplete="email"
+                placeholder="you@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                disabled={resendState !== "idle"}
+                required
+              />
             </div>
-          )}
-          {(state === "error" || state === "pending") && (
-            <>
-              {state === "error" && (
-                <div className="flex items-center justify-center rounded-lg bg-rose-50 p-6">
-                  <XCircle className="h-10 w-10 text-rose-600" aria-hidden />
-                </div>
-              )}
-              <form onSubmit={resend} className="space-y-3">
-                <Field>
-                  <FieldLabel>Email address</FieldLabel>
-                  <Input
-                    type="email"
-                    autoComplete="email"
-                    placeholder="you@example.com"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    disabled={resendState !== "idle"}
-                    required
-                  />
-                </Field>
-                <Button type="submit" className="w-full" disabled={resendState !== "idle"}>
-                  {resendState === "sending"
-                    ? "Sending…"
-                    : resendState === "sent"
-                      ? "Email requested"
-                      : "Resend verification email"}
-                </Button>
-              </form>
-            </>
-          )}
-          {state === "loading" && (
-            <p className="text-center text-sm text-slate-500">This should only take a moment.</p>
-          )}
-          <p className="text-sm text-center text-slate-500">
-            Already verified?{" "}
-            <Link href="/login" className="font-medium text-emerald-800 hover:text-emerald-900">
-              Sign in
-            </Link>
-          </p>
-        </CardContent>
-      </Card>
-    </div>
+            <button type="submit" className="btn btn-ink auth-submit" disabled={resendState !== "idle"}>
+              {resendState === "sending" ? "Sending…" : resendState === "sent" ? "Email requested" : "Resend verification email"}
+            </button>
+          </form>
+        )}
+        {state === "loading" && <p className="small auth-status-note">This should only take a moment.</p>}
+        <p className="small auth-bottom-link">Already verified? <Link href="/login">Sign in</Link></p>
+      </section>
+    </AuthFrame>
   );
 }

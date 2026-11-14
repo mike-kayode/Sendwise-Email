@@ -203,6 +203,41 @@ func (s *pgxStore) GetOrganization(ctx context.Context, organizationID string) (
 	return &org, nil
 }
 
+func (s *pgxStore) ListAdminOrganizations(ctx context.Context, search string, limit, offset int) ([]AdminOrganization, int, error) {
+	filter := `WHERE ($1 = '' OR o.id::text ILIKE '%' || $1 || '%'
+		OR o.name ILIKE '%' || $1 || '%' OR o.slug ILIKE '%' || $1 || '%')`
+	var total int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM organizations o `+filter, search).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count admin organizations: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT o.id, o.name, o.slug, count(m.user_id)::int, o.created_at
+		FROM organizations o
+		LEFT JOIN memberships m ON m.organization_id = o.id
+	`+filter+`
+		GROUP BY o.id
+		ORDER BY o.created_at DESC, o.id DESC
+		LIMIT $2 OFFSET $3
+	`, search, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list admin organizations: %w", err)
+	}
+	defer rows.Close()
+	organizations := make([]AdminOrganization, 0, limit)
+	for rows.Next() {
+		var organization AdminOrganization
+		if err := rows.Scan(&organization.ID, &organization.Name, &organization.Slug,
+			&organization.MemberCount, &organization.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("scan admin organization: %w", err)
+		}
+		organizations = append(organizations, organization)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate admin organizations: %w", err)
+	}
+	return organizations, total, nil
+}
+
 func (s *pgxStore) UpdateOrganization(ctx context.Context, organizationID, name, slug, correlationID string) (*Organization, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

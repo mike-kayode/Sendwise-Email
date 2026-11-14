@@ -2,8 +2,11 @@ package delivery
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
+
+	xhtml "golang.org/x/net/html"
 )
 
 func TestRenderDesignEmpty(t *testing.T) {
@@ -110,10 +113,21 @@ func TestRenderDesignSanitizesImportedHTML(t *testing.T) {
 	if !strings.Contains(htmlBody, "<table") || !strings.Contains(htmlBody, "color: #123456") {
 		t.Fatalf("imported table markup or inline style was lost: %q", htmlBody)
 	}
-	for _, forbidden := range []string{"<script", "alert(1)", "<img"} {
+	for _, forbidden := range []string{"<script", "alert(1)"} {
 		if strings.Contains(htmlBody, forbidden) || strings.Contains(textBody, forbidden) {
 			t.Fatalf("unsafe imported markup %q was retained: HTML=%q text=%q", forbidden, htmlBody, textBody)
 		}
+	}
+	if !strings.Contains(htmlBody, `src="https://tracker.example/pixel"`) {
+		t.Fatalf("external HTTPS image was lost from imported markup: %q", htmlBody)
+	}
+	invalidSource := json.RawMessage(`{"version":2,"html":"<img src=\"data:image/png;base64,AAAA\">","mode":"html","html_mode":"original"}`)
+	invalidHTML, _, err := NewRenderer().RenderDesign(invalidSource, nil)
+	if err != nil {
+		t.Fatalf("RenderDesign() invalid image error = %v", err)
+	}
+	if !strings.Contains(invalidHTML, "Image unavailable because its source is not a supported HTTP or HTTPS URL.") {
+		t.Fatalf("unsupported image source was removed without visible replacement: %q", invalidHTML)
 	}
 }
 
@@ -142,10 +156,13 @@ func TestRenderEmailBuilderDesignSanitizesAndPersonalizesHTML(t *testing.T) {
 			t.Fatalf("EmailBuilder HTML is missing %q: %q", expected, htmlBody)
 		}
 	}
-	for _, forbidden := range []string{"tracker.example", "<script", "alert(1)"} {
+	for _, forbidden := range []string{"<script", "alert(1)"} {
 		if strings.Contains(htmlBody, forbidden) || strings.Contains(textBody, forbidden) {
 			t.Fatalf("unsafe EmailBuilder markup %q was retained: HTML=%q text=%q", forbidden, htmlBody, textBody)
 		}
+	}
+	if !strings.Contains(htmlBody, `src="https://tracker.example/pixel"`) {
+		t.Fatalf("external HTTPS image was lost from EmailBuilder HTML: %q", htmlBody)
 	}
 	for _, expected := range []string{"Hi Ada", "Welcome to Sendwise"} {
 		if !strings.Contains(textBody, expected) {
@@ -154,7 +171,7 @@ func TestRenderEmailBuilderDesignSanitizesAndPersonalizesHTML(t *testing.T) {
 	}
 }
 
-func TestSafeImageURLRequiresSendwiseHost(t *testing.T) {
+func TestSafeImageURLPreservesHTTPSImages(t *testing.T) {
 	data := map[string]string{"app_base_url": "https://sendwise.example"}
 	if got, ok := safeImageURL("/template-assets/neutral-banner.svg", data); !ok || got != "https://sendwise.example/template-assets/neutral-banner.svg" {
 		t.Fatalf("safeImageURL() = %q, %v", got, ok)
@@ -163,12 +180,105 @@ func TestSafeImageURLRequiresSendwiseHost(t *testing.T) {
 	if got, ok := safeImageURL(assetPath, data); !ok || got != "https://sendwise.example"+assetPath {
 		t.Fatalf("safeImageURL() did not accept owned asset: %q, %v", got, ok)
 	}
-	if _, ok := safeImageURL("https://sendwise.example/uploads/external.png", data); ok {
-		t.Fatal("safeImageURL() accepted a hotlinked image from the app host")
+	if got, ok := safeImageURL("https://sendwise.example/uploads/external.png", data); !ok || got != "https://sendwise.example/uploads/external.png" {
+		t.Fatalf("safeImageURL() rejected HTTPS image: %q, %v", got, ok)
 	}
-	if _, ok := safeImageURL("https://third-party.example/image.png", data); ok {
-		t.Fatal("safeImageURL() accepted a third-party image host")
+	if got, ok := safeImageURL("https://third-party.example/image.png", data); !ok || got != "https://third-party.example/image.png" {
+		t.Fatalf("safeImageURL() rejected external HTTPS image: %q, %v", got, ok)
 	}
+}
+
+func TestRenderImportedFullDocumentPreservesLayoutAndStyles(t *testing.T) {
+	source, err := os.ReadFile("testdata/nairatrader-get-funded.html")
+	if err != nil {
+		t.Fatalf("read NairaTrader HTML fixture: %v", err)
+	}
+	importedHTML := strings.NewReplacer(
+		"https://res.cloudinary.com/nairatrader/image/upload/v1/brand/logo.png",
+		"https://sendwise.example/api/v1/public/assets/nairatrader-logo",
+		"https://res.cloudinary.com/nairatrader/image/upload/v1/brand/mark.png",
+		"https://sendwise.example/api/v1/public/assets/nairatrader-mark",
+	).Replace(string(source))
+	for _, htmlMode := range []string{"original", "visual"} {
+		raw, err := json.Marshal(map[string]any{
+			"version": 2, "mode": "html", "html_mode": htmlMode, "html": importedHTML,
+			"compliance_footer": map[string]string{
+				"alignment": "center", "background_color": "#f8fafc",
+				"text_color": "#64748b", "button_color": "#4f46e5", "button_text": "Unsubscribe",
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal design: %v", err)
+		}
+		htmlBody, _, err := NewRenderer().RenderDesign(raw, map[string]string{
+			"app_base_url":        "https://sendwise.example",
+			"unsubscribe_url":     "https://sendwise.example/unsubscribe/test",
+			"sender_company":      "NairaTrader",
+			"sender_social_links": `[{"label":"Instagram","url":"https://instagram.com/nairatrader"}]`,
+		})
+		if err != nil {
+			t.Fatalf("RenderDesign() error = %v", err)
+		}
+		for _, expected := range []string{
+			`src="https://sendwise.example/api/v1/public/assets/nairatrader-logo"`,
+			`src="https://sendwise.example/api/v1/public/assets/nairatrader-mark"`,
+			`class="price-row"`, `bgcolor="#f7f7f7"`, "25,000 account", "$149 fee", "100,000 account",
+			"letter-spacing", "white-space", "@media", "mso-table-lspace", "Instagram", "LinkedIn",
+			`target="_blank"`, `rel="noopener"`, "<!--[if mso]>",
+		} {
+			if !strings.Contains(htmlBody, expected) {
+				t.Errorf("%s render is missing %q", htmlMode, expected)
+			}
+		}
+		if strings.Contains(htmlBody, `class="email-content"`) || strings.Contains(htmlBody, "padding:32px") {
+			t.Fatalf("%s render wrapped the full-document 600px template in the Sendwise padded shell", htmlMode)
+		}
+		if got := strings.Count(htmlBody, `width="600"`); got != 1 {
+			t.Fatalf("%s render has %d 600px layout widths, want exactly once", htmlMode, got)
+		}
+		if strings.Count(htmlBody, `data-sendwise-compliance-footer="true"`) != 1 {
+			t.Fatalf("%s render should contain exactly one compliance footer: %s", htmlMode, htmlBody)
+		}
+		footerIndex := strings.Index(htmlBody, `data-sendwise-compliance-footer="true"`)
+		if footerIndex < strings.Index(htmlBody, "LinkedIn") || footerIndex > strings.Index(htmlBody, "</body>") {
+			t.Fatalf("%s compliance footer is not at the bottom after template content: %s", htmlMode, htmlBody)
+		}
+		if !hasPricingRowWithThreeCells(htmlBody) {
+			t.Fatalf("%s render lost the size | fee | button table row structure: %s", htmlMode, htmlBody)
+		}
+	}
+}
+
+func hasPricingRowWithThreeCells(source string) bool {
+	document, err := xhtml.Parse(strings.NewReader(source))
+	if err != nil {
+		return false
+	}
+	found := false
+	var visit func(*xhtml.Node)
+	visit = func(node *xhtml.Node) {
+		if found {
+			return
+		}
+		if node.Type == xhtml.ElementNode && node.Data == "tr" {
+			cells := make([]string, 0, 3)
+			for child := node.FirstChild; child != nil; child = child.NextSibling {
+				if child.Type == xhtml.ElementNode && child.Data == "td" {
+					cells = append(cells, strings.TrimSpace(textFromNode(child)))
+				}
+			}
+			if len(cells) == 3 && strings.Contains(cells[0], "25,000 account") &&
+				strings.Contains(cells[1], "$149 fee") && strings.Contains(cells[2], "Get funded") {
+				found = true
+				return
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			visit(child)
+		}
+	}
+	visit(document)
+	return found
 }
 
 func TestPersonalize(t *testing.T) {

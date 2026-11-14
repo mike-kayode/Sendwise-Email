@@ -29,7 +29,7 @@ test("queued verification delivery offers a resend action", async ({ page }, tes
   await page.getByPlaceholder("you@example.com").fill(email);
   await page.getByPlaceholder("Workspace name").fill("Retry Workspace");
   await page.getByPlaceholder("••••••••••").fill("a-strong-password");
-  await page.getByRole("button", { name: "Create workspace" }).click();
+  await page.getByRole("button", { name: "Create account" }).click();
 
   await expect(page).toHaveURL(/\/auth\/verify\?email=/);
   await expect(page.getByText(/Your verification email is queued/)).toBeVisible();

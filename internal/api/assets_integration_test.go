@@ -2,15 +2,69 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"image"
 	"image/png"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestRemoteEmailImageURLRejectsUnsafeTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "plain HTTP", url: "http://example.com/image.png"},
+		{name: "loopback IPv4", url: "https://127.0.0.1/image.png"},
+		{name: "private IPv4", url: "https://10.1.2.3/image.png"},
+		{name: "link-local IPv4", url: "https://169.254.169.254/latest/meta-data"},
+		{name: "private IPv6", url: "https://[fd00::1]/image.png"},
+		{name: "credentials", url: "https://user:pass@example.com/image.png"},
+		{name: "nonstandard port", url: "https://example.com:8443/image.png"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateRemoteImageURL(test.url); err == nil {
+				t.Fatalf("validateRemoteImageURL(%q) unexpectedly succeeded", test.url)
+			}
+		})
+	}
+	if err := validateRemoteImageURL("https://images.example.com/logo.png"); err != nil {
+		t.Fatalf("public HTTPS image URL rejected: %v", err)
+	}
+}
+
+func TestFetchRemoteEmailImageBlocksPrivateDNSResolution(t *testing.T) {
+	if _, err := fetchRemoteEmailImage(context.Background(), "https://localhost/image.png"); err == nil {
+		t.Fatal("remote image fetch unexpectedly connected to a private DNS result")
+	}
+}
+
+func TestEmailImageContentTypeValidatesWebPAndDimensions(t *testing.T) {
+	webp := make([]byte, 30)
+	copy(webp[:4], "RIFF")
+	copy(webp[8:12], "WEBP")
+	copy(webp[12:16], "VP8X")
+	contentType, err := emailImageContentType(webp)
+	if err != nil || contentType != "image/webp" {
+		t.Fatalf("emailImageContentType(WebP) = %q, %v", contentType, err)
+	}
+	webp[26] = 0xff
+	webp[25] = 0xff
+	webp[24] = 0xff
+	if _, err := emailImageContentType(webp); err == nil {
+		t.Fatal("oversized WebP dimensions were accepted")
+	}
+	if isPublicImageIP(net.ParseIP("127.0.0.1")) || isPublicImageIP(net.ParseIP("10.0.0.1")) ||
+		isPublicImageIP(net.ParseIP("169.254.169.254")) {
+		t.Fatal("a private or link-local address was classified as public")
+	}
+}
 
 func TestEmailAssetUploadAndPublicReadIntegration(t *testing.T) {
 	if integrationPool == nil {

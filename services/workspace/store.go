@@ -21,6 +21,7 @@ type Store interface {
 	MembershipsForUser(ctx context.Context, userID string) ([]MembershipWithOrganization, error)
 	Membership(ctx context.Context, organizationID, userID string) (*Membership, error)
 	ListMembers(ctx context.Context, organizationID string) ([]Membership, error)
+	ListAdminOrganizations(ctx context.Context, search string, limit, offset int) ([]AdminOrganization, int, error)
 	GetOrganization(ctx context.Context, organizationID string) (*Organization, error)
 	UpdateOrganization(ctx context.Context, organizationID, name, slug, correlationID string) (*Organization, error)
 
@@ -48,6 +49,16 @@ type Organization struct {
 	Name      string    `json:"name"`
 	Slug      string    `json:"slug"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// AdminOrganization is privacy-safe platform metadata used by the Identity
+// service's separately authorized platform-admin endpoint.
+type AdminOrganization struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Slug        string    `json:"slug"`
+	MemberCount int       `json:"member_count"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // Membership ties a user to an organization with a role.

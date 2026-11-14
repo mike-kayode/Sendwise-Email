@@ -175,6 +175,7 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 			WHERE si.id = $1 AND si.organization_id = $2
 			  AND lower(si.local_part || '@' || si.domain) = lower($3)
 			  AND sd.status = 'verified' AND NOT sd.owner_conflict
+			  AND sd.admin_disabled_at IS NULL
 		)
 	`, senderIdentityID, organizationID, senderEmail).Scan(&senderIdentityValid); err != nil {
 		return 0, fmt.Errorf("check campaign sender identity: %w", err)
@@ -187,9 +188,7 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 		SELECT EXISTS (
 			SELECT 1 FROM sender_profiles
 			WHERE organization_id = $1
-			  AND btrim(company_name) <> '' AND btrim(street_address) <> ''
-			  AND btrim(city) <> '' AND btrim(postal_code) <> ''
-			  AND btrim(country) <> '' AND btrim(website) <> ''
+			  AND btrim(company_name) <> '' AND btrim(website) <> ''
 			  AND btrim(support_email) <> ''
 		)
 	`, organizationID).Scan(&senderProfileComplete); err != nil {

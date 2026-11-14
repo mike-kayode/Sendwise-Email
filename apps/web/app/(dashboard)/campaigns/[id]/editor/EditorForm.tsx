@@ -1,15 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Eye, Save } from "lucide-react";
+import { ArrowLeft, Eye, Monitor, Save, Smartphone } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { GrapesEmailEditor } from "@/components/grapes-email-editor";
+import { ComplianceFooterEditor, defaultComplianceFooter, type ComplianceFooterSetting } from "@/components/compliance-footer-editor";
+import { EmailPreview } from "@/components/email-preview";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input, Select, Textarea } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch, type Campaign, type SenderIdentity } from "@/lib/auth";
 import { blocksToHtml, type EmailDesignBlock } from "@/lib/email-html-importer";
+import { hasComplianceContent, rehostExternalImages, rewriteAssetReferences } from "@/lib/email-assets";
 
 type EmailDesignTheme = {
   background: string;
@@ -35,6 +39,17 @@ export default function EditorForm({
   const initialDesign = initialCampaign.content ?? {};
   const [editorProject, setEditorProject] = useState<unknown>(initialProject);
   const [html, setHtml] = useState(initialHtml || blocksToHtml(initialBlocks));
+  const [htmlMode, setHtmlMode] = useState<"visual" | "original">(initialDesign.html_mode === "original" ? "original" : "visual");
+  const [complianceFooter, setComplianceFooter] = useState<ComplianceFooterSetting>({
+    ...defaultComplianceFooter,
+    ...(initialDesign.compliance_footer && typeof initialDesign.compliance_footer === "object" ? initialDesign.compliance_footer : {}),
+  });
+  const [previewHTML, setPreviewHTML] = useState("");
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewViewport, setPreviewViewport] = useState<"desktop" | "mobile">("desktop");
+  const [imageWarnings, setImageWarnings] = useState<string[]>([]);
+  const [assetReplacements, setAssetReplacements] = useState<Record<string, string>>({});
   const [mode, setMode] = useState<"plain" | "html">(initialDesign.mode === "plain" ? "plain" : "html");
   const [textContent, setTextContent] = useState(typeof initialDesign.text_content === "string" ? initialDesign.text_content : "");
   const [theme, setTheme] = useState<EmailDesignTheme>({
@@ -65,12 +80,56 @@ export default function EditorForm({
     queryFn: () => apiFetch<{ complete: boolean }>("/sender-profile"),
   });
 
+  useEffect(() => {
+    if (!profileQuery.data?.complete) {
+      setPreviewHTML("");
+      return;
+    }
+    let active = true;
+    setPreviewLoading(true);
+    const timer = window.setTimeout(() => {
+      void apiFetch<{ html: string }>("/templates/preview", {
+        method: "POST",
+        body: JSON.stringify({
+          design: {
+            version: 2,
+            mode,
+            html_mode: htmlMode,
+            html,
+            text_content: textContent,
+            theme,
+            compliance_footer: complianceFooter,
+          },
+        }),
+      }).then((preview) => {
+        if (!active) return;
+        setPreviewHTML(preview.html);
+        setPreviewError(null);
+      }).catch((previewRequestError: unknown) => {
+        if (!active) return;
+        setPreviewError(previewRequestError instanceof Error ? previewRequestError.message : "The send preview could not be rendered.");
+      }).finally(() => {
+        if (active) setPreviewLoading(false);
+      });
+    }, 250);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [mode, htmlMode, html, textContent, theme, complianceFooter, profileQuery.data?.complete]);
+
   const save = async () => {
     if (saving) return;
     setSaving(true);
     setSaved(false);
     setError(null);
     try {
+      const rehosted = await rehostExternalImages(html);
+      const project = rewriteAssetReferences(editorProject, rehosted.replacements);
+      setHtml(rehosted.html);
+      setEditorProject(project);
+      setImageWarnings(rehosted.warnings);
+      setAssetReplacements(rehosted.replacements);
       await apiFetch(`/campaigns/${initialCampaign.id}`, {
         method: "PATCH",
         body: JSON.stringify({
@@ -81,11 +140,13 @@ export default function EditorForm({
           content: {
             version: 2,
             editor: "grapesjs",
-            editor_project: editorProject,
-            html,
+            editor_project: project,
+            html: rehosted.html,
+            html_mode: htmlMode,
             mode,
             text_content: textContent,
             theme,
+            compliance_footer: complianceFooter,
           },
           track_opens: initialCampaign.track_opens,
           track_clicks: initialCampaign.track_clicks,
@@ -110,7 +171,7 @@ export default function EditorForm({
       <section className="rounded-xl border border-amber-200 bg-amber-50 p-6">
         <h1 className="text-lg font-semibold text-amber-950">Complete your sender profile</h1>
         <p className="mt-2 text-sm text-amber-900">
-          Campaign editing and sending are locked until the company details, postal address, website, and support email are saved.
+          Campaign editing and sending are locked until company details, website, and support email are saved. A postal address is optional.
         </p>
         <Link href="/settings#sender-profile" className="mt-4 inline-flex text-sm font-medium text-amber-950 underline">
           Set up sender profile
@@ -176,6 +237,14 @@ export default function EditorForm({
         <p className="self-end text-xs text-slate-500">The sender profile supplies the compliance footer and reply address.</p>
       </section>
 
+      <ComplianceFooterEditor
+        value={complianceFooter}
+        onChange={(value) => {
+          setComplianceFooter(value);
+          setSaved(false);
+        }}
+      />
+
       <label className="block max-w-sm text-sm font-medium text-slate-700">
         Content format
         <Select
@@ -195,13 +264,31 @@ export default function EditorForm({
           <option value="plain">Plain text</option>
         </Select>
       </label>
+      {imageWarnings.length > 0 ? (
+        <div role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+          <p className="font-medium">These image sources could not be copied to Sendwise. Their source values remain in the HTML; review or replace them before sending:</p>
+          <ul className="mt-1 list-inside list-disc break-all">
+            {imageWarnings.map((url) => <li key={url}>{url}</li>)}
+          </ul>
+        </div>
+      ) : null}
+      {hasComplianceContent(html) ? (
+        <p role="status" className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+          The template appears to include its own unsubscribe or address content. Sendwise will add its required compliance footer after the template.
+        </p>
+      ) : null}
       {mode === "html" ? (
         <GrapesEmailEditor
           project={editorProject}
           html={html}
+          htmlMode={htmlMode}
+          imageWarnings={imageWarnings}
+          assetReplacements={assetReplacements}
           onChange={(design, changed) => {
             setEditorProject(design.project);
             setHtml(design.html);
+            setHtmlMode(design.htmlMode);
+            setImageWarnings(design.imageWarnings);
             if (changed) setSaved(false);
           }}
         />
@@ -219,6 +306,27 @@ export default function EditorForm({
           />
         </label>
       )}
+      <Card>
+        <CardContent className="space-y-3 p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">Sanitized send preview</h2>
+              <p className="text-xs text-slate-500">This preview uses the same server renderer and compliance footer as campaign delivery.</p>
+            </div>
+            <div className="flex gap-2" role="group" aria-label="Preview viewport">
+              <Button type="button" variant={previewViewport === "desktop" ? "primary" : "secondary"} onClick={() => setPreviewViewport("desktop")}>
+                <Monitor className="h-4 w-4" /> Desktop
+              </Button>
+              <Button type="button" variant={previewViewport === "mobile" ? "primary" : "secondary"} onClick={() => setPreviewViewport("mobile")}>
+                <Smartphone className="h-4 w-4" /> Mobile
+              </Button>
+            </div>
+          </div>
+          {previewError ? <p role="alert" className="text-sm text-rose-700">Preview unavailable: {previewError}</p> : null}
+          {previewLoading && !previewHTML ? <p role="status" className="text-sm text-slate-500">Rendering preview…</p> : null}
+          {previewHTML ? <EmailPreview sanitizedDocument={previewHTML} theme={theme} subject={subject} preheader={previewText} viewport={previewViewport} /> : null}
+        </CardContent>
+      </Card>
     </div>
   );
 }

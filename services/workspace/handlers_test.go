@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,7 @@ type fakeStore struct {
 	invitationHash  map[string]string      // hash -> id
 	processedEvents map[string]bool
 	outbox          []outboxRecord
+	adminSearchErr  error
 	nextID          int
 }
 
@@ -123,6 +125,48 @@ func (f *fakeStore) ListMembers(_ context.Context, organizationID string) ([]Mem
 		}
 	}
 	return result, nil
+}
+
+func (f *fakeStore) ListAdminOrganizations(_ context.Context, search string, limit, offset int) ([]AdminOrganization, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.adminSearchErr != nil {
+		return nil, 0, f.adminSearchErr
+	}
+	query := strings.ToLower(search)
+	organizations := make([]AdminOrganization, 0, len(f.orgs))
+	for _, org := range f.orgs {
+		if query != "" && !strings.Contains(strings.ToLower(org.ID), query) &&
+			!strings.Contains(strings.ToLower(org.Name), query) &&
+			!strings.Contains(strings.ToLower(org.Slug), query) {
+			continue
+		}
+		memberCount := 0
+		for _, membership := range f.memberships {
+			if membership.OrganizationID == org.ID {
+				memberCount++
+			}
+		}
+		organizations = append(organizations, AdminOrganization{
+			ID: org.ID, Name: org.Name, Slug: org.Slug,
+			MemberCount: memberCount, CreatedAt: org.CreatedAt,
+		})
+	}
+	sort.Slice(organizations, func(i, j int) bool {
+		if organizations[i].CreatedAt.Equal(organizations[j].CreatedAt) {
+			return organizations[i].ID > organizations[j].ID
+		}
+		return organizations[i].CreatedAt.After(organizations[j].CreatedAt)
+	})
+	total := len(organizations)
+	if offset >= total {
+		return []AdminOrganization{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return organizations[offset:end], total, nil
 }
 
 func (f *fakeStore) GetOrganization(_ context.Context, organizationID string) (*Organization, error) {
@@ -505,6 +549,59 @@ func TestInternalOrganizationLookup(t *testing.T) {
 	}
 	if got.ID != org.ID || got.Slug != "acme" {
 		t.Fatalf("org = %+v", got)
+	}
+}
+
+func TestInternalAdminOrganizationListingRequiresServiceToken(t *testing.T) {
+	env := newTestEnv(t)
+	userID := fakeUUID(32)
+	org, _, err := env.store.ProvisionUserOrganization(context.Background(), fakeUUID(33), userID, "Acme Partners", fakeUUID(1))
+	if err != nil {
+		t.Fatalf("provision workspace: %v", err)
+	}
+
+	path := "/internal/admin/organizations?search=acme&limit=1"
+	unauthorized := doJSON(t, env.handler, http.MethodGet, path, "", nil)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("internal admin list without token status = %d, want 401", unauthorized.Code)
+	}
+	response := doJSON(t, env.handler, http.MethodGet, path, "", func(r *http.Request) {
+		kit.WithServiceToken(r, "svc-secret")
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("internal admin list status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Data       []AdminOrganization `json:"data"`
+		Pagination struct {
+			Total int `json:"total"`
+		} `json:"pagination"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode admin organizations: %v", err)
+	}
+	if len(body.Data) != 1 || body.Data[0].ID != org.ID ||
+		body.Data[0].MemberCount != 1 || body.Pagination.Total != 1 {
+		t.Fatalf("unexpected admin organization result: %+v", body)
+	}
+
+	detail := doJSON(t, env.handler, http.MethodGet,
+		"/internal/admin/organizations/"+org.ID, "", func(r *http.Request) {
+			kit.WithServiceToken(r, "svc-secret")
+		})
+	if detail.Code != http.StatusOK {
+		t.Fatalf("internal admin detail status = %d, body = %s", detail.Code, detail.Body.String())
+	}
+	var detailBody struct {
+		Workspace Organization `json:"workspace"`
+		Members   []Membership `json:"members"`
+	}
+	if err := json.Unmarshal(detail.Body.Bytes(), &detailBody); err != nil {
+		t.Fatalf("decode admin workspace detail: %v", err)
+	}
+	if detailBody.Workspace.ID != org.ID || len(detailBody.Members) != 1 ||
+		detailBody.Members[0].Role != "owner" {
+		t.Fatalf("unexpected admin workspace detail: %+v", detailBody)
 	}
 }
 
