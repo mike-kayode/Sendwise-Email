@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -58,25 +57,14 @@ export default function LoginPage() {
     <AuthFrame>
       <div className="wrap split auth-columns">
         <aside className="dark auth-pitch">
-          <div>
-            <span className="eyebrow eyebrow-dark">Sign in to your account</span>
-            <p className="lead">Sign in to send, check domain status and see what happened to every message.</p>
-          </div>
           <figure className="auth-image">
-            <Image
-              src="/images/sendwise-dashboard.png"
-              alt="Sendwise email marketing dashboard illustration"
-              width={1365}
-              height={768}
-              sizes="(max-width: 900px) 100vw, 48vw"
-              priority
+            <img
+              src="https://images.unsplash.com/photo-1552664730-d307ca884978?auto=format&fit=crop&w=1200&q=80"
+              alt="Team collaborating on an email marketing dashboard"
+              width={1200}
+              height={800}
             />
           </figure>
-          <ul className="checks">
-            <li>Live DNS and domain verification status</li>
-            <li>Campaign and transactional reports</li>
-            <li>API keys, SMTP credentials and webhooks</li>
-          </ul>
         </aside>
         <section className="card auth-form">
           <h1 className="title auth-form-title">Sign in</h1>

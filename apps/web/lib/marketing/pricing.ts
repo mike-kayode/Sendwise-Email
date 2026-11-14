@@ -17,8 +17,8 @@ export const plans: Plan[] = [
   {
     name: "Free",
     audience: "Try the platform with no monthly charge.",
-    monthlyPrice: "0",
-    yearlyPrice: "0",
+    monthlyPrice: "₦3,000",
+    yearlyPrice: "₦3,000",
     emails: "3,000",
     dailyEmails: "100",
     features: ["3,000 emails per month", "Up to 100 emails per day", "Campaigns and transactional email", "REST API and SMTP"],
@@ -28,9 +28,9 @@ export const plans: Plan[] = [
   {
     name: "Starter",
     audience: "For teams building their email program.",
-    monthlyPrice: "5,000",
+    monthlyPrice: "₦10,000",
     emails: "10,000",
-    dailyEmails: "Contact us",
+    dailyEmails: "₦5,000",
     features: ["10,000 emails per month", "Campaigns and transactional email", "REST API and SMTP"],
     action: "Choose Starter",
     href: "/register",
@@ -38,9 +38,9 @@ export const plans: Plan[] = [
   {
     name: "Business",
     audience: "For growing teams sending at scale.",
-    monthlyPrice: "15,000",
+    monthlyPrice: "₦50,000",
     emails: "50,000",
-    dailyEmails: "Contact us",
+    dailyEmails: "₦15,000",
     features: ["50,000 emails per month", "Campaigns and transactional email", "REST API and SMTP"],
     action: "Choose Business",
     href: "/register",
@@ -49,9 +49,9 @@ export const plans: Plan[] = [
   {
     name: "Enterprise",
     audience: "For high-volume email programs.",
-    monthlyPrice: "50,000",
+    monthlyPrice: "₦200,000",
     emails: "200,000",
-    dailyEmails: "Contact us",
+    dailyEmails: "₦50,000",
     features: ["200,000 emails per month", "Campaigns and transactional email", "REST API and SMTP", "Talk with our team about your needs"],
     action: "Contact sales",
     href: "/contact",
@@ -60,7 +60,7 @@ export const plans: Plan[] = [
 
 export const planComparison = [
   ["Emails per month", "3,000", "10,000", "50,000", "200,000"],
-  ["Daily email limit", "100", "Contact us", "Contact us", "Contact us"],
+  ["Daily email limit", "100", "₦5,000", "₦15,000", "₦50,000"],
   ["Campaigns and transactional email", "Included", "Included", "Included", "Included"],
   ["REST API and SMTP", "Included", "Included", "Included", "Included"],
   ["Pay-as-you-go terms", "Contact us", "Contact us", "Contact us", "Contact us"],

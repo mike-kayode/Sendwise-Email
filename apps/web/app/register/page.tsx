@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -65,25 +64,14 @@ export default function RegisterPage() {
     <AuthFrame>
       <div className="wrap split auth-columns">
         <aside className="dark auth-pitch">
-          <div>
-            <span className="eyebrow eyebrow-dark">Get started</span>
-            <p className="lead">You will add a domain, verify it with DNS, and get an API key or SMTP credentials.</p>
-          </div>
           <figure className="auth-image">
-            <Image
-              src="/images/sendwise-dashboard.png"
-              alt="Sendwise email marketing dashboard illustration"
-              width={1365}
-              height={768}
-              sizes="(max-width: 900px) 100vw, 48vw"
-              priority
+            <img
+              src="https://images.unsplash.com/photo-1522202176988-66273c2fd55f?auto=format&fit=crop&w=1200&q=80"
+              alt="Marketing and email operations team planning a campaign"
+              width={1200}
+              height={800}
             />
           </figure>
-          <ol className="auth-steps">
-            <li><span className="step-n step-accent">1</span><span>Create your account</span></li>
-            <li><span className="step-n step-accent">2</span><span>Verify your email address</span></li>
-            <li><span className="step-n step-accent">3</span><span>Add and verify your sending domain</span></li>
-          </ol>
         </aside>
         <section className="card auth-form">
           <h1 className="title auth-form-title">Create account</h1>

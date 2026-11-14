@@ -1,3 +1,8 @@
+---
+title: Public website
+description: Marketing pages, contact form, legal pages, and public auth shell
+---
+
 # Public website
 
 The public marketing site is implemented in `apps/web` using the App Router.
