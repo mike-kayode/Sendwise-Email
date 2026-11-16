@@ -142,6 +142,19 @@ func (g *Gateway) buildHandler() http.Handler {
 		apiProxy = g.tokens.OptionalSessionMiddleware(apiProxy)
 	}
 	mux.Handle("/api/v1/auth/", authRate(authProxy))
+
+	// The transactional message routes authenticate upstream with sw_tx_* API
+	// keys (transactionalKeyAuth), not session JWTs. OptionalSessionMiddleware
+	// parses any bearer token as a session token, so it answered 401
+	// invalid_token for every API key before the upstream key validator could
+	// run — no valid key could send through the gateway. SendMux matches the
+	// most specific pattern, so these two registrations send key-authenticated
+	// paths straight to the proxy while every other /api/v1/transactional/*
+	// route (dashboard, templates, api-keys, webhooks, ...) keeps the session
+	// check below.
+	mux.Handle("/api/v1/transactional/messages", g.proxy)
+	mux.Handle("/api/v1/transactional/messages/", g.proxy)
+
 	mux.Handle("/api/", apiProxy)
 	mux.Handle("/", g.proxy)
 

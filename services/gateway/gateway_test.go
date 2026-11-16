@@ -429,3 +429,97 @@ func TestGatewayStripsUpstreamCORSHeaders(t *testing.T) {
 		t.Fatalf("Access-Control-Allow-Credentials repeated %d times, want 1", got)
 	}
 }
+
+// TestGatewayForwardsTransactionalAPIKeys reproduces the production defect
+// where OptionalSessionMiddleware parsed sw_tx_* API keys as session JWTs and
+// answered 401 invalid_token before the legacy API's key validator
+// (transactionalKeyAuth) ever ran. A Bearer header therefore died at the
+// gateway and any other header died upstream, so no valid key could
+// authenticate through the public endpoint.
+func TestGatewayForwardsTransactionalAPIKeys(t *testing.T) {
+	var legacyHits []upstreamEcho
+	legacy := newEchoServer(&legacyHits)
+	defer legacy.Close()
+	identity := newEchoServer(&[]upstreamEcho{})
+	defer identity.Close()
+	workspace := newEchoServer(&[]upstreamEcho{})
+	defer workspace.Close()
+
+	server, _ := newTestGateway(t, Config{
+		IdentityURL:  identity.URL,
+		WorkspaceURL: workspace.URL,
+		LegacyAPIURL: legacy.URL,
+		// JWTSecret + ServiceToken are what make New() install the session
+		// middleware; without them the defect cannot reproduce (which is why
+		// the other gateway tests never caught it).
+		BaseConfig: kit.BaseConfig{
+			JWTSecret: "a-long-test-secret-value-for-gateway",
+			JWTIssuer: "test-issuer",
+		},
+		ServiceToken: "test-service-token",
+	})
+
+	const apiKey = "sw_tx_live_4D2twKqjM5Vnul8bI-lY96Uqe8zX95swd0uvy9YbOZw"
+
+	// 1. Key-authenticated message routes must reach the legacy API with the
+	// Authorization header intact — the gateway must not read sw_tx_* keys as
+	// session tokens.
+	keyAuthRoutes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/v1/transactional/messages"},
+		{http.MethodGet, "/api/v1/transactional/messages/msg_01J8"},
+	}
+	for _, route := range keyAuthRoutes {
+		req, _ := http.NewRequest(route.method, server.URL+route.path, strings.NewReader(`{"subject":"test"}`))
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", route.method, route.path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s %s = %d %s, want 200 proxied from upstream",
+				route.method, route.path, resp.StatusCode, body)
+		}
+	}
+	if len(legacyHits) != len(keyAuthRoutes) {
+		t.Fatalf("legacy hits = %d, want %d", len(legacyHits), len(keyAuthRoutes))
+	}
+	for i, route := range keyAuthRoutes {
+		got := legacyHits[i]
+		if got.path != route.path {
+			t.Errorf("upstream path = %q, want %q", got.path, route.path)
+		}
+		if want := "Bearer " + apiKey; got.headers.Get("Authorization") != want {
+			t.Errorf("forwarded Authorization = %q, want %q", got.headers.Get("Authorization"), want)
+		}
+	}
+
+	// 2. Session-protected routes must still reject non-session tokens: the
+	// bypass is scoped to the key-authenticated paths only.
+	guarded := []string{
+		"/api/v1/transactional/dashboard/messages",
+		"/api/v1/transactional/templates",
+		"/api/v1/transactional/api-keys",
+		"/api/v1/contacts",
+	}
+	for _, path := range guarded {
+		req, _ := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(string(body), "invalid_token") {
+			t.Errorf("GET %s = %d %s, want 401 invalid_token", path, resp.StatusCode, body)
+		}
+	}
+	if len(legacyHits) != len(keyAuthRoutes) {
+		t.Errorf("guarded routes leaked to upstream: %d hits, want %d", len(legacyHits), len(keyAuthRoutes))
+	}
+}
