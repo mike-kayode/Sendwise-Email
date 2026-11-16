@@ -492,6 +492,13 @@ func (s *Store) SaveVERPToken(ctx context.Context, job *Job, token, email string
 	return nil
 }
 
+// MarkAccepted records that the relay accepted the message for this recipient
+// and treats that acceptance as delivery. The relay is the last hop this
+// deployment can observe: no production DSN collector exists and mailbox
+// providers such as Gmail never return a success DSN, so waiting for a real
+// downstream delivery event would leave every message in "sending" forever.
+// A bounce or complaint report that arrives later still corrects the status
+// through ApplyFeedback.
 func (s *Store) MarkAccepted(ctx context.Context, job *Job, smtpMessageID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -503,7 +510,7 @@ func (s *Store) MarkAccepted(ctx context.Context, job *Job, smtpMessageID string
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE transactional_message_recipients
-		SET status = 'sending', accepted_at = COALESCE(accepted_at, now()),
+		SET status = 'delivered', accepted_at = COALESCE(accepted_at, now()),
 		    lease_expires_at = NULL, smtp_response = $2, updated_at = now()
 		WHERE id = $1 AND status = 'sending' AND accepted_at IS NULL
 	`, job.RecipientID, smtpMessageID)
@@ -515,10 +522,15 @@ func (s *Store) MarkAccepted(ctx context.Context, job *Job, smtpMessageID string
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE transactional_messages
-		SET accepted_at = COALESCE(accepted_at, now()), status = 'sending', updated_at = now()
+		SET accepted_at = COALESCE(accepted_at, now()), updated_at = now()
 		WHERE id = $1
 	`, job.MessageUUID); err != nil {
 		return fmt.Errorf("mark transactional message accepted by MTA: %w", err)
+	}
+	// Roll the message up from its recipients so multi-recipient messages only
+	// report delivered once every recipient has, and so delivered_at is stamped.
+	if err := updateAggregateStatus(ctx, tx, job.MessageUUID); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO transactional_message_events
@@ -528,10 +540,20 @@ func (s *Store) MarkAccepted(ctx context.Context, job *Job, smtpMessageID string
 		return fmt.Errorf("record transactional SMTP acceptance event: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO transactional_usage_daily (organization_id, usage_date, accepted_count)
-		VALUES ($1, current_date, 1)
+		INSERT INTO transactional_message_events
+			(organization_id, message_id, recipient_id, event_type, source, smtp_response)
+		VALUES ($1, $2, $3, 'message.delivered', 'smtp', $4)
+	`, job.Organization, job.MessageUUID, job.RecipientID, smtpMessageID); err != nil {
+		return fmt.Errorf("record transactional delivery event: %w", err)
+	}
+	// ApplyFeedback only increments delivered_count when it moves the recipient
+	// into "delivered", so a later delivered report cannot double-count this.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO transactional_usage_daily (organization_id, usage_date, accepted_count, delivered_count)
+		VALUES ($1, current_date, 1, 1)
 		ON CONFLICT (organization_id, usage_date)
 		DO UPDATE SET accepted_count = transactional_usage_daily.accepted_count + 1,
+		              delivered_count = transactional_usage_daily.delivered_count + 1,
 		              updated_at = now()
 	`, job.Organization); err != nil {
 		return fmt.Errorf("increment transactional accepted usage: %w", err)
@@ -602,8 +624,11 @@ func (s *Store) ApplyFeedback(
 	}
 
 	if status != "" && current != status {
-		allowComplaintAfterDelivery := current == StatusDelivered && status == StatusComplained
-		if !CanTransition(current, status) && !allowComplaintAfterDelivery {
+		// "delivered" only means the relay accepted the message, so a
+		// downstream bounce or complaint must still be able to correct it.
+		allowAfterDelivery := current == StatusDelivered &&
+			(status == StatusBounced || status == StatusComplained)
+		if !CanTransition(current, status) && !allowAfterDelivery {
 			return fmt.Errorf("transactional feedback cannot transition recipient %q to %q", current, status)
 		}
 		tag, err = tx.Exec(ctx, `

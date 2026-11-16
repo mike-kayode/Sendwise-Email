@@ -41,7 +41,7 @@ func TestStoreRejectsEnqueueForSuspendedWorkspace(t *testing.T) {
 	}
 }
 
-func TestStoreEnqueueIsIdempotentAndSMTPAcceptanceIsNotDelivery(t *testing.T) {
+func TestStoreEnqueueIsIdempotentAndSMTPAcceptanceMarksDelivered(t *testing.T) {
 	pool := testutil.NewPostgres(t)
 	ctx := context.Background()
 	var organizationID string
@@ -113,26 +113,43 @@ func TestStoreEnqueueIsIdempotentAndSMTPAcceptanceIsNotDelivery(t *testing.T) {
 	if err := store.MarkAccepted(ctx, job, "<smtp-accepted@example.test>"); err != nil {
 		t.Fatalf("record SMTP acceptance: %v", err)
 	}
-	var status string
+	var status, recipientStatus string
 	var deliveredAt sql.NullString
 	if err := pool.QueryRow(ctx, `
 		SELECT status, delivered_at::text FROM transactional_messages WHERE id = $1
 	`, job.MessageUUID).Scan(&status, &deliveredAt); err != nil {
 		t.Fatalf("load accepted message: %v", err)
 	}
-	if status != "sending" || deliveredAt.Valid {
-		t.Fatalf("SMTP acceptance produced status=%q delivered_at=%v, want sending and no delivery timestamp", status, deliveredAt)
+	if status != "delivered" || !deliveredAt.Valid {
+		t.Fatalf("SMTP acceptance produced status=%q delivered_at=%v, want delivered with a delivery timestamp", status, deliveredAt)
 	}
-	if err := store.TransitionRecipient(ctx, job.RecipientID, StatusDelivered, "stalwart", 0, "", "remote delivery confirmed", time.Time{}, nil); err != nil {
-		t.Fatalf("record downstream delivery confirmation: %v", err)
+	if err := pool.QueryRow(ctx, `
+		SELECT status FROM transactional_message_recipients WHERE id = $1
+	`, job.RecipientID).Scan(&recipientStatus); err != nil {
+		t.Fatalf("load accepted recipient: %v", err)
+	}
+	if recipientStatus != "delivered" {
+		t.Fatalf("recipient status = %q after SMTP acceptance, want delivered", recipientStatus)
+	}
+	// A downstream bounce must still be able to correct the optimistic
+	// delivery recorded at relay acceptance.
+	if err := store.ApplyFeedback(ctx, "late-bounce-event", delivery.VERPClaims{
+		WorkspaceID: organizationID,
+		CampaignID:  "transactional:" + job.MessageUUID,
+		Recipient:   job.To,
+	}, delivery.Feedback{
+		Type: delivery.FeedbackHardBounce, Action: "failed",
+		EnhancedCode: "5.1.1", Diagnostic: "550 user unknown",
+	}); err != nil {
+		t.Fatalf("correct delivered message with a late bounce: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `
 		SELECT status FROM transactional_messages WHERE id = $1
 	`, job.MessageUUID).Scan(&status); err != nil {
-		t.Fatalf("load delivered message: %v", err)
+		t.Fatalf("load corrected message: %v", err)
 	}
-	if status != "delivered" {
-		t.Fatalf("message status = %q after delivery evidence, want delivered", status)
+	if status != "bounced" {
+		t.Fatalf("message status = %q after a late bounce, want bounced", status)
 	}
 }
 
@@ -417,8 +434,9 @@ func TestStoreAppliesStalwartDeliveryReportsIdempotently(t *testing.T) {
 	`, organizationID).Scan(&deliveredUsage); err != nil {
 		t.Fatalf("load delivery usage: %v", err)
 	}
-	if feedbackCount != 2 || deliveryEventCount != 1 || deliveredUsage != 1 {
-		t.Fatalf("feedback=%d delivery_events=%d delivered_usage=%d; want 2, 1, 1",
+	// One message.delivered from relay acceptance, one from the delivery report.
+	if feedbackCount != 2 || deliveryEventCount != 2 || deliveredUsage != 1 {
+		t.Fatalf("feedback=%d delivery_events=%d delivered_usage=%d; want 2, 2, 1",
 			feedbackCount, deliveryEventCount, deliveredUsage)
 	}
 }

@@ -20,7 +20,7 @@
 ## ADR-002: Stalwart as initial SMTP transport, abstracted behind Go interface
 **Decision:** Use self-hosted Stalwart SMTP as the initial transport. The campaign/delivery layer depends only on `delivery.Transport`, not on Stalwart directly.
 **Rationale:** Avoids building a full SMTP server from day one while keeping the platform independent of commercial delivery APIs. The interface makes a custom Go SMTP transport a drop-in replacement.
-**Consequence:** DKIM signing is delegated to Stalwart; SMTP acceptance is recorded as `submitted`, not `delivered`; bounce/complaint events must be processed separately.
+**Consequence:** DKIM signing is delegated to Stalwart; a transactional message becomes `delivered` when Stalwart accepts it (see ADR-013), and bounce/complaint events must be processed separately to correct it.
 
 ## ADR-003: PostgreSQL as source of truth; NATS JetStream as work distribution
 **Decision:** Delivery jobs live in PostgreSQL (`delivery_jobs`, `campaign_recipients`). NATS JetStream distributes jobs to workers; it is not the source of truth.
@@ -61,3 +61,8 @@
 **Decision:** Parse environment values strictly and reject invalid durations, booleans, integers, and unsafe production secrets/settings during startup. Development-only defaults must never be injected by the production Compose configuration.
 **Rationale:** Silent fallback can start a worker with unintended rates, retry limits, or credentials. Startup validation is safer than diagnosing a misconfigured live sender.
 **Consequence:** Production deployments must provide a strong `JWT_SECRET`, authenticated SMTP credentials, and verified-domain enforcement. Local development may use a documented development-only secret and plaintext local SMTP.
+
+## ADR-013: Relay acceptance records transactional `delivered`
+**Decision:** A transactional recipient becomes `delivered` when the SMTP relay (Stalwart) accepts the message, instead of waiting for a downstream delivery event that never arrives.
+**Rationale:** There is no production DSN/ARF collector, and mailbox providers such as Gmail never return a success DSN. Holding messages in `sending` forever hides real delivery and makes the status field useless in production. Relay acceptance is the last hop the platform can observe.
+**Consequence:** `delivered` means "accepted by the relay", not "placed in the inbox". Bounce and complaint reports that do reach `POST /api/v1/webhooks/stalwart-feedback` remain able to correct a message from `delivered` to `bounced` or `complained`, and `delivered_at` is stamped from the recipient rollup in `updateAggregateStatus`.

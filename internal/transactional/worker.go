@@ -187,8 +187,10 @@ func (w *DeliveryWorker) process(ctx context.Context, job *Job) error {
 		return w.handleSendFailure(ctx, job, err)
 	}
 
-	// SMTP acceptance is not final delivery. A real downstream delivery or
-	// DSN event must update this message from "sending".
+	// The relay's acceptance is the strongest delivery signal available here:
+	// there is no production DSN collector and Gmail returns no success DSN,
+	// so record the message as delivered rather than leaving it in "sending".
+	// ApplyFeedback can still correct it to bounced or complained later.
 	return w.store.MarkAccepted(ctx, job, result.MessageID)
 }
 

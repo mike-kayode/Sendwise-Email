@@ -231,7 +231,14 @@ failure DSN over JMAP, and posts it to the signed feedback endpoint. It verifies
 the corresponding Postgres recipient and message become `bounced`. This is a
 local integration proof, not a production collector. No production Stalwart
 event subscription or bounce-mailbox poller currently forwards real DSNs/ARFs
-automatically, so production delivery outcomes are not yet collected.
+automatically.
+
+Because no such collector exists, and because mailbox providers such as Gmail
+never return a success DSN, the worker records a message as `delivered` as soon
+as the relay (Stalwart) accepts it for the recipient. `delivered` therefore
+means "accepted by the relay", not "placed in the inbox". A failure DSN or ARF
+that does reach `POST /api/v1/webhooks/stalwart-feedback` still corrects the
+status to `bounced` or `complained` after the fact.
 
 ## DNS and delivery limits
 
