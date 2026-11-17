@@ -451,6 +451,21 @@ func TestInternalAdminWarmupOverrideIsBoundedAndQuotaCapped(t *testing.T) {
 	`, organizationID, domain); err != nil {
 		t.Fatalf("insert successful warm-up day: %v", err)
 	}
+	var campaignID, deferredJobID string
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO campaigns (organization_id, name, sender_email, status)
+		VALUES ($1, 'Deferred warm-up campaign', $2, 'sending')
+		RETURNING id::text
+	`, organizationID, "hello@"+domain).Scan(&campaignID); err != nil {
+		t.Fatalf("insert deferred warm-up campaign: %v", err)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status, next_attempt_at)
+		VALUES ($1, $2, $3, $4, 'deferred', now() + interval '1 day')
+		RETURNING id::text
+	`, organizationID, campaignID, uuid.NewString(), "deferred-"+uuid.NewString()+"@warmup.test").Scan(&deferredJobID); err != nil {
+		t.Fatalf("insert future deferred warm-up job: %v", err)
+	}
 
 	apiServer := newIntegrationServer(t)
 	apiServer.cfg.WarmupStartPerDay = 50
@@ -520,6 +535,18 @@ func TestInternalAdminWarmupOverrideIsBoundedAndQuotaCapped(t *testing.T) {
 		result.Data.Override.SetBy == nil || *result.Data.Override.SetBy != adminID {
 		t.Fatalf("warm-up state after override = %+v; want active 10000 override capped at quota 9000", result.Data)
 	}
+	var nextAttemptAt time.Time
+	if err := integrationPool.QueryRow(ctx, `SELECT next_attempt_at FROM delivery_jobs WHERE id = $1`, deferredJobID).Scan(&nextAttemptAt); err != nil {
+		t.Fatalf("read deferred job after setting override: %v", err)
+	}
+	if nextAttemptAt.After(time.Now().Add(time.Second)) {
+		t.Fatalf("deferred job next attempt = %s after setting override; want due now", nextAttemptAt)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		UPDATE delivery_jobs SET next_attempt_at = now() + interval '1 day' WHERE id = $1
+	`, deferredJobID); err != nil {
+		t.Fatalf("make deferred job future-dated before clearing override: %v", err)
+	}
 	clearBody, _ := json.Marshal(map[string]any{"updated_by": adminID, "reason": "Temporary capacity ended"})
 	cleared := doInternal(http.MethodDelete, writePath, clearBody, true)
 	if cleared.Code != http.StatusOK {
@@ -530,6 +557,12 @@ func TestInternalAdminWarmupOverrideIsBoundedAndQuotaCapped(t *testing.T) {
 	}
 	if result.Data.Override != nil || result.Data.EffectiveCapToday != 75 {
 		t.Fatalf("warm-up state after clear = %+v; want no override and curve cap 75", result.Data)
+	}
+	if err := integrationPool.QueryRow(ctx, `SELECT next_attempt_at FROM delivery_jobs WHERE id = $1`, deferredJobID).Scan(&nextAttemptAt); err != nil {
+		t.Fatalf("read deferred job after clearing override: %v", err)
+	}
+	if nextAttemptAt.After(time.Now().Add(time.Second)) {
+		t.Fatalf("deferred job next attempt = %s after clearing override; want due now", nextAttemptAt)
 	}
 }
 
@@ -1732,6 +1765,7 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 	if integrationPool == nil {
 		t.Skip("no database available")
 	}
+	ctx := context.Background()
 	s := newIntegrationServer(t)
 
 	registered := seedIntegrationUser(
@@ -1822,6 +1856,17 @@ func TestCampaignsLifecycleIntegration(t *testing.T) {
 
 	w = doRequest(t, s, "POST", "/api/v1/campaigns/"+campaignID+"/cancel", "", token)
 	assertStatus(t, w, http.StatusOK)
+
+	if _, err := integrationPool.Exec(ctx, `UPDATE campaigns SET status = 'sending' WHERE id = $1`, campaignID); err != nil {
+		t.Fatalf("make campaign active for delete guard: %v", err)
+	}
+	w = doRequest(t, s, http.MethodDelete, "/api/v1/campaigns/"+campaignID, "", token)
+	assertStatus(t, w, http.StatusConflict)
+	if _, err := integrationPool.Exec(ctx, `UPDATE campaigns SET status = 'completed' WHERE id = $1`, campaignID); err != nil {
+		t.Fatalf("mark campaign as past: %v", err)
+	}
+	w = doRequest(t, s, http.MethodDelete, "/api/v1/campaigns/"+campaignID, "", token)
+	assertStatus(t, w, http.StatusNoContent)
 }
 
 func TestSenderIdentityCRUDAndCampaignOwnershipIntegration(t *testing.T) {

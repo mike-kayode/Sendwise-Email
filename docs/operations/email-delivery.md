@@ -1,6 +1,6 @@
 # Email Delivery Operations
 
-> **Status note (2026-11-03):** This page includes intended operating policy and historical implementation claims. For source-verified delivery behavior and known defects, use [EMAIL_DELIVERY_ARCHITECTURE.md](../EMAIL_DELIVERY_ARCHITECTURE.md) and [SYSTEM_ARCHITECTURE_AND_DEVELOPMENT_AUDIT.md](../SYSTEM_ARCHITECTURE_AND_DEVELOPMENT_AUDIT.md). Stalwart production configuration and real SMTP integration have not been verified.
+> **Status note (2026-11-17):** This page describes source-verified behavior. Worker and campaign integration tests use isolated PostgreSQL schemas; API integration tests require a dedicated test database. Stalwart production configuration and live SMTP delivery still require separate verification. No production system was changed for the deferred-job recovery work.
 
 ## Transport architecture
 The platform owns campaign orchestration and delivery scheduling. Stalwart SMTP is the initial
@@ -17,7 +17,7 @@ delegated to Stalwart. The transport is replaceable — a custom Go SMTP engine 
 same interface without changing campaigns, contacts, automation, or frontend.
 
 ## Current implementation status
-Source inspection only; Go and Docker are unavailable in the current environment, so none of this is integration-tested here.
+The delivery worker and PostgreSQL-backed recovery path are covered by repository tests. Live SMTP delivery and production Stalwart configuration are not verified by those tests.
 - The worker records successful Stalwart submission as `submitted`; it does not claim inbox delivery.
 - Production SMTP now requires STARTTLS and configured SMTP credentials. Development may explicitly allow an insecure local transport.
 - Temporary SMTP errors are deferred with exponential backoff; exhausted or permanent SMTP errors become `failed`.
@@ -101,16 +101,31 @@ Automatic operational pause on abuse signals is supported via
   is not re-submitted.
 - After a successful SMTP submission but before DB update (uncertain outcome), the job is
   reconciled on the next poll: `submitted` jobs are not duplicated.
-- Worker restart re-publishes `queued`/`deferred` jobs whose `next_attempt_at <= now()` and
-  have no in-flight NATS message (`RepublishPending`).
+- Worker startup calls `RepublishPending` with a 500-job batch. It atomically claims due deferred
+  jobs and queued jobs that have not yet been successfully published.
+- Startup recovery uses the same atomic claim and publish path as the scheduler.
+  Every `SCHEDULER_INTERVAL` (15 seconds by default), each worker claims and republishes up to
+  1,000 due jobs. Claims use `FOR UPDATE SKIP LOCKED`; only jobs for `sending` campaigns qualify,
+  so multiple workers cannot claim the same job and paused/cancelled campaigns remain untouched.
+- Migration `0035_delivery_job_publish_claims.sql` stores the claim and NATS-publish timestamps.
+  Failed publishes return a job to `deferred` with a 15-second minimum retry delay; stale,
+  unpublished claims can be reclaimed after five minutes. NATS publishes use the delivery-job ID
+  as the message ID for broker deduplication.
+- Warm-up-cap and domain-quota deferrals keep their next eligible time and clear publish markers.
+  On resumption the job passes through normal worker checks again; changing or clearing a domain's
+  warm-up override makes its deferred jobs due immediately, without bypassing quotas or safety
+  controls.
 - Job processing is idempotent: `max_deliveries` on the NATS consumer plus DB status checks.
+- Campaign managers can cancel active campaigns. Completed and failed campaigns can be deleted;
+  active campaigns must be cancelled before deletion.
 
 ## Sending limits and warm-up
 - Conservative defaults: 20 emails/second per worker, max 5 attempts.
 - Verified sender domains required; tenant quotas enforced.
 - New sending IPs require warm-up: gradual volume increase, reputation monitoring,
   separate transactional/marketing identities.
-- Per-domain concurrency controls, tenant quotas, and automatic operational pause on abuse signals remain future work.
+- Per-domain concurrency controls, tenant quotas, and automatic operational pause on abuse signals
+  are implemented in the worker and should still be validated against production configuration.
 
 ## Compliance
 - RFC 8058 one-click unsubscribe: `List-Unsubscribe` and `List-Unsubscribe-Post` headers on

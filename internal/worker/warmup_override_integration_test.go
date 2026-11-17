@@ -4,13 +4,31 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/config"
 	"github.com/khayode/email-platform/internal/testutil"
 )
+
+type warmupTestPublisher struct {
+	mu        sync.Mutex
+	published int
+	messages  chan struct{}
+}
+
+func (p *warmupTestPublisher) Publish(context.Context, string, []byte) error {
+	p.mu.Lock()
+	p.published++
+	p.mu.Unlock()
+	if p.messages != nil {
+		p.messages <- struct{}{}
+	}
+	return nil
+}
 
 func TestWarmupOverrideReplacesCurveAndDefersUntilNextDay(t *testing.T) {
 	pool, ctx, organizationID, domainID, contactID, campaignID := newWarmupOverrideFixture(t)
@@ -84,6 +102,30 @@ func TestWarmupOverrideReplacesCurveAndDefersUntilNextDay(t *testing.T) {
 	}
 
 	if _, err := pool.Exec(ctx, `
+		UPDATE delivery_jobs
+		SET nats_published_at = now()
+		WHERE id = $1
+	`, firstJobID); err != nil {
+		t.Fatalf("mark earlier job as already published: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE delivery_jobs SET next_attempt_at = now() WHERE id = $1`, deferredJobID); err != nil {
+		t.Fatalf("make deferred job due for resume: %v", err)
+	}
+	publisher := &warmupTestPublisher{}
+	service := campaigns.NewService(pool, publisher, slog.New(slog.NewTextHandler(io.Discard, nil)), 5, false)
+	published, err := service.RepublishPending(ctx, 1000)
+	if err != nil || published != 1 {
+		t.Fatalf("resume deferred job published=%d err=%v; want one publish", published, err)
+	}
+	deferred, err = worker.reserveWarmupSlot(ctx, &jobRow{
+		ID: deferredJobID, OrganizationID: organizationID,
+		SenderEmail: "hello@warmup-override.example.test",
+	})
+	if err != nil || !deferred {
+		t.Fatalf("resumed job at full override cap deferred=%t err=%v; want cap enforcement", deferred, err)
+	}
+
+	if _, err := pool.Exec(ctx, `
 		UPDATE sending_domain_daily_stats SET sending_day = CURRENT_DATE - 1
 		WHERE organization_id = $1 AND domain = 'warmup-override.example.test' AND sending_day = CURRENT_DATE
 	`, organizationID); err != nil {
@@ -110,6 +152,56 @@ func TestWarmupOverrideReplacesCurveAndDefersUntilNextDay(t *testing.T) {
 	if reserved != 1 {
 		t.Fatalf("next-window warm-up usage = %d, want 1", reserved)
 	}
+}
+
+func TestSchedulerLoopResumesDueDeferredJobs(t *testing.T) {
+	pool := testutil.NewPostgres(t)
+	ctx := context.Background()
+	var organizationID, campaignID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO organizations (name, slug)
+		VALUES ('Scheduler resume test', 'scheduler-resume-' || gen_random_uuid()::text)
+		RETURNING id::text
+	`).Scan(&organizationID); err != nil {
+		t.Fatalf("create scheduler test workspace: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO campaigns (organization_id, name, status)
+		VALUES ($1, 'Scheduler resume test', 'sending')
+		RETURNING id::text
+	`, organizationID).Scan(&campaignID); err != nil {
+		t.Fatalf("create scheduler test campaign: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status)
+		VALUES ($1, $2, gen_random_uuid(), 'scheduler-resume@example.test', 'deferred')
+	`, organizationID, campaignID); err != nil {
+		t.Fatalf("create due deferred job: %v", err)
+	}
+
+	publisher := &warmupTestPublisher{messages: make(chan struct{}, 1)}
+	service := campaigns.NewService(pool, publisher, slog.New(slog.NewTextHandler(io.Discard, nil)), 5, false)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	worker := &Worker{
+		cfg:       config.Config{SchedulerInterval: 25 * time.Millisecond},
+		pool:      pool,
+		campaigns: service,
+		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		worker.schedulerLoop(ctx)
+	}()
+
+	select {
+	case <-publisher.messages:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler did not publish the due deferred job")
+	}
+	cancel()
+	<-done
 }
 
 func TestCampaignBounceAutoPauseStillAppliesWithWarmupOverride(t *testing.T) {

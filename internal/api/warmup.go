@@ -267,6 +267,11 @@ func (s *Server) setAdminDomainWarmupOverride(w http.ResponseWriter, r *http.Req
 		httpx.Error(w, http.StatusNotFound, "domain_not_found", "The sending domain could not be found.")
 		return
 	}
+	if err := makeWarmupDeferredJobsDue(r.Context(), tx, domainID); err != nil {
+		s.logger.Error("wake deferred jobs after warm-up override", "error", err, "domain_id", domainID)
+		httpx.Error(w, http.StatusInternalServerError, "warmup_update_failed", "The domain warm-up override could not be updated.")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.logger.Error("commit domain warm-up override", "error", err, "domain_id", domainID)
 		httpx.Error(w, http.StatusInternalServerError, "warmup_update_failed", "The domain warm-up override could not be updated.")
@@ -297,7 +302,14 @@ func (s *Server) clearAdminDomainWarmupOverride(w http.ResponseWriter, r *http.R
 		httpx.Error(w, http.StatusBadRequest, "invalid_warmup_override", "An admin user ID and a reason of 1 to 500 characters are required.")
 		return
 	}
-	tag, err := s.pool.Exec(r.Context(), `
+	tx, err := s.pool.Begin(r.Context())
+	if err != nil {
+		s.logger.Error("begin domain warm-up override clear", "error", err, "domain_id", domainID)
+		httpx.Error(w, http.StatusInternalServerError, "warmup_update_failed", "The domain warm-up override could not be cleared.")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	tag, err := tx.Exec(r.Context(), `
 		UPDATE sending_domains
 		SET warmup_daily_cap_override = NULL,
 		    warmup_override_expires_at = NULL,
@@ -316,6 +328,16 @@ func (s *Server) clearAdminDomainWarmupOverride(w http.ResponseWriter, r *http.R
 		httpx.Error(w, http.StatusNotFound, "domain_not_found", "The sending domain could not be found.")
 		return
 	}
+	if err := makeWarmupDeferredJobsDue(r.Context(), tx, domainID); err != nil {
+		s.logger.Error("wake deferred jobs after clearing warm-up override", "error", err, "domain_id", domainID)
+		httpx.Error(w, http.StatusInternalServerError, "warmup_update_failed", "The domain warm-up override could not be cleared.")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.logger.Error("commit domain warm-up override clear", "error", err, "domain_id", domainID)
+		httpx.Error(w, http.StatusInternalServerError, "warmup_update_failed", "The domain warm-up override could not be cleared.")
+		return
+	}
 	details, err := s.loadWarmupDetails(r.Context(), domainID, "")
 	if err != nil {
 		s.logger.Error("reload cleared domain warm-up override", "error", err, "domain_id", domainID)
@@ -323,6 +345,26 @@ func (s *Server) clearAdminDomainWarmupOverride(w http.ResponseWriter, r *http.R
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"data": details})
+}
+
+func makeWarmupDeferredJobsDue(ctx context.Context, tx pgx.Tx, domainID string) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE delivery_jobs dj
+		SET next_attempt_at = now(),
+		    nats_publish_claimed_at = NULL,
+		    nats_published_at = NULL,
+		    updated_at = now()
+		FROM campaigns c, sending_domains sd
+		WHERE sd.id = $1
+		  AND c.id = dj.campaign_id
+		  AND c.organization_id = dj.organization_id
+		  AND sd.organization_id = dj.organization_id
+		  AND lower(split_part(c.sender_email, '@', 2)) = lower(sd.domain)
+		  AND dj.status = 'deferred'
+	`, domainID); err != nil {
+		return fmt.Errorf("make domain deferred jobs due: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) loadCustomerWarmupSummary(ctx context.Context, domainID, organizationID string) (customerWarmupSummary, error) {

@@ -12,7 +12,7 @@ type CampaignDeleteButtonProps = {
   onDeleted?: () => void;
 };
 
-const deletableStatuses = new Set(["draft", "ready", "cancelled"]);
+const deletableStatuses = new Set(["draft", "ready", "cancelled", "completed", "failed"]);
 const campaignManagers = new Set(["owner", "admin", "manager"]);
 
 export function CampaignDeleteButton({ campaign, onDeleted }: CampaignDeleteButtonProps) {

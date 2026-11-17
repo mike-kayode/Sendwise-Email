@@ -604,6 +604,8 @@ func (w *Worker) handleSendFailure(ctx context.Context, row *jobRow, sendErr err
 		SET status = 'deferred',
 		    attempts = $2,
 		    next_attempt_at = now() + $3::interval,
+		    nats_publish_claimed_at = NULL,
+		    nats_published_at = NULL,
 		    last_error = $4,
 		    updated_at = now()
 		WHERE id = $1
@@ -906,6 +908,7 @@ func (w *Worker) reserveCampaignQuota(ctx context.Context, row *jobRow) (bool, t
 		if _, updateErr := tx.Exec(ctx, `
 			UPDATE delivery_jobs
 			SET status = 'deferred', next_attempt_at = $2, quota_deferred = true,
+			    nats_publish_claimed_at = NULL, nats_published_at = NULL,
 			    quota_reservation_id = NULL, last_error = $3, updated_at = now()
 			WHERE id = $1 AND status IN ('queued', 'processing', 'deferred')
 		`, row.ID, exceeded.ResetAt, exceeded.Error()); updateErr != nil {
@@ -1089,6 +1092,8 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 			UPDATE delivery_jobs
 			SET status = 'deferred',
 			    next_attempt_at = date_trunc('day', now()) + interval '1 day',
+			    nats_publish_claimed_at = NULL,
+			    nats_published_at = NULL,
 			    last_error = 'sending domain warm-up daily cap reached',
 			    updated_at = now()
 			WHERE id = $1 AND status IN ('queued', 'processing', 'deferred')
@@ -1299,6 +1304,12 @@ func (w *Worker) schedulerLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			observability.QueuePolls.Inc()
+			resumed, err := w.campaigns.RepublishPending(ctx, 1000)
+			if err != nil {
+				w.logger.Error("resume deferred delivery jobs", "error", err)
+			} else if resumed > 0 {
+				w.logger.Info("resumed due delivery jobs", "jobs", resumed)
+			}
 			refs, err := w.campaigns.DueCampaigns(ctx, 25)
 			if err != nil {
 				w.logger.Error("claim due campaigns", "error", err)

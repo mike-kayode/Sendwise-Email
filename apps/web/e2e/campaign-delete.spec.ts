@@ -18,14 +18,17 @@ function campaign(id: string, name: string, status: string): Campaign {
   };
 }
 
-test("campaign managers can delete drafts but not active or completed campaigns", async ({ page }) => {
+test("campaign managers can cancel active campaigns and delete past campaigns", async ({ page }) => {
   const draftID = "9b2df23a-6c47-4e56-8648-927b1645d408";
+  const activeID = "2f5fc9d3-50ee-42fa-8a5d-bd1f6b005439";
+  const completedID = "655ed351-8f4c-4a46-8df9-4bf8ffcb9fb4";
   let campaigns = [
     campaign(draftID, "Test campaign", "draft"),
-    campaign("2f5fc9d3-50ee-42fa-8a5d-bd1f6b005439", "Active campaign", "sending"),
-    campaign("655ed351-8f4c-4a46-8df9-4bf8ffcb9fb4", "Completed campaign", "completed"),
+    campaign(activeID, "Active campaign", "sending"),
+    campaign(completedID, "Completed campaign", "completed"),
   ];
   let deleteRequests = 0;
+  let cancelRequests = 0;
 
   await page.addInitScript(() => {
     const token = "campaign-delete-test-token";
@@ -41,9 +44,21 @@ test("campaign managers can delete drafts but not active or completed campaigns"
     }));
   });
   await page.route("**/api/v1/campaigns**", async (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().method() === "POST" && url.pathname.endsWith("/cancel")) {
+      cancelRequests++;
+      campaigns = campaigns.map((item) => item.id === activeID ? { ...item, status: "cancelled" } : item);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "cancelled" }),
+      });
+      return;
+    }
     if (route.request().method() === "DELETE") {
       deleteRequests++;
-      campaigns = campaigns.filter((item) => item.id !== draftID);
+      const campaignID = url.pathname.split("/").at(-1);
+      campaigns = campaigns.filter((item) => item.id !== campaignID);
       await route.fulfill({ status: 204 });
       return;
     }
@@ -73,13 +88,22 @@ test("campaign managers can delete drafts but not active or completed campaigns"
       }),
     }),
   );
-  page.once("dialog", (dialog) => void dialog.accept());
+  page.on("dialog", (dialog) => void dialog.accept());
 
   await page.goto("/campaigns");
   await expect(page.getByRole("button", { name: "Delete campaign Test campaign" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cancel campaign Active campaign" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Delete campaign Active campaign" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Delete campaign Completed campaign" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Delete campaign Test campaign" }).click();
-  await expect(page.getByRole("link", { name: "Test campaign" })).toHaveCount(0);
-  expect(deleteRequests).toBe(1);
+  await expect(page.getByRole("button", { name: "Cancel campaign Completed campaign" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Delete campaign Completed campaign" })).toBeVisible();
+  await page.getByRole("button", { name: "Cancel campaign Active campaign" }).click();
+  await expect(page.getByRole("button", { name: "Delete campaign Active campaign" })).toBeVisible();
+  await expect(page.getByText("cancelled", { exact: true })).toBeVisible();
+  expect(cancelRequests).toBe(1);
+
+  await page.getByRole("button", { name: "Delete campaign Completed campaign" }).click();
+  await expect(page.getByRole("link", { name: "Completed campaign" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Delete campaign Active campaign" }).click();
+  await expect(page.getByRole("link", { name: "Active campaign" })).toHaveCount(0);
+  expect(deleteRequests).toBe(2);
 });

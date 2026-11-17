@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Clock, Mail, Plus, Search, Send, TrendingUp } from "lucide-react";
+import { CampaignCancelButton } from "@/components/campaign-cancel-button";
 import { CampaignDeleteButton } from "@/components/campaign-delete-button";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
@@ -180,6 +181,7 @@ export default function CampaignsPage() {
                       <Link href={`/campaigns/${campaign.id}`} className="text-xs font-medium text-indigo-600 hover:text-indigo-500">
                         Open
                       </Link>
+                      <CampaignCancelButton campaign={campaign} />
                       <CampaignDeleteButton campaign={campaign} />
                     </div>
                   </Td>

@@ -52,29 +52,74 @@ type JobPayload struct {
 	ContactID      string `json:"contact_id"`
 }
 
+type messageIDPublisher interface {
+	PublishWithID(ctx context.Context, subject, messageID string, data []byte) error
+}
+
 func NewService(pool *pgxpool.Pool, publisher Publisher, logger *slog.Logger, maxAttempts int, requireVerifiedDomain bool) *Service {
 	return &Service{pool: pool, publisher: publisher, logger: logger, maxAttempts: maxAttempts, requireVerifiedDomain: requireVerifiedDomain}
 }
 
 // RepublishPending re-enqueues durable jobs that have no in-flight NATS
-// message, for example after a broker restart or a failed publish.
+// message. Claims are shared across workers and stale claims are recoverable.
 func (s *Service) RepublishPending(ctx context.Context, limit int) (int, error) {
+	return s.republishPending(ctx, "", "", limit)
+}
+
+func (s *Service) republishPending(ctx context.Context, campaignID, organizationID string, limit int) (int, error) {
 	if s.publisher == nil {
 		return 0, nil
 	}
-
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, organization_id, campaign_id, contact_id
-		FROM delivery_jobs
-		WHERE status IN ('queued', 'deferred')
-		  AND next_attempt_at <= now()
-		ORDER BY created_at
-		LIMIT $1
-	`, limit)
-	if err != nil {
-		return 0, fmt.Errorf("load pending jobs: %w", err)
+	if limit <= 0 {
+		return 0, nil
+	}
+	if limit > 1000 {
+		limit = 1000
 	}
 
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin pending-job claim: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, `
+		WITH candidates AS (
+			SELECT dj.id
+			FROM delivery_jobs dj
+			JOIN campaigns c
+			  ON c.id = dj.campaign_id AND c.organization_id = dj.organization_id
+			WHERE c.status = 'sending'
+			  AND dj.next_attempt_at <= now()
+			  AND (
+				  dj.status = 'deferred'
+				  OR (
+					  dj.status = 'queued'
+					  AND dj.nats_published_at IS NULL
+					  AND (
+						  dj.nats_publish_claimed_at IS NULL
+						  OR dj.nats_publish_claimed_at < now() - interval '5 minutes'
+					  )
+				  )
+			  )
+			  AND ($2::text = '' OR dj.campaign_id::text = $2)
+			  AND ($3::text = '' OR dj.organization_id::text = $3)
+			ORDER BY dj.created_at, dj.id
+			LIMIT $1
+			FOR UPDATE OF dj SKIP LOCKED
+		)
+		UPDATE delivery_jobs dj
+		SET status = 'queued',
+		    nats_publish_claimed_at = now(),
+		    nats_published_at = NULL,
+		    updated_at = now()
+		FROM candidates
+		WHERE dj.id = candidates.id
+		RETURNING dj.id, dj.organization_id, dj.campaign_id, dj.contact_id
+	`, limit, campaignID, organizationID)
+	if err != nil {
+		return 0, fmt.Errorf("claim pending jobs: %w", err)
+	}
 	var jobs []JobPayload
 	for rows.Next() {
 		var job JobPayload
@@ -88,20 +133,58 @@ func (s *Service) RepublishPending(ctx context.Context, limit int) (int, error) 
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("iterate pending jobs: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit pending-job claim: %w", err)
+	}
 
 	published := 0
+	var publishErr error
 	for _, job := range jobs {
 		payload, err := json.Marshal(job)
 		if err != nil {
+			return published, fmt.Errorf("encode delivery job %s: %w", job.JobID, err)
+		}
+		if err := s.publishJob(ctx, job.JobID, payload); err != nil {
+			s.logger.Error("republish delivery job", "job_id", job.JobID, "error", err)
+			if _, resetErr := s.pool.Exec(ctx, `
+				UPDATE delivery_jobs
+				SET status = 'deferred',
+				    next_attempt_at = GREATEST(next_attempt_at, now() + interval '15 seconds'),
+				    nats_publish_claimed_at = NULL,
+				    nats_published_at = NULL,
+				    last_error = $2,
+				    updated_at = now()
+				WHERE id = $1 AND status = 'queued' AND nats_publish_claimed_at IS NOT NULL
+			`, job.JobID, err.Error()); resetErr != nil {
+				if publishErr == nil {
+					publishErr = fmt.Errorf("restore failed publish for job %s: %w", job.JobID, resetErr)
+				}
+			}
+			if publishErr == nil {
+				publishErr = fmt.Errorf("publish delivery job %s: %w", job.JobID, err)
+			}
 			continue
 		}
-		if err := s.publisher.Publish(ctx, messaging.SubjectDeliveryJobs, payload); err != nil {
-			s.logger.Error("republish delivery job", "job_id", job.JobID, "error", err)
+		if _, err := s.pool.Exec(ctx, `
+			UPDATE delivery_jobs
+			SET nats_publish_claimed_at = NULL, nats_published_at = now(), updated_at = now()
+			WHERE id = $1 AND status = 'queued' AND nats_publish_claimed_at IS NOT NULL
+		`, job.JobID); err != nil {
+			if publishErr == nil {
+				publishErr = fmt.Errorf("record published delivery job %s: %w", job.JobID, err)
+			}
 			continue
 		}
 		published++
 	}
-	return published, nil
+	return published, publishErr
+}
+
+func (s *Service) publishJob(ctx context.Context, jobID string, payload []byte) error {
+	if publisher, ok := s.publisher.(messageIDPublisher); ok {
+		return publisher.PublishWithID(ctx, messaging.SubjectDeliveryJobs, jobID, payload)
+	}
+	return s.publisher.Publish(ctx, messaging.SubjectDeliveryJobs, payload)
 }
 
 // DueCampaigns atomically claims scheduled campaigns whose send time has arrived.
@@ -361,46 +444,13 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 	}
 
 	const publishBatchSize = 500
-	var lastID *string
 	for {
-		rows, err := s.pool.Query(ctx, `
-			SELECT id, contact_id
-			FROM delivery_jobs
-			WHERE campaign_id = $1 AND organization_id = $2 AND status = 'queued'
-			  AND ($3::uuid IS NULL OR id > $3::uuid)
-			ORDER BY id
-			LIMIT $4
-		`, campaignID, organizationID, lastID, publishBatchSize)
+		published, err := s.republishPending(ctx, campaignID, organizationID, publishBatchSize)
 		if err != nil {
-			return queuedCount, fmt.Errorf("load queued jobs: %w", err)
+			return queuedCount, fmt.Errorf("publish campaign delivery jobs: %w", err)
 		}
-		batch := make([]JobPayload, 0, publishBatchSize)
-		for rows.Next() {
-			job := JobPayload{OrganizationID: organizationID, CampaignID: campaignID}
-			if err := rows.Scan(&job.JobID, &job.ContactID); err != nil {
-				rows.Close()
-				return queuedCount, fmt.Errorf("scan queued job: %w", err)
-			}
-			batch = append(batch, job)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return queuedCount, fmt.Errorf("iterate queued jobs: %w", err)
-		}
-		rows.Close()
-		if len(batch) == 0 {
+		if published < publishBatchSize {
 			break
-		}
-		for _, job := range batch {
-			jobID := job.JobID
-			lastID = &jobID
-			payload, err := json.Marshal(job)
-			if err != nil {
-				return queuedCount, fmt.Errorf("encode delivery job %s: %w", job.JobID, err)
-			}
-			if err := s.publisher.Publish(ctx, messaging.SubjectDeliveryJobs, payload); err != nil {
-				s.logger.Error("publish delivery job", "job_id", job.JobID, "error", err)
-			}
 		}
 	}
 

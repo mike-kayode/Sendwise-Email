@@ -385,7 +385,7 @@ func (s *Server) deleteCampaign(w http.ResponseWriter, r *http.Request) {
 	tag, err := s.pool.Exec(r.Context(), `
 		DELETE FROM campaigns
 		WHERE id = $1 AND organization_id = $2
-		  AND status IN ('draft', 'ready', 'cancelled')
+		  AND status IN ('draft', 'ready', 'cancelled', 'completed', 'failed')
 	`, r.PathValue("id"), s.organizationID(r))
 	if err != nil {
 		s.logger.Error("delete campaign", "error", err)
@@ -393,7 +393,7 @@ func (s *Server) deleteCampaign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		httpx.Error(w, http.StatusConflict, "campaign_not_deletable", "Only draft, ready, or cancelled campaigns can be deleted.")
+		httpx.Error(w, http.StatusConflict, "campaign_not_deletable", "Only draft, ready, cancelled, completed, or failed campaigns can be deleted. Cancel active campaigns first.")
 		return
 	}
 	httpx.NoContent(w)
