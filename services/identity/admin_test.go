@@ -65,6 +65,12 @@ type fakeLegacyAPIAdmin struct {
 	deletedSuppressionID  string
 	suppressionErr        error
 	domainQuotaData       json.RawMessage
+	domainWarmupData      json.RawMessage
+	warmupOverrideError   error
+	warmupOverrideCap     int
+	warmupOverrideExpiry  time.Time
+	warmupOverrideReason  string
+	warmupOverrideCleared bool
 	quotaDefaultsData     json.RawMessage
 	nearLimitData         json.RawMessage
 	domainQuotaStreams    json.RawMessage
@@ -146,6 +152,26 @@ func (f *fakeLegacyAPIAdmin) SetAdminDomainQuotas(
 	f.quotaUpdatedBy, f.quotaUpdateReason = updatedBy, reason
 	f.domainQuotaStreams = streams
 	return f.domainQuotaData, f.domainErr
+}
+
+func (f *fakeLegacyAPIAdmin) AdminDomainWarmup(context.Context, string) (json.RawMessage, error) {
+	return f.domainWarmupData, f.domainErr
+}
+
+func (f *fakeLegacyAPIAdmin) SetAdminDomainWarmupOverride(
+	_ context.Context, _, _ string, dailyCap int, expiresAt time.Time, reason string,
+) (json.RawMessage, error) {
+	f.warmupOverrideCap = dailyCap
+	f.warmupOverrideExpiry = expiresAt
+	f.warmupOverrideReason = reason
+	return f.domainWarmupData, f.warmupOverrideError
+}
+
+func (f *fakeLegacyAPIAdmin) ClearAdminDomainWarmupOverride(
+	_ context.Context, _, _, _ string,
+) (json.RawMessage, error) {
+	f.warmupOverrideCleared = true
+	return f.domainWarmupData, f.warmupOverrideError
 }
 
 func (f *fakeLegacyAPIAdmin) AdminQuotaDefaults(context.Context) (json.RawMessage, error) {
@@ -1037,6 +1063,116 @@ func TestSuperAdminCanSendPasswordResetToActiveVerifiedUser(t *testing.T) {
 		adminStore.auditRows[0].Action != "admin_password_reset_requested" ||
 		adminStore.auditRows[0].Reason != "Account recovery requested through support" {
 		t.Fatalf("password reset audit = %+v", adminStore.auditRows)
+	}
+}
+
+func TestAdminWarmupOverrideAuthorizationFreshMFAAndAudit(t *testing.T) {
+	handler, baseStore, workspace, _ := newTestHandler(t)
+	adminStore := newAdminTestStore(baseStore)
+	handler.store = adminStore
+	operator := seedVerifiedUser(t, handler, baseStore, workspace, "warmup-admin@example.test")
+	token := createAdminTestSession(t, handler, baseStore, operator.ID)
+	domainID := "9b2df23a-6c47-4e56-8648-927b1645d408"
+	workspaceID := "a83bf6e5-2d12-4ca7-b31f-fcf8bf1277e4"
+	before := json.RawMessage(`{"profile":"standard","curve_cap":50,"effective_cap_today":50,"override":null}`)
+	apiClient := &fakeLegacyAPIAdmin{
+		domain:           AdminSendingDomain{ID: domainID, WorkspaceID: workspaceID, Domain: "mail.example.test"},
+		domainWarmupData: before,
+	}
+	handler.legacyAPI = apiClient
+	baseStore.usersByID[operator.ID].PlatformRole = PlatformRoleSupportAdmin
+	adminStore.mfa[operator.ID] = adminMFAState{Secret: "configured", Enabled: true}
+	freshMFA := time.Now()
+	for _, session := range baseStore.sessions {
+		if session.UserID == operator.ID {
+			session.AdminMFAVerifiedAt = &freshMFA
+		}
+	}
+	path := "/admin/domains/" + domainID + "/warmup"
+	writePath := path + "-override"
+	read := adminRequest(t, handler.Routes(), http.MethodGet, path, token, "")
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"profile":"standard"`) {
+		t.Fatalf("admin warm-up read = %d, want 200 with profile: %s", read.Code, read.Body.String())
+	}
+
+	expiresAt := time.Now().UTC().Add(72 * time.Hour).Truncate(time.Second)
+	requestBody, err := json.Marshal(map[string]any{
+		"daily_cap": 10000, "expires_at": expiresAt, "reason": "Temporary capacity for launch",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	anonymous := adminRequest(t, handler.Routes(), http.MethodPut, writePath, "", string(requestBody))
+	if anonymous.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous warm-up write = %d, want 401", anonymous.Code)
+	}
+	baseStore.usersByID[operator.ID].PlatformRole = PlatformRoleNone
+	normalUser := adminRequest(t, handler.Routes(), http.MethodPut, writePath, token, string(requestBody))
+	if normalUser.Code != http.StatusForbidden {
+		t.Fatalf("normal-user warm-up write = %d, want 403", normalUser.Code)
+	}
+	baseStore.usersByID[operator.ID].PlatformRole = PlatformRoleSupportAdmin
+	adminStore.mfa[operator.ID] = adminMFAState{Secret: "configured", Enabled: true}
+	freshMFA = time.Now()
+	for _, session := range baseStore.sessions {
+		if session.UserID == operator.ID {
+			session.AdminMFAVerifiedAt = &freshMFA
+		}
+	}
+	supportAdmin := adminRequest(t, handler.Routes(), http.MethodPut, writePath, token, string(requestBody))
+	if supportAdmin.Code != http.StatusForbidden {
+		t.Fatalf("support_admin warm-up write = %d, want 403", supportAdmin.Code)
+	}
+	baseStore.usersByID[operator.ID].PlatformRole = PlatformRoleSuperAdmin
+	staleMFA := time.Now().Add(-10 * time.Minute)
+	for _, session := range baseStore.sessions {
+		if session.UserID == operator.ID {
+			session.AdminMFAVerifiedAt = &staleMFA
+		}
+	}
+	stale := adminRequest(t, handler.Routes(), http.MethodPut, writePath, token, string(requestBody))
+	if stale.Code != http.StatusForbidden || !strings.Contains(stale.Body.String(), "admin_reauth_required") {
+		t.Fatalf("stale-MFA warm-up write = %d, want 403: %s", stale.Code, stale.Body.String())
+	}
+	freshMFA = time.Now()
+	for _, session := range baseStore.sessions {
+		if session.UserID == operator.ID {
+			session.AdminMFAVerifiedAt = &freshMFA
+		}
+	}
+	withoutReason, _ := json.Marshal(map[string]any{"daily_cap": 10000, "expires_at": expiresAt})
+	rejected := adminRequest(t, handler.Routes(), http.MethodPut, writePath, token, string(withoutReason))
+	if rejected.Code != http.StatusBadRequest || len(adminStore.auditRows) != 0 {
+		t.Fatalf("warm-up write without reason = %d, audits=%d: %s", rejected.Code, len(adminStore.auditRows), rejected.Body.String())
+	}
+
+	set := adminRequest(t, handler.Routes(), http.MethodPut, writePath, token, string(requestBody))
+	if set.Code != http.StatusOK {
+		t.Fatalf("super_admin warm-up write = %d, want 200: %s", set.Code, set.Body.String())
+	}
+	if apiClient.warmupOverrideCap != 10000 || apiClient.warmupOverrideReason != "Temporary capacity for launch" {
+		t.Fatalf("warm-up override API call = cap %d reason %q", apiClient.warmupOverrideCap, apiClient.warmupOverrideReason)
+	}
+	if len(adminStore.auditRows) != 1 {
+		t.Fatalf("warm-up set audit rows = %d, want 1", len(adminStore.auditRows))
+	}
+	setAudit := adminStore.auditRows[0]
+	if setAudit.Action != "admin_domain_warmup_override_set" || setAudit.WorkspaceID == nil ||
+		*setAudit.WorkspaceID != workspaceID || setAudit.Reason != "Temporary capacity for launch" ||
+		string(setAudit.BeforeState) != `{"override":null}` ||
+		!strings.Contains(string(setAudit.AfterState), `"daily_cap":10000`) {
+		t.Fatalf("warm-up set audit = %+v", setAudit)
+	}
+
+	clear := adminRequest(t, handler.Routes(), http.MethodDelete, writePath, token,
+		`{"reason":"Launch window completed"}`)
+	if clear.Code != http.StatusOK || !apiClient.warmupOverrideCleared {
+		t.Fatalf("super_admin warm-up clear = %d cleared=%t: %s", clear.Code, apiClient.warmupOverrideCleared, clear.Body.String())
+	}
+	if len(adminStore.auditRows) != 2 || adminStore.auditRows[1].Action != "admin_domain_warmup_override_cleared" ||
+		adminStore.auditRows[1].Reason != "Launch window completed" ||
+		string(adminStore.auditRows[1].AfterState) != `{"override":null}` {
+		t.Fatalf("warm-up clear audit = %+v", adminStore.auditRows)
 	}
 }
 

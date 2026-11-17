@@ -42,6 +42,13 @@ type DomainQuotaSnapshot = {
 type DomainQuotaData = {
   domain_id: string;
   streams: Record<"marketing" | "transactional", DomainQuotaSnapshot>;
+  warmup: {
+    profile: string;
+    successful_days: number;
+    curve_cap: number;
+    effective_cap_today: number;
+    override_active: boolean;
+  };
 };
 
 function DomainQuotaPanel({ domainId, domainName }: { domainId: string; domainName: string }) {
@@ -116,6 +123,17 @@ function DomainQuotaPanel({ domainId, domainName }: { domainId: string; domainNa
           {requestOpen ? "Close request" : "Request increase"}
         </button>
       </div>
+      <section className="mt-3 rounded-lg border border-slate-200 bg-white p-3" aria-label="Warm-up capacity">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs font-semibold text-slate-800">Warm-up capacity today</p>
+          {quotaQuery.data.data.warmup.override_active ? (
+            <span className="rounded-full bg-amber-100 px-2 py-1 text-[10px] font-semibold text-amber-900">Admin override active</span>
+          ) : null}
+        </div>
+        <p className="mt-1 text-xs text-slate-600">
+          {quotaQuery.data.data.warmup.effective_cap_today.toLocaleString()} messages · {quotaQuery.data.data.warmup.profile} profile · {quotaQuery.data.data.warmup.successful_days} successful days
+        </p>
+      </section>
       <div className="mt-3 grid gap-3">
         {(["marketing", "transactional"] as const).map((key) => {
           const item = streams[key];

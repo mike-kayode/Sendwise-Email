@@ -111,6 +111,9 @@ type LegacyAPIAdminClient interface {
 	AdminOperationalMetrics(ctx context.Context) (AdminOperationalMetrics, error)
 	AdminDomainQuotas(ctx context.Context, domainID string) (json.RawMessage, error)
 	SetAdminDomainQuotas(ctx context.Context, domainID, updatedBy, reason string, streams json.RawMessage) (json.RawMessage, error)
+	AdminDomainWarmup(ctx context.Context, domainID string) (json.RawMessage, error)
+	SetAdminDomainWarmupOverride(ctx context.Context, domainID, updatedBy string, dailyCap int, expiresAt time.Time, reason string) (json.RawMessage, error)
+	ClearAdminDomainWarmupOverride(ctx context.Context, domainID, updatedBy, reason string) (json.RawMessage, error)
 	AdminQuotaDefaults(ctx context.Context) (json.RawMessage, error)
 	SetAdminQuotaDefaults(ctx context.Context, updatedBy, reason string, defaults json.RawMessage) (json.RawMessage, error)
 	AdminQuotasNearLimit(ctx context.Context) (json.RawMessage, error)
@@ -167,6 +170,40 @@ func (c *httpLegacyAPIAdminClient) SetAdminDomainQuotas(
 	}
 	return c.adminQuotaRequest(ctx, http.MethodPut,
 		"/internal/admin/domains/"+url.PathEscape(domainID)+"/quotas", body)
+}
+
+func (c *httpLegacyAPIAdminClient) AdminDomainWarmup(ctx context.Context, domainID string) (json.RawMessage, error) {
+	return c.adminQuotaRequest(ctx, http.MethodGet,
+		"/internal/admin/domains/"+url.PathEscape(domainID)+"/warmup", nil)
+}
+
+func (c *httpLegacyAPIAdminClient) SetAdminDomainWarmupOverride(
+	ctx context.Context,
+	domainID, updatedBy string,
+	dailyCap int,
+	expiresAt time.Time,
+	reason string,
+) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]any{
+		"updated_by": updatedBy, "daily_cap": dailyCap,
+		"expires_at": expiresAt, "reason": reason,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode legacy API warm-up override: %w", err)
+	}
+	return c.adminQuotaRequest(ctx, http.MethodPut,
+		"/internal/admin/domains/"+url.PathEscape(domainID)+"/warmup-override", body)
+}
+
+func (c *httpLegacyAPIAdminClient) ClearAdminDomainWarmupOverride(
+	ctx context.Context, domainID, updatedBy, reason string,
+) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]any{"updated_by": updatedBy, "reason": reason})
+	if err != nil {
+		return nil, fmt.Errorf("encode legacy API warm-up override clear: %w", err)
+	}
+	return c.adminQuotaRequest(ctx, http.MethodDelete,
+		"/internal/admin/domains/"+url.PathEscape(domainID)+"/warmup-override", body)
 }
 
 func (c *httpLegacyAPIAdminClient) AdminQuotaDefaults(ctx context.Context) (json.RawMessage, error) {

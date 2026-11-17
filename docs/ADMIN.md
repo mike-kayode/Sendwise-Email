@@ -20,6 +20,8 @@ platform role.
 | Resolve duplicate sending-domain ownership | No | Yes; selects one existing workspace record, with reason, recent MFA, and audit |
 | Read domain quotas and platform quota defaults | Yes | Yes |
 | Change per-domain quotas and platform defaults | No | Yes; requires a typed reason, recent MFA, and before/after audit state |
+| Read domain warm-up state | Yes | Yes |
+| Set or clear a domain warm-up cap override | No | Yes; requires a typed reason, recent MFA, and before/after audit state |
 | View, add, or remove global suppression records | No | Yes; writes are reasoned, recent-MFA protected, and audited |
 | Stop a running campaign | No | Yes, reasoned, recent-MFA protected, and audited |
 | Manage platform settings, roles, and customer operations | No | Yes |
@@ -179,6 +181,22 @@ Currently implemented security endpoints are:
   per-second hard ceiling and all other sending safeguards still apply. The
   request requires a reason and MFA re-verification within five minutes; the
   audit record captures before/after quota state.
+- `GET /api/v1/admin/domains/{domainID}/warmup` — warm-up profile, qualified
+  successful days, profile-curve cap, usage today, effective cap, override
+  expiry/reason/setter, and reputation warnings. Support admins may read this
+  state.
+- `PUT /api/v1/admin/domains/{domainID}/warmup-override` — super_admin-only
+  temporary fixed daily campaign warm-up cap. Supply `daily_cap`,
+  RFC 3339 `expires_at` (required, future, no more than 14 days away), and a
+  typed `reason`. Fresh MFA is required; the immutable audit entry records the
+  prior warm-up state and requested override.
+- `DELETE /api/v1/admin/domains/{domainID}/warmup-override` — super_admin-only
+  clear operation with a typed `reason` and fresh MFA. Clearing returns the
+  domain to its profile curve; the audit records before/after state.
+  An active override replaces only the marketing warm-up curve and is capped
+  by the domain's effective daily marketing quota unless that quota is
+  unlimited. It does not bypass other quotas or sending safeguards; expiry is
+  evaluated on reads and sends without a cron job.
 - `GET /api/v1/admin/quota-defaults` and `PUT /api/v1/admin/quota-defaults` —
   read or change the marketing and transactional platform defaults. Writes are
   super_admin-only and require fresh MFA, a reason, and before/after audit
@@ -244,7 +262,12 @@ customer increase requests, and super_admin override controls. The quota
 defaults screen is available under `/admin/settings`; support_admin can review
 the current values but cannot change them. Sharp quota increases on domains
 verified less than 14 days ago or with a high recent bounce rate display a
-reputation warning.
+reputation warning. Domain details also show warm-up progress, today's
+effective campaign cap and usage, any temporary override, and visible warnings
+for domains verified within 14 days, without sending history, or with a recent
+bounce rate above 1%. A reason and fresh MFA are required to set or clear an
+override. The customer sending-domain page shows today's effective warm-up cap
+and whether an admin override is active, but never exposes the override reason.
 
 Admin audit rows are append-only. A database trigger rejects row updates,
 deletes, and truncation in addition to revoking those privileges from `PUBLIC`.
@@ -265,12 +288,14 @@ workspace notes, filtered/reasoned audit export, and global sending-domain
 metadata listing/details/re-check plus the privacy-safe campaign directory and
 audited campaign cancellation, reasoned global suppression management, and
 audited domain disable/enable/removal/owner-conflict resolution, per-domain
-quota controls, quota-default management, and near-limit reporting. It
-does **not** yet provide full workspace management (plan changes, ownership
+quota controls, quota-default management, near-limit reporting, and temporary
+per-domain campaign warm-up overrides. It does **not** yet provide full
+workspace management (plan changes, ownership
 transfer, or deletion), campaign controls beyond cancellation, delivery operations
-beyond campaign aggregate counts, impersonation,
-or a Playwright quota-admin journey. Those capabilities must be
-delivered in subsequent phases; this partial implementation is not evidence
+beyond campaign aggregate counts, impersonation, or broad Playwright coverage
+for the complete admin console; focused quota and warm-up journeys do not imply
+those areas are fully covered. The remaining capabilities must be delivered in
+subsequent phases; this partial implementation is not evidence
 that the full Super Admin console is complete.
 
 ## Verification

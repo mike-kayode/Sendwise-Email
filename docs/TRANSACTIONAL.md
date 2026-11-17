@@ -52,6 +52,18 @@ Unlimited quota settings do not bypass workspace suspension, sending-domain
 verification or disablement, suppression checks, abuse auto-pauses, or the
 per-second hard safety ceiling.
 
+The marketing campaign worker also applies the sending domain's warm-up
+profile. A temporary super-admin warm-up override replaces that profile curve
+only while its expiry is in the future, for at most 14 days. The effective
+override cap is limited by the domain's daily marketing quota unless that
+quota is unlimited. This setting does not change successful-day history or
+`sending_domain_daily_stats`, and it does not bypass monthly or per-second
+quotas, recipient-domain rate limits, delivery-age checks, DNS verification,
+suspension, suppression, or reputation auto-pauses. Expiry is evaluated at
+read/send time; deferred campaign deliveries remain eligible for the next
+daily window. Transactional API and SMTP deliveries continue to use their
+transactional quotas and do not use the marketing warm-up curve.
+
 ## Customer quota endpoints
 
 - `GET /api/v1/domains/{id}/quotas` returns effective limits, current daily,
@@ -87,6 +99,8 @@ values are authoritative and can be changed through the super-admin console.
 
 The migration adding the quota tables is `0033_domain_quotas.sql`. Apply
 migrations using the normal deployment process before starting services that
-use quota enforcement. No production migration or runtime verification is
+use quota enforcement. Migration `0034_domain_warmup_overrides.sql` adds the
+temporary warm-up override fields and validation constraints. This change adds
+no environment variables. No production migration or runtime verification is
 claimed by this repository change; operators must verify deployment behavior
 against their own staging environment before rollout.

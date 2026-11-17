@@ -193,6 +193,9 @@ func (h *Handler) adminRoutes() http.Handler {
 	mux.Handle("GET /admin/domains/{domainID}", h.requireAdminMFA(AdminReadDomains, http.HandlerFunc(h.getAdminDomain)))
 	mux.Handle("GET /admin/domains/{domainID}/quotas", h.requireAdminMFA(AdminReadDomains, http.HandlerFunc(h.getAdminDomainQuotas)))
 	mux.Handle("PUT /admin/domains/{domainID}/quotas", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.setAdminDomainQuotas)))
+	mux.Handle("GET /admin/domains/{domainID}/warmup", h.requireAdminMFA(AdminReadDomains, http.HandlerFunc(h.getAdminDomainWarmup)))
+	mux.Handle("PUT /admin/domains/{domainID}/warmup-override", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.setAdminDomainWarmupOverride)))
+	mux.Handle("DELETE /admin/domains/{domainID}/warmup-override", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.clearAdminDomainWarmupOverride)))
 	mux.Handle("POST /admin/domains/{domainID}/verify", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.recheckAdminDomain)))
 	mux.Handle("PATCH /admin/domains/{domainID}/disabled", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.setAdminDomainDisabled)))
 	mux.Handle("DELETE /admin/domains/{domainID}", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.deleteAdminDomain)))
@@ -1485,6 +1488,199 @@ func (h *Handler) setAdminDomainQuotas(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) getAdminDomainWarmup(w http.ResponseWriter, r *http.Request) {
+	domainID := r.PathValue("domainID")
+	if _, err := uuid.Parse(domainID); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_domain_id", "The sending domain ID must be a UUID.")
+		return
+	}
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "Domain warm-up data could not be loaded.")
+		return
+	}
+	data, err := h.legacyAPI.AdminDomainWarmup(r.Context(), domainID)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("load admin domain warm-up state", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "Domain warm-up data could not be loaded.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{
+		"data": data, "platform_role": r.Context().Value(adminActorKey{}).(*adminActor).user.PlatformRole,
+	})
+}
+
+func (h *Handler) setAdminDomainWarmupOverride(w http.ResponseWriter, r *http.Request) {
+	actor, _ := r.Context().Value(adminActorKey{}).(*adminActor)
+	if !adminMFAIsRecent(actor.session.AdminMFAVerifiedAt, time.Now()) {
+		kit.Error(w, http.StatusForbidden, "admin_reauth_required", "Re-verify your authenticator before changing a warm-up override.")
+		return
+	}
+	domainID := r.PathValue("domainID")
+	if _, err := uuid.Parse(domainID); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_domain_id", "The sending domain ID must be a UUID.")
+		return
+	}
+	var request struct {
+		DailyCap  int       `json:"daily_cap"`
+		ExpiresAt time.Time `json:"expires_at"`
+		Reason    string    `json:"reason"`
+	}
+	if err := kit.Decode(w, r, &request); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_warmup_override", "Provide a valid warm-up override.")
+		return
+	}
+	request.Reason = strings.TrimSpace(request.Reason)
+	if request.Reason == "" || len(request.Reason) > 500 {
+		kit.Error(w, http.StatusBadRequest, "admin_reason_required", "Provide a reason of 1 to 500 characters.")
+		return
+	}
+	if err := delivery.ValidateWarmupOverride(request.DailyCap, request.ExpiresAt, time.Now()); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_warmup_override", err.Error()+".")
+		return
+	}
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain warm-up override could not be updated.")
+		return
+	}
+	domain, err := h.legacyAPI.AdminDomain(r.Context(), domainID)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("load domain before warm-up override", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain warm-up override could not be updated.")
+		return
+	}
+	before, err := h.legacyAPI.AdminDomainWarmup(r.Context(), domainID)
+	if err != nil {
+		h.logger.Error("load warm-up state before override", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain warm-up override could not be updated.")
+		return
+	}
+	beforeState, err := warmupOverrideAuditState(before)
+	if err != nil {
+		h.logger.Error("decode warm-up state before override", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain warm-up override could not be updated.")
+		return
+	}
+	after, err := json.Marshal(map[string]any{
+		"override": map[string]any{
+			"daily_cap": request.DailyCap, "expires_at": request.ExpiresAt.UTC(),
+			"reason": request.Reason, "set_by": actor.user.ID,
+		},
+	})
+	if err != nil {
+		h.logger.Error("encode warm-up override audit state", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusInternalServerError, "admin_warmup_unavailable", "The domain warm-up override could not be updated.")
+		return
+	}
+	record := h.adminAuditRecord(r, actor, "admin_domain_warmup_override_set", "domain", domainID, request.Reason)
+	record.WorkspaceID = &domain.WorkspaceID
+	record.BeforeState = beforeState
+	record.AfterState = after
+	if err := h.writeAdminAuditRecord(r, record); err != nil {
+		h.logger.Error("audit domain warm-up override", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusInternalServerError, "admin_warmup_unavailable", "The domain warm-up override could not be updated.")
+		return
+	}
+	data, err := h.legacyAPI.SetAdminDomainWarmupOverride(
+		r.Context(), domainID, actor.user.ID, request.DailyCap, request.ExpiresAt.UTC(), request.Reason,
+	)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("set domain warm-up override", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_update_failed", "The domain warm-up override could not be updated.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{
+		"data": data, "platform_role": actor.user.PlatformRole,
+	})
+}
+
+func (h *Handler) clearAdminDomainWarmupOverride(w http.ResponseWriter, r *http.Request) {
+	actor, _ := r.Context().Value(adminActorKey{}).(*adminActor)
+	if !adminMFAIsRecent(actor.session.AdminMFAVerifiedAt, time.Now()) {
+		kit.Error(w, http.StatusForbidden, "admin_reauth_required", "Re-verify your authenticator before clearing a warm-up override.")
+		return
+	}
+	domainID := r.PathValue("domainID")
+	if _, err := uuid.Parse(domainID); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_domain_id", "The sending domain ID must be a UUID.")
+		return
+	}
+	var request struct {
+		Reason string `json:"reason"`
+	}
+	if err := kit.Decode(w, r, &request); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_warmup_override", "Provide a valid warm-up override clear request.")
+		return
+	}
+	request.Reason = strings.TrimSpace(request.Reason)
+	if request.Reason == "" || len(request.Reason) > 500 {
+		kit.Error(w, http.StatusBadRequest, "admin_reason_required", "Provide a reason of 1 to 500 characters.")
+		return
+	}
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain warm-up override could not be cleared.")
+		return
+	}
+	domain, err := h.legacyAPI.AdminDomain(r.Context(), domainID)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("load domain before clearing warm-up override", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain warm-up override could not be cleared.")
+		return
+	}
+	before, err := h.legacyAPI.AdminDomainWarmup(r.Context(), domainID)
+	if err != nil {
+		h.logger.Error("load warm-up state before clearing override", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain warm-up override could not be cleared.")
+		return
+	}
+	beforeState, err := warmupOverrideAuditState(before)
+	if err != nil {
+		h.logger.Error("decode warm-up state before clearing override", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain warm-up override could not be cleared.")
+		return
+	}
+	after := json.RawMessage(`{"override":null}`)
+	record := h.adminAuditRecord(r, actor, "admin_domain_warmup_override_cleared", "domain", domainID, request.Reason)
+	record.WorkspaceID = &domain.WorkspaceID
+	record.BeforeState = beforeState
+	record.AfterState = after
+	if err := h.writeAdminAuditRecord(r, record); err != nil {
+		h.logger.Error("audit cleared domain warm-up override", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusInternalServerError, "admin_warmup_unavailable", "The domain warm-up override could not be cleared.")
+		return
+	}
+	data, err := h.legacyAPI.ClearAdminDomainWarmupOverride(
+		r.Context(), domainID, actor.user.ID, request.Reason,
+	)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("clear domain warm-up override", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_update_failed", "The domain warm-up override could not be cleared.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{
+		"data": data, "platform_role": actor.user.PlatformRole,
+	})
+}
+
 func (h *Handler) getAdminQuotaDefaults(w http.ResponseWriter, r *http.Request) {
 	if h.legacyAPI == nil {
 		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Platform quota defaults could not be loaded.")
@@ -2362,6 +2558,22 @@ func (h *Handler) addAdminWorkspaceNote(w http.ResponseWriter, r *http.Request) 
 	}})
 }
 
+func warmupOverrideAuditState(data []byte) ([]byte, error) {
+	var state struct {
+		Override json.RawMessage `json:"override"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("decode warm-up override audit state: %w", err)
+	}
+	result, err := json.Marshal(struct {
+		Override json.RawMessage `json:"override"`
+	}{Override: state.Override})
+	if err != nil {
+		return nil, fmt.Errorf("encode warm-up override audit state: %w", err)
+	}
+	return result, nil
+}
+
 func (h *Handler) writeAdminAudit(r *http.Request, actor *adminActor, action, targetType, targetID, reason string, before, after []byte) error {
 	store, ok := h.store.(adminSecurityStore)
 	if !ok {
@@ -2377,6 +2589,14 @@ func (h *Handler) writeAdminAudit(r *http.Request, actor *adminActor, action, ta
 	record := h.adminAuditRecord(r, actor, action, targetType, targetID, reason)
 	record.BeforeState = beforeState
 	record.AfterState = afterState
+	return store.WriteAdminAudit(r.Context(), record)
+}
+
+func (h *Handler) writeAdminAuditRecord(r *http.Request, record adminAuditRecord) error {
+	store, ok := h.store.(adminSecurityStore)
+	if !ok {
+		return fmt.Errorf("identity store does not support admin audit")
+	}
 	return store.WriteAdminAudit(r.Context(), record)
 }
 

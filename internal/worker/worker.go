@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khayode/email-platform/internal/auth"
 	"github.com/khayode/email-platform/internal/campaigns"
@@ -1005,11 +1006,25 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 	}
 
 	var warmupProfile string
+	var overrideValue pgtype.Int4
+	var overrideExpiresAt pgtype.Timestamptz
+	var dailyDefault, dailyOverride pgtype.Int8
+	var unlimited bool
+	var now time.Time
 	if err := tx.QueryRow(ctx, `
-		SELECT warmup_profile
-		FROM sending_domains
-		WHERE organization_id = $1 AND lower(domain) = $2
-	`, row.OrganizationID, domain).Scan(&warmupProfile); err != nil && err != pgx.ErrNoRows {
+		SELECT sd.warmup_profile, sd.warmup_daily_cap_override,
+		       sd.warmup_override_expires_at, pd.daily_limit, dq.daily_limit,
+		       COALESCE(dq.unlimited, false), now()
+		FROM sending_domains sd
+		LEFT JOIN platform_quota_defaults pd ON pd.stream = 'marketing'
+		LEFT JOIN domain_quotas dq ON dq.domain_id = sd.id AND dq.stream = 'marketing'
+		WHERE sd.organization_id = $1 AND lower(sd.domain) = $2
+		ORDER BY sd.created_at
+		LIMIT 1
+	`, row.OrganizationID, domain).Scan(
+		&warmupProfile, &overrideValue, &overrideExpiresAt,
+		&dailyDefault, &dailyOverride, &unlimited, &now,
+	); err != nil && err != pgx.ErrNoRows {
 		return false, fmt.Errorf("load sending-domain warm-up profile: %w", err)
 	}
 	if warmupProfile == "" {
@@ -1028,7 +1043,29 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 	`+qualifiedDayFilter, row.OrganizationID, domain).Scan(&successfulDays); err != nil {
 		return false, fmt.Errorf("count successful warm-up days: %w", err)
 	}
-	cap := delivery.WarmupDailyCap(warmupProfile, w.cfg.WarmupStartPerDay, w.cfg.WarmupGrowthFactor, w.cfg.MaxDailyEmails, successfulDays)
+	curveCap := delivery.WarmupDailyCap(warmupProfile, w.cfg.WarmupStartPerDay, w.cfg.WarmupGrowthFactor, w.cfg.MaxDailyEmails, successfulDays)
+	var override *int
+	if overrideValue.Valid {
+		value := int(overrideValue.Int32)
+		override = &value
+	}
+	var expiresAt *time.Time
+	if overrideExpiresAt.Valid {
+		expiresAt = &overrideExpiresAt.Time
+	}
+	var dailyQuota *int64
+	if !unlimited {
+		effectiveDailyQuota := dailyOverride
+		if !effectiveDailyQuota.Valid {
+			effectiveDailyQuota = dailyDefault
+		}
+		if effectiveDailyQuota.Valid {
+			dailyQuota = &effectiveDailyQuota.Int64
+		}
+	}
+	cap := delivery.EffectiveWarmupDailyCap(
+		curveCap, override, expiresAt, now, dailyQuota, unlimited,
+	)
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO sending_domain_daily_stats (organization_id, domain, sending_day)

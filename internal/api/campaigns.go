@@ -656,44 +656,22 @@ func (s *Server) warmupRemainingToday(ctx context.Context, organizationID, sende
 	if domain == "" {
 		return 0, nil
 	}
-	start := s.cfg.WarmupStartPerDay
-	if start < 1 {
-		start = 50
-	}
-	growth := s.cfg.WarmupGrowthFactor
-	if growth < 1 {
-		growth = 1.5
-	}
-	maximum := s.cfg.MaxDailyEmails
-	if maximum < 1 {
-		maximum = 10000
-	}
-
-	var warmupProfile string
+	var domainID string
 	if err := s.pool.QueryRow(ctx, `
-		SELECT warmup_profile FROM sending_domains
+		SELECT id::text FROM sending_domains
 		WHERE organization_id = $1 AND lower(domain) = $2
-	`, organizationID, domain).Scan(&warmupProfile); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return 0, fmt.Errorf("load sending-domain warm-up profile: %w", err)
+		ORDER BY created_at LIMIT 1
+	`, organizationID, domain).Scan(&domainID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("find sending domain for warm-up capacity: %w", err)
 	}
-	if warmupProfile == "" {
-		warmupProfile = "standard"
-	}
-	qualifiedDayFilter := ""
-	if warmupProfile == "accelerated" {
-		qualifiedDayFilter = " AND bounce_count::numeric / NULLIF(successful_count, 0) < 0.02"
-	}
-	var successfulDays, reserved int
-	if err := s.pool.QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE sending_day < CURRENT_DATE AND successful_count > 0`+qualifiedDayFilter+`),
-		       COALESCE(max(reserved_count) FILTER (WHERE sending_day = CURRENT_DATE), 0)
-		FROM sending_domain_daily_stats
-		WHERE organization_id = $1 AND domain = $2
-	`, organizationID, domain).Scan(&successfulDays, &reserved); err != nil {
+	details, err := s.loadWarmupDetails(ctx, domainID, organizationID)
+	if err != nil {
 		return 0, fmt.Errorf("load sending-domain warm-up usage: %w", err)
 	}
-	cap := delivery.WarmupDailyCap(warmupProfile, start, growth, maximum, successfulDays)
-	return max(cap-reserved, 0), nil
+	return max(details.EffectiveCapToday-details.UsageToday.Reserved, 0), nil
 }
 
 func senderDomain(email string) string {

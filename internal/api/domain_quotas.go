@@ -51,6 +51,7 @@ type domainQuotaRisk struct {
 type domainQuotaData struct {
 	DomainID string                    `json:"domain_id"`
 	Streams  map[string]quota.Snapshot `json:"streams"`
+	Warmup   customerWarmupSummary     `json:"warmup"`
 	Risk     domainQuotaRisk           `json:"risk,omitempty"`
 	Requests []quotaRequestRecord      `json:"requests,omitempty"`
 }
@@ -403,6 +404,11 @@ func (s *Server) loadDomainQuotaData(r *http.Request, domainID, organizationID s
 		}
 		data.Streams[stream] = snapshot
 	}
+	warmup, err := s.loadCustomerWarmupSummary(r.Context(), domainID, organizationID)
+	if err != nil {
+		return domainQuotaData{}, fmt.Errorf("load sending-domain warm-up summary: %w", err)
+	}
+	data.Warmup = warmup
 	if !admin {
 		return data, nil
 	}

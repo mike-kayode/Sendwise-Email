@@ -417,6 +417,122 @@ func TestInternalAdminDomainQuotaUpdateChangesAtomicEnforcement(t *testing.T) {
 	}
 }
 
+func TestInternalAdminWarmupOverrideIsBoundedAndQuotaCapped(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	organizationID, domainID, adminID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	slug := "warmup-admin-" + strings.ReplaceAll(organizationID, "-", "")
+	domain := "warmup-admin-" + strings.ReplaceAll(domainID, "-", "") + ".example.test"
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO organizations (id, name, slug)
+		VALUES ($1, 'Warm-up admin workspace', $2)
+	`, organizationID, slug); err != nil {
+		t.Fatalf("insert warm-up workspace: %v", err)
+	}
+	defer integrationPool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1`, organizationID)
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO sending_domains (id, organization_id, domain, status, verified_at)
+		VALUES ($1, $2, $3, 'verified', now() - interval '30 days')
+	`, domainID, organizationID, domain); err != nil {
+		t.Fatalf("insert warm-up domain: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO domain_quotas (domain_id, stream, daily_limit, per_second_limit)
+		VALUES ($1, 'marketing', 9000, 100)
+	`, domainID); err != nil {
+		t.Fatalf("insert marketing quota: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO sending_domain_daily_stats
+			(organization_id, domain, sending_day, reserved_count, successful_count)
+		VALUES ($1, $2, (now() AT TIME ZONE 'UTC')::date - 1, 1, 1)
+	`, organizationID, domain); err != nil {
+		t.Fatalf("insert successful warm-up day: %v", err)
+	}
+
+	apiServer := newIntegrationServer(t)
+	apiServer.cfg.WarmupStartPerDay = 50
+	apiServer.cfg.WarmupGrowthFactor = 1.5
+	apiServer.cfg.MaxDailyEmails = 10000
+	handler := apiServer.Handler()
+	doInternal := func(method, path string, body []byte, authenticated bool) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, bytes.NewReader(body))
+		if authenticated {
+			kit.WithServiceToken(request, integrationCfg.ServiceToken)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	path := "/internal/admin/domains/" + domainID + "/warmup"
+	unauthorized := doInternal(http.MethodGet, path, nil, false)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated warm-up read = %d, want 401", unauthorized.Code)
+	}
+	read := doInternal(http.MethodGet, path, nil, true)
+	if read.Code != http.StatusOK {
+		t.Fatalf("read warm-up state = %d, want 200: %s", read.Code, read.Body.String())
+	}
+	var result struct {
+		Data warmupDetails `json:"data"`
+	}
+	if err := json.Unmarshal(read.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode initial warm-up state: %v", err)
+	}
+	if result.Data.CurveCap != 75 || result.Data.EffectiveCapToday != 75 || result.Data.SuccessfulDays != 1 {
+		t.Fatalf("initial warm-up state = %+v; want curve/effective cap 75 and one successful day", result.Data)
+	}
+
+	writePath := "/internal/admin/domains/" + domainID + "/warmup-override"
+	missingExpiry, _ := json.Marshal(map[string]any{
+		"updated_by": adminID, "daily_cap": 10000, "reason": "Temporary capacity",
+	})
+	rejected := doInternal(http.MethodPut, writePath, missingExpiry, true)
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("warm-up override without expiry = %d, want 400: %s", rejected.Code, rejected.Body.String())
+	}
+	tooLong, _ := json.Marshal(map[string]any{
+		"updated_by": adminID, "daily_cap": 10000,
+		"expires_at": time.Now().UTC().Add(15 * 24 * time.Hour), "reason": "Temporary capacity",
+	})
+	rejected = doInternal(http.MethodPut, writePath, tooLong, true)
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("warm-up override beyond 14 days = %d, want 400: %s", rejected.Code, rejected.Body.String())
+	}
+	valid, _ := json.Marshal(map[string]any{
+		"updated_by": adminID, "daily_cap": 10000,
+		"expires_at": time.Now().UTC().Add(72 * time.Hour), "reason": "Temporary capacity",
+	})
+	set := doInternal(http.MethodPut, writePath, valid, true)
+	if set.Code != http.StatusOK {
+		t.Fatalf("set warm-up override = %d, want 200: %s", set.Code, set.Body.String())
+	}
+	if err := json.Unmarshal(set.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode set warm-up override: %v", err)
+	}
+	if result.Data.Override == nil || !result.Data.Override.Active ||
+		result.Data.Override.DailyCap != 10000 ||
+		result.Data.EffectiveCapToday != 9000 ||
+		result.Data.Override.SetBy == nil || *result.Data.Override.SetBy != adminID {
+		t.Fatalf("warm-up state after override = %+v; want active 10000 override capped at quota 9000", result.Data)
+	}
+	clearBody, _ := json.Marshal(map[string]any{"updated_by": adminID, "reason": "Temporary capacity ended"})
+	cleared := doInternal(http.MethodDelete, writePath, clearBody, true)
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clear warm-up override = %d, want 200: %s", cleared.Code, cleared.Body.String())
+	}
+	if err := json.Unmarshal(cleared.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode cleared warm-up state: %v", err)
+	}
+	if result.Data.Override != nil || result.Data.EffectiveCapToday != 75 {
+		t.Fatalf("warm-up state after clear = %+v; want no override and curve cap 75", result.Data)
+	}
+}
+
 func TestInternalAdminDomainStatusAndRemovalRequireServiceTokenAndBlockSending(t *testing.T) {
 	if integrationPool == nil {
 		t.Skip("no database available")

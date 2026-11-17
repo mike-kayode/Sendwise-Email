@@ -1,6 +1,12 @@
 package delivery
 
-import "math"
+import (
+	"errors"
+	"math"
+	"time"
+)
+
+const MaxWarmupOverrideDuration = 14 * 24 * time.Hour
 
 // acceleratedWarmupDailyCaps is the fixed daily ramp for the "accelerated"
 // warm-up profile: it advances through fixed stages (200 through 100,000
@@ -35,4 +41,34 @@ func AcceleratedWarmupDailyCap(qualifiedDays int) int {
 		return acceleratedWarmupDailyCaps[len(acceleratedWarmupDailyCaps)-1]
 	}
 	return acceleratedWarmupDailyCaps[qualifiedDays]
+}
+
+func ValidateWarmupOverride(dailyCap int, expiresAt, now time.Time) error {
+	if dailyCap < 1 || int64(dailyCap) > 1<<31-1 {
+		return errors.New("warm-up daily cap must be a positive 32-bit integer")
+	}
+	if expiresAt.IsZero() || !expiresAt.After(now) {
+		return errors.New("warm-up override expiry must be in the future")
+	}
+	if expiresAt.After(now.Add(MaxWarmupOverrideDuration)) {
+		return errors.New("warm-up override cannot exceed 14 days")
+	}
+	return nil
+}
+
+func EffectiveWarmupDailyCap(
+	curveCap int,
+	override *int,
+	expiresAt *time.Time,
+	now time.Time,
+	domainDailyQuota *int64,
+	unlimited bool,
+) int {
+	if override == nil || expiresAt == nil || !expiresAt.After(now) {
+		return curveCap
+	}
+	if !unlimited && domainDailyQuota != nil && int64(*override) > *domainDailyQuota {
+		return int(*domainDailyQuota)
+	}
+	return *override
 }

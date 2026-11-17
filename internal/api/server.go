@@ -84,6 +84,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /internal/admin/domains/{id}/quotas", kit.Chain(
 		http.HandlerFunc(s.updateAdminDomainQuotas), kit.ServiceAuth(s.cfg.ServiceToken),
 	))
+	mux.Handle("GET /internal/admin/domains/{id}/warmup", kit.Chain(
+		http.HandlerFunc(s.getAdminDomainWarmup), kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("PUT /internal/admin/domains/{id}/warmup-override", kit.Chain(
+		http.HandlerFunc(s.setAdminDomainWarmupOverride), kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("DELETE /internal/admin/domains/{id}/warmup-override", kit.Chain(
+		http.HandlerFunc(s.clearAdminDomainWarmupOverride), kit.ServiceAuth(s.cfg.ServiceToken),
+	))
 	mux.Handle("GET /internal/admin/quota-defaults", kit.Chain(
 		http.HandlerFunc(s.getAdminQuotaDefaults), kit.ServiceAuth(s.cfg.ServiceToken),
 	))

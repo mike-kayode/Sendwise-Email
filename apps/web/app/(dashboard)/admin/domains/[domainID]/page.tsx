@@ -99,6 +99,31 @@ type QuotaDraft = {
   unlimited: boolean;
 };
 
+type WarmupData = {
+  profile: string;
+  successful_days: number;
+  curve_cap: number;
+  effective_cap_today: number;
+  override: null | {
+    daily_cap: number;
+    expires_at: string;
+    reason: string;
+    set_by: string | null;
+    set_at: string | null;
+    active: boolean;
+  };
+  usage_today: {
+    reserved: number;
+    successful: number;
+    bounced: number;
+  };
+  warnings: {
+    verified_within_14_days: boolean;
+    has_sending_history: boolean;
+    recent_bounce_rate: number;
+  };
+};
+
 function AdminDomainQuotaPanel({ domainID, role }: { domainID: string; role: AdminSession["platform_role"] }) {
   const [drafts, setDrafts] = useState<Record<string, QuotaDraft>>({});
   const [reason, setReason] = useState("");
@@ -257,6 +282,187 @@ function AdminDomainQuotaPanel({ domainID, role }: { domainID: string; role: Adm
               </ul>
             )}
           </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function dateTimeLocal(value: Date) {
+  const local = new Date(value.getTime() - value.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function AdminDomainWarmupPanel({ domainID, role }: { domainID: string; role: AdminSession["platform_role"] }) {
+  const [dailyCap, setDailyCap] = useState("");
+  const [expiresAt, setExpiresAt] = useState(() => dateTimeLocal(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)));
+  const [reason, setReason] = useState("");
+  const [mfaCode, setMfaCode] = useState("");
+  const [clearReason, setClearReason] = useState("");
+  const [clearMFACode, setClearMFACode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
+  const warmupQuery = useQuery({
+    queryKey: ["admin-domain-warmup", domainID],
+    queryFn: () => apiFetch<{ data: WarmupData }>(`/admin/domains/${encodeURIComponent(domainID)}/warmup`),
+    retry: false,
+  });
+
+  const setOverride = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (role !== "super_admin" || !dailyCap || !expiresAt || !reason.trim() || !mfaCode.trim() || busy) return;
+    if (!window.confirm("Apply this temporary warm-up cap? The change will be recorded in the immutable admin audit log.")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiFetch("/admin/mfa/verify", { method: "POST", body: JSON.stringify({ code: mfaCode.trim() }) });
+      await apiFetch(`/admin/domains/${encodeURIComponent(domainID)}/warmup-override`, {
+        method: "PUT",
+        body: JSON.stringify({
+          daily_cap: Number(dailyCap),
+          expires_at: new Date(expiresAt).toISOString(),
+          reason: reason.trim(),
+        }),
+      });
+      setReason("");
+      setMfaCode("");
+      await warmupQuery.refetch();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The warm-up override could not be saved.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearOverride = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (role !== "super_admin" || !clearReason.trim() || !clearMFACode.trim() || busy) return;
+    if (!window.confirm("Clear the warm-up override and return this domain to its profile curve? This will be recorded in the immutable admin audit log.")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiFetch("/admin/mfa/verify", { method: "POST", body: JSON.stringify({ code: clearMFACode.trim() }) });
+      await apiFetch(`/admin/domains/${encodeURIComponent(domainID)}/warmup-override`, {
+        method: "DELETE",
+        body: JSON.stringify({ reason: clearReason.trim() }),
+      });
+      setClearReason("");
+      setClearMFACode("");
+      setClearOpen(false);
+      await warmupQuery.refetch();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The warm-up override could not be cleared.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const timeLabel = (value: string) => new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium", timeStyle: "short", timeZone: "UTC",
+  }).format(new Date(value)) + " UTC";
+  const warmup = warmupQuery.data?.data;
+  const warning = warmup && (
+    warmup.warnings.verified_within_14_days ||
+    !warmup.warnings.has_sending_history ||
+    warmup.warnings.recent_bounce_rate > 0.01
+  );
+
+  return (
+    <section aria-labelledby="domain-warmup-heading" className="mt-5 rounded-xl border border-slate-200 bg-white">
+      <div className="border-b border-slate-100 p-4">
+        <h2 id="domain-warmup-heading" className="text-sm font-semibold text-slate-900">Warm-up</h2>
+        <p className="mt-1 text-xs text-slate-500">A temporary cap replaces the profile curve while active, but cannot bypass sending safeguards or the domain&apos;s daily marketing quota.</p>
+      </div>
+      {warmupQuery.isLoading ? <p className="p-4 text-sm text-slate-500">Loading warm-up state...</p> : null}
+      {warmupQuery.error ? <p role="alert" className="p-4 text-sm text-rose-700">Warm-up state could not be loaded: {warmupQuery.error.message}</p> : null}
+      {warmup ? (
+        <div className="space-y-4 p-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              ["Profile", warmup.profile],
+              ["Successful days", warmup.successful_days.toLocaleString()],
+              ["Curve cap", warmup.curve_cap.toLocaleString()],
+              ["Effective cap today", warmup.effective_cap_today.toLocaleString()],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-lg bg-slate-50 p-3">
+                <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">{label}</p>
+                <p className="mt-1 text-sm font-semibold text-slate-900">{value}</p>
+              </div>
+            ))}
+          </div>
+          <div className="rounded-lg border border-slate-100 p-3 text-xs text-slate-600">
+            Usage today: {warmup.usage_today.reserved.toLocaleString()} reserved · {warmup.usage_today.successful.toLocaleString()} successful · {warmup.usage_today.bounced.toLocaleString()} bounced
+          </div>
+          {warning ? (
+            <div role="status" className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">
+              <p className="font-semibold">Reputation warning — review before setting a higher cap.</p>
+              <ul className="mt-1 list-disc pl-5">
+                {warmup.warnings.verified_within_14_days ? <li>This domain was verified less than 14 days ago.</li> : null}
+                {!warmup.warnings.has_sending_history ? <li>This domain has no sending history.</li> : null}
+                {warmup.warnings.recent_bounce_rate > 0.01 ? <li>Recent bounce rate is {(warmup.warnings.recent_bounce_rate * 100).toFixed(2)}%, above 1%.</li> : null}
+              </ul>
+              <p className="mt-1">An override remains possible, but a specific reason is required and will be audited.</p>
+            </div>
+          ) : null}
+          <div className="rounded-lg border border-slate-200 p-3">
+            <h3 className="text-xs font-semibold text-slate-900">Override status</h3>
+            {warmup.override ? (
+              <div className="mt-2 space-y-1 text-xs text-slate-600">
+                <p>
+                  {warmup.override.active ? "Active" : "Expired"} · {warmup.override.daily_cap.toLocaleString()} per day · expires {timeLabel(warmup.override.expires_at)}
+                </p>
+                <p>Reason: {warmup.override.reason}</p>
+                <p>Set by: {warmup.override.set_by ?? "Unknown"} · {warmup.override.set_at ? timeLabel(warmup.override.set_at) : "time unavailable"}</p>
+              </div>
+            ) : <p className="mt-1 text-xs text-slate-600">No override is configured.</p>}
+            {role === "super_admin" && warmup.override?.active ? (
+              <button type="button" onClick={() => setClearOpen((open) => !open)} className="mt-3 rounded-lg px-3 py-2 text-xs font-semibold text-rose-800 ring-1 ring-rose-200 hover:bg-rose-50">
+                {clearOpen ? "Cancel clear" : "Clear override"}
+              </button>
+            ) : null}
+          </div>
+          {role === "super_admin" ? (
+            <>
+              <form onSubmit={(event) => void setOverride(event)} className="grid gap-3 rounded-lg bg-slate-50 p-4 sm:grid-cols-2">
+                <label className="text-xs font-medium text-slate-700">
+                  Daily cap
+                  <input required type="number" min="1" step="1" value={dailyCap} onChange={(event) => setDailyCap(event.target.value)} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" />
+                </label>
+                <label className="text-xs font-medium text-slate-700">
+                  Expires (max 14 days)
+                  <input required type="datetime-local" min={dateTimeLocal(new Date())} max={dateTimeLocal(new Date(Date.now() + 14 * 24 * 60 * 60 * 1000))} value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" />
+                </label>
+                <label className="text-xs font-medium text-slate-700">
+                  Required reason
+                  <textarea required maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} className="mt-1 min-h-20 w-full rounded-lg border border-slate-200 bg-white p-3 text-sm" />
+                </label>
+                <label className="text-xs font-medium text-slate-700">
+                  Authenticator or recovery code
+                  <input required autoComplete="one-time-code" value={mfaCode} onChange={(event) => setMfaCode(event.target.value)} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" />
+                </label>
+                <button type="submit" disabled={busy || warmupQuery.isLoading} className="justify-self-start rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 sm:col-span-2">
+                  {busy ? "Saving..." : "Review and set override"}
+                </button>
+              </form>
+              {clearOpen ? (
+                <form onSubmit={(event) => void clearOverride(event)} className="grid gap-3 rounded-lg border border-rose-200 bg-rose-50 p-4 sm:grid-cols-2">
+                  <label className="text-xs font-medium text-slate-700">
+                    Required clear reason
+                    <textarea required maxLength={500} value={clearReason} onChange={(event) => setClearReason(event.target.value)} className="mt-1 min-h-20 w-full rounded-lg border border-slate-200 bg-white p-3 text-sm" />
+                  </label>
+                  <label className="text-xs font-medium text-slate-700">
+                    Authenticator or recovery code
+                    <input required autoComplete="one-time-code" value={clearMFACode} onChange={(event) => setClearMFACode(event.target.value)} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" />
+                  </label>
+                  <button type="submit" disabled={busy} className="justify-self-start rounded-lg bg-rose-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 sm:col-span-2">
+                    {busy ? "Clearing..." : "Review and clear override"}
+                  </button>
+                </form>
+              ) : null}
+            </>
+          ) : null}
+          {error ? <p role="alert" className="text-sm text-rose-700">{error}</p> : null}
         </div>
       ) : null}
     </section>
@@ -527,6 +733,7 @@ export default function AdminDomainDetailsPage() {
             </section>
           ) : null}
           <AdminDomainQuotaPanel domainID={domainID} role={session.platform_role} />
+          <AdminDomainWarmupPanel domainID={domainID} role={session.platform_role} />
           <section className="mt-5 rounded-xl border border-slate-200 bg-white">
             <div className="border-b border-slate-100 p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">

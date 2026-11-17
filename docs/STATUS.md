@@ -753,6 +753,31 @@ $ npm --prefix apps/web run build
 Route table includes /admin/suppressions and /admin/domains/[domainID].
 ```
 
+## Per-domain warm-up override
+
+Migration `0034_domain_warmup_overrides.sql` adds the bounded, expiring
+per-domain warm-up cap fields. Active overrides replace the marketing
+warm-up curve, are capped by the domain's daily marketing quota unless it is
+unlimited, and expire at read/send time. Worker quota, per-second, reputation,
+verification, suppression, suspension, recipient-domain rate, and message-age
+checks remain in their existing paths. No environment variables were added,
+and no production database, service, or deployment was touched.
+
+The admin API and detail page support read-only support-admin visibility and
+super-admin-only set/clear writes with fresh MFA, typed reasons, and immutable
+before/after audit state. Customer domain details expose only today's effective
+warm-up cap and whether an override is active. No override data is written to
+warm-up usage history and successful-day qualification is unchanged.
+
+Local checks passed: the full `go test ./... -count=1` suite and `go vet ./...`
+using an isolated local PostgreSQL 17 database, web typecheck and unit tests,
+the production web build, and the Playwright warm-up set/clear journey. Next.js
+was upgraded from 16.4.4 to patched 16.4.6 after the prior version blocked
+builds with a security fatal error; `next.config.ts` enables its security
+upgrade notice. No production service or database was changed. Before rollout,
+follow the server verification checklist for migration `0034` and
+authorization, effective-cap, expiry, deferral, and audit behavior.
+
 ## Per-domain sending quotas — 2026-11-14
 
 **Locally verified against PostgreSQL; not production verified.** Migration
