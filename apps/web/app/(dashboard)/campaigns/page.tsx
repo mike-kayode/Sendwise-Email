@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Clock, Mail, Plus, Search, Send, TrendingUp } from "lucide-react";
+import { CampaignDeleteButton } from "@/components/campaign-delete-button";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
 import { Card, CardContent } from "@/components/ui/card";
@@ -147,7 +148,7 @@ export default function CampaignsPage() {
               <Th className="text-right">Opens</Th>
               <Th className="text-right">Clicks</Th>
               <Th>Date</Th>
-              <Th />
+              <Th>Actions</Th>
             </Tr>
           </Thead>
           <Tbody>
@@ -175,9 +176,12 @@ export default function CampaignsPage() {
                   <Td className="text-right tabular-nums">—</Td>
                   <Td className="text-xs text-slate-500">{formatDate(campaign.created_at)}</Td>
                   <Td>
-                    <Link href={`/campaigns/${campaign.id}`} className="text-xs font-medium text-indigo-600 hover:text-indigo-500">
-                      Open
-                    </Link>
+                    <div className="flex items-center gap-2">
+                      <Link href={`/campaigns/${campaign.id}`} className="text-xs font-medium text-indigo-600 hover:text-indigo-500">
+                        Open
+                      </Link>
+                      <CampaignDeleteButton campaign={campaign} />
+                    </div>
                   </Td>
                 </Tr>
               ))

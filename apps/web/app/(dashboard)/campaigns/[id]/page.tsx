@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Copy, Eye, Mail, MousePointerClick, Send, Users } from "lucide-react";
+import { CampaignDeleteButton } from "@/components/campaign-delete-button";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -22,6 +23,7 @@ type CampaignReport = {
 
 export default function CampaignDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const campaignQuery = useQuery({
     queryKey: ["campaign", id],
     queryFn: async () => apiFetch<Campaign>(`/campaigns/${id}`),
@@ -78,6 +80,7 @@ export default function CampaignDetailPage() {
             <Link href={isDraft ? `/campaigns/${campaign.id}/editor` : `/campaigns/${campaign.id}/report`} className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-emerald-800 px-4 text-sm font-medium text-white hover:bg-emerald-900">
               <Send className="h-4 w-4" /> {isDraft ? "Edit campaign" : "View report"}
             </Link>
+            <CampaignDeleteButton campaign={campaign} onDeleted={() => router.push("/campaigns")} />
           </>
         }
       />
