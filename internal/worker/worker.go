@@ -432,6 +432,17 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	if err := w.recipientLimiter(recipientDomain).Wait(ctx); err != nil {
 		return 30 * time.Second, err
 	}
+	if row.TrackOpens || row.TrackClicks {
+		trackingID, err := w.ensureRecipientTracking(ctx, row)
+		if err != nil {
+			w.logger.Warn("recipient tracking unavailable; rendering untracked email",
+				"job_id", row.ID, "error", err)
+			row.TrackOpens = false
+			row.TrackClicks = false
+		} else {
+			row.TrackingID = trackingID
+		}
+	}
 
 	unsubscribeToken, err := w.tokens.IssueUnsubscribe(row.OrganizationID, row.ContactID)
 	if err != nil {
@@ -614,6 +625,30 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	return 0, nil
 }
 
+func (w *Worker) ensureRecipientTracking(ctx context.Context, row *jobRow) (string, error) {
+	var trackingID string
+	err := w.pool.QueryRow(ctx, `
+		INSERT INTO campaign_recipient_tracking
+			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
+			 tracking_id, email, delivery_status, queued_at)
+		SELECT r.organization_id, r.campaign_id, r.id, r.contact_id, dj.id,
+		       'trk_' || encode(gen_random_bytes(24), 'hex'), r.email, dj.status, dj.created_at
+		FROM campaign_recipients r
+		JOIN delivery_jobs dj
+		  ON dj.campaign_id = r.campaign_id AND dj.contact_id = r.contact_id
+		WHERE dj.id = $1
+		ON CONFLICT (campaign_id, contact_id) DO UPDATE
+		SET delivery_job_id = EXCLUDED.delivery_job_id,
+		    email = EXCLUDED.email,
+		    updated_at = now()
+		RETURNING campaign_recipient_tracking.tracking_id
+	`, row.ID).Scan(&trackingID)
+	if err != nil {
+		return "", fmt.Errorf("ensure campaign recipient tracking: %w", err)
+	}
+	return trackingID, nil
+}
+
 func (w *Worker) loadJob(ctx context.Context, jobID string) (*jobRow, error) {
 	var row jobRow
 	err := w.pool.QueryRow(ctx, `
@@ -632,7 +667,7 @@ func (w *Worker) loadJob(ctx context.Context, jobID string) (*jobRow, error) {
 		       COALESCE(sp.footer_text, ''), COALESCE(sp.social_links, '[]'::jsonb),
 		       dj.warmup_reserved_on, COALESCE(dj.quota_reservation_id::text, ''),
 		       dj.quota_deferred, dj.created_at, dj.failure_started_at,
-		       COALESCE(crt.tracking_id, dj.id::text)
+		       COALESCE(crt.tracking_id, '')
 		FROM delivery_jobs dj
 		JOIN campaigns cp ON cp.id = dj.campaign_id
 		JOIN organizations o ON o.id = dj.organization_id

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khayode/email-platform/internal/auth"
@@ -3318,6 +3319,107 @@ func mustDomainID(t *testing.T, orgID, domain string) string {
 		t.Fatalf("look up sending domain ID: %v", err)
 	}
 	return id
+}
+
+func TestLegacyTrackingJWTFallbackIntegration(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	s := newIntegrationServer(t)
+	owner := seedIntegrationUser(t,
+		"legacy-tracking-"+uuid.NewString()+"@example.test",
+		"legacy-tracking-password",
+		"Legacy Tracking Owner",
+		"Legacy Tracking Workspace",
+	)
+	ctx := context.Background()
+	var contactID, campaignID, jobID string
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO contacts (organization_id, email, status)
+		VALUES ($1, 'legacy-tracking-recipient@example.test', 'subscribed')
+		RETURNING id::text
+	`, owner.Organization.ID).Scan(&contactID); err != nil {
+		t.Fatalf("create legacy tracking contact: %v", err)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO campaigns (organization_id, name, subject, sender_name, sender_email, content, status)
+		VALUES ($1, 'Legacy tracking campaign', 'Legacy', 'Sendwise',
+		        'sender@example.test', '{}'::jsonb, 'sending')
+		RETURNING id::text
+	`, owner.Organization.ID).Scan(&campaignID); err != nil {
+		t.Fatalf("create legacy tracking campaign: %v", err)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO campaign_recipients (organization_id, campaign_id, contact_id, email, status)
+		VALUES ($1, $2, $3, 'legacy-tracking-recipient@example.test', 'submitted')
+		RETURNING id::text
+	`, owner.Organization.ID, campaignID, contactID).Scan(new(string)); err != nil {
+		t.Fatalf("create legacy tracking recipient: %v", err)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status)
+		VALUES ($1, $2, $3, 'legacy-tracking@example.test', 'submitted')
+		RETURNING id::text
+	`, owner.Organization.ID, campaignID, contactID).Scan(&jobID); err != nil {
+		t.Fatalf("create legacy tracking job: %v", err)
+	}
+
+	now := time.Now()
+	makeLegacyToken := func(urlValue string) string {
+		claims := auth.Claims{
+			OrganizationID: owner.Organization.ID,
+			CampaignID:     campaignID,
+			ContactID:      contactID,
+			URL:            urlValue,
+			RegisteredClaims: jwt.RegisteredClaims{
+				Issuer:    integrationCfg.JWTIssuer,
+				Subject:   jobID,
+				IssuedAt:  jwt.NewNumericDate(now),
+				NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
+				ExpiresAt: jwt.NewNumericDate(now.Add(30 * 24 * time.Hour)),
+			},
+		}
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		signed, err := token.SignedString([]byte(integrationCfg.JWTSecret))
+		if err != nil {
+			t.Fatalf("sign legacy tracking JWT: %v", err)
+		}
+		return signed
+	}
+
+	openToken := makeLegacyToken("")
+	openResponse := doRequest(t, s, http.MethodGet, "/t/open/"+openToken+".gif", "", "")
+	assertStatus(t, openResponse, http.StatusOK)
+	if openResponse.Header().Get("Content-Type") != "image/gif" {
+		t.Fatalf("legacy open content type = %q, want image/gif", openResponse.Header().Get("Content-Type"))
+	}
+
+	clickToken := makeLegacyToken("https://example.test/legacy-landing")
+	clickResponse := doRequest(t, s, http.MethodGet, "/t/click/"+clickToken, "", "")
+	assertStatus(t, clickResponse, http.StatusFound)
+	if location := clickResponse.Header().Get("Location"); location != "https://example.test/legacy-landing" {
+		t.Fatalf("legacy click redirect = %q", location)
+	}
+
+	var openEvents, clickEvents int
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT
+			count(*) FILTER (WHERE event_type = 'opened'),
+			count(*) FILTER (WHERE event_type = 'clicked')
+		FROM message_events
+		WHERE organization_id = $1 AND campaign_id = $2 AND contact_id = $3
+	`, owner.Organization.ID, campaignID, contactID).Scan(&openEvents, &clickEvents); err != nil {
+		t.Fatalf("count legacy tracking events: %v", err)
+	}
+	if openEvents != 1 || clickEvents != 1 {
+		t.Fatalf("legacy tracking events opened=%d clicked=%d, want 1 and 1", openEvents, clickEvents)
+	}
+
+	missingClick := doRequest(t, s, http.MethodGet, "/t/click/not-a-legacy-token", "", "")
+	assertStatus(t, missingClick, http.StatusNotFound)
+	if strings.Contains(missingClick.Body.String(), "<html") {
+		t.Fatalf("missing tracking click returned an error page: %q", missingClick.Body.String())
+	}
 }
 
 func TestAnalyticsOverviewIntegration(t *testing.T) {

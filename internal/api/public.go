@@ -299,7 +299,22 @@ func (s *Server) trackOpen(w http.ResponseWriter, r *http.Request) {
 	`, trackingID).Scan(
 		&recipientID, &organizationID, &campaignID, &contactID, &deliveryJobID,
 	); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid_tracking_token", "Invalid tracking token.")
+		claims, parseErr := s.tokens.Parse(token)
+		if parseErr == nil && claims.OrganizationID != "" {
+			if _, insertErr := s.pool.Exec(ctx, `
+				INSERT INTO message_events
+					(organization_id, campaign_id, contact_id, delivery_job_id, event_type, user_agent, ip_address)
+				VALUES ($1, $2, $3, NULLIF($4, ''), 'opened', $5, $6)
+			`, claims.OrganizationID, nullIfEmpty(claims.CampaignID),
+				nullIfEmpty(claims.ContactID), claims.Subject, r.UserAgent(), clientIP(r),
+			); insertErr != nil {
+				s.logger.Warn("record legacy open event", "error", insertErr)
+			}
+		}
+		w.Header().Set("Content-Type", "image/gif")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		w.Header().Set("Pragma", "no-cache")
+		_, _ = w.Write(delivery.TinyPixel())
 		return
 	}
 	ua, isAutomated, automationType, classification := classifyTrackingRequest(r)
@@ -357,7 +372,31 @@ func (s *Server) trackClick(w http.ResponseWriter, r *http.Request) {
 		&recipientID, &organizationID, &campaignID, &contactID,
 		&deliveryJobID, &trackingID, &targetURL,
 	); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid_tracking_token", "Invalid tracking token.")
+		claims, parseErr := s.tokens.Parse(linkToken)
+		if parseErr != nil || claims.URL == "" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("Tracking link not found"))
+			return
+		}
+		target, targetErr := url.Parse(claims.URL)
+		if targetErr != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("Tracking link not found"))
+			return
+		}
+		if _, insertErr := s.pool.Exec(ctx, `
+			INSERT INTO message_events
+				(organization_id, campaign_id, contact_id, delivery_job_id, event_type, url, user_agent, ip_address)
+			VALUES ($1, $2, $3, NULLIF($4, ''), 'clicked', $5, $6, $7)
+		`, claims.OrganizationID, nullIfEmpty(claims.CampaignID),
+			nullIfEmpty(claims.ContactID), claims.Subject, claims.URL,
+			r.UserAgent(), clientIP(r),
+		); insertErr != nil {
+			s.logger.Warn("record legacy click event", "error", insertErr)
+		}
+		http.Redirect(w, r, claims.URL, http.StatusFound)
 		return
 	}
 	target, err := url.Parse(targetURL)

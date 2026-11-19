@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,70 @@ type noDuplicatePublisher struct {
 func (p *noDuplicatePublisher) Publish(context.Context, string, []byte) error {
 	p.published++
 	return fmt.Errorf("unexpected publish")
+}
+
+func TestEnsureRecipientTrackingCreatesMissingRow(t *testing.T) {
+	pool := testutil.NewPostgres(t)
+	ctx := context.Background()
+	var organizationID, contactID, campaignID, recipientID, jobID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO organizations (name, slug)
+		VALUES ('Missing tracking test', 'missing-tracking-' || gen_random_uuid()::text)
+		RETURNING id::text
+	`).Scan(&organizationID); err != nil {
+		t.Fatalf("create organization: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO contacts (organization_id, email, status)
+		VALUES ($1, 'missing-tracking@example.test', 'subscribed')
+		RETURNING id::text
+	`, organizationID).Scan(&contactID); err != nil {
+		t.Fatalf("create contact: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO campaigns (organization_id, name, subject, sender_name, sender_email, content, status)
+		VALUES ($1, 'Missing tracking campaign', 'Test', 'Sendwise', 'sender@example.test', '{}'::jsonb, 'sending')
+		RETURNING id::text
+	`, organizationID).Scan(&campaignID); err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO campaign_recipients (organization_id, campaign_id, contact_id, email)
+		VALUES ($1, $2, $3, 'missing-tracking@example.test')
+		RETURNING id::text
+	`, organizationID, campaignID, contactID).Scan(&recipientID); err != nil {
+		t.Fatalf("create campaign recipient: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status)
+		VALUES ($1, $2, $3, 'missing-tracking@example.test', 'queued')
+		RETURNING id::text
+	`, organizationID, campaignID, contactID).Scan(&jobID); err != nil {
+		t.Fatalf("create delivery job: %v", err)
+	}
+
+	worker := &Worker{pool: pool}
+	trackingID, err := worker.ensureRecipientTracking(ctx, &jobRow{
+		ID: jobID, OrganizationID: organizationID, CampaignID: campaignID, ContactID: contactID,
+	})
+	if err != nil {
+		t.Fatalf("ensureRecipientTracking(): %v", err)
+	}
+	if !strings.HasPrefix(trackingID, "trk_") {
+		t.Fatalf("tracking ID = %q, want trk_ prefix", trackingID)
+	}
+	var storedRecipientID, storedTrackingID string
+	if err := pool.QueryRow(ctx, `
+		SELECT recipient_id::text, tracking_id
+		FROM campaign_recipient_tracking
+		WHERE delivery_job_id = $1
+	`, jobID).Scan(&storedRecipientID, &storedTrackingID); err != nil {
+		t.Fatalf("load created tracking row: %v", err)
+	}
+	if storedRecipientID != recipientID || storedTrackingID != trackingID {
+		t.Fatalf("tracking row recipient=%q tracking=%q, want recipient=%q tracking=%q",
+			storedRecipientID, storedTrackingID, recipientID, trackingID)
+	}
 }
 
 func TestDeadLetterFailureIsAtomicAndNotRepublished(t *testing.T) {

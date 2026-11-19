@@ -47,6 +47,7 @@ jobs:
           SERVICE_TOKEN: ci-only-service-token
           WEBHOOK_SECRET: ci-only-webhook-secret
         run: |
+          python3 scripts/check-compose-yaml-keys.py
           python3 scripts/check-compose-env.sh
           docker compose -f docker-compose.yml config -q
           docker compose -f docker-compose.yml -f docker-compose.microservices.yml config -q

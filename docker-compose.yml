@@ -129,7 +129,7 @@ services:
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost}
       API_BASE_URL: ${API_BASE_URL:-http://localhost}
       TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost}
-      AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
+      AUTO_MIGRATE: ${AUTO_MIGRATE:-false}
       MIGRATIONS_DIR: /app/migrations
       ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
       SMTP_ADDR: ${SMTP_ADDR:-mailpit:1025}
@@ -218,7 +218,7 @@ services:
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost}
       API_BASE_URL: ${API_BASE_URL:-http://localhost}
       TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost}
-      AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
+      AUTO_MIGRATE: ${AUTO_MIGRATE:-false}
       MIGRATIONS_DIR: /app/migrations
       ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
       SMTP_ADDR: ${SMTP_ADDR:-mailpit:1025}
@@ -238,7 +238,6 @@ services:
       SPF_INCLUDE: ${SPF_INCLUDE:-}
       DNS_RESOLVER_ADDR: ${DNS_RESOLVER_ADDR:-}
       DNS_RESOLVER_TIMEOUT: ${DNS_RESOLVER_TIMEOUT:-2s}
-      WORKER_METRICS_ADDR: ":9091"
       SENDING_RATE_PER_SECOND: ${SENDING_RATE_PER_SECOND:-20}
       PLATFORM_MAX_DOMAIN_RATE: ${PLATFORM_MAX_DOMAIN_RATE:-1000}
       MAX_DELIVERY_ATTEMPTS: ${MAX_DELIVERY_ATTEMPTS:-5}
