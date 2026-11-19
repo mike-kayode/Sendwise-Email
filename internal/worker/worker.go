@@ -701,41 +701,72 @@ func (w *Worker) loadJob(ctx context.Context, jobID string) (*jobRow, error) {
 }
 
 func (w *Worker) recordSubmission(ctx context.Context, row *jobRow, result *delivery.Result) error {
-	tx, err := w.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin submission transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	if row.QuotaReservationID != "" {
-		if err := quota.Retain(ctx, tx, quota.StreamMarketing, quota.SourceCampaignDelivery, row.QuotaReservationID); err != nil {
-			return err
-		}
-	}
-
 	transportMessageID := result.MessageID
 	if transportMessageID == "" {
 		transportMessageID = row.MessageID
 	}
 
-	tag, err := tx.Exec(ctx, `
+	retryCtx := context.WithoutCancel(ctx)
+	retryDelay := time.Second
+	for {
+		attemptCtx, cancel := context.WithTimeout(retryCtx, 5*time.Second)
+		tag, err := w.pool.Exec(attemptCtx, `
 		UPDATE delivery_jobs
 		SET status = 'submitted',
-		    attempts = attempts + 1,
-		    accepted_at = now(),
-		    transport_message_id = $2,
-		    quota_reservation_id = NULL,
+		    attempts = attempts + CASE WHEN status = 'submitted' THEN 0 ELSE 1 END,
+		    accepted_at = COALESCE(accepted_at, now()),
+		    transport_message_id = COALESCE(transport_message_id, $2::text),
 		    quota_deferred = false,
 		    failure_started_at = NULL,
 		    processing_started_at = NULL,
 		    last_error = NULL,
 		    updated_at = now()
-		WHERE id = $1 AND status IN ('queued', 'processing', 'deferred')
+		WHERE id = $1::uuid
 	`, row.ID, transportMessageID)
-	if err != nil {
-		return fmt.Errorf("mark job submitted: %w", err)
+		cancel()
+		if err == nil && tag.RowsAffected() == 1 {
+			break
+		}
+		if err == nil {
+			err = errors.New("delivery job row was not updated")
+		}
+		w.logger.Error("SMTP accepted but delivery submission is not durable; retrying",
+			"job_id", row.ID, "error", err, "retry_in", retryDelay.String())
+		time.Sleep(retryDelay)
+		if retryDelay < 30*time.Second {
+			retryDelay *= 2
+			if retryDelay > 30*time.Second {
+				retryDelay = 30 * time.Second
+			}
+		}
 	}
-	if tag.RowsAffected() == 0 {
-		return tx.Commit(ctx)
+
+	if err := w.recordSubmissionTracking(ctx, row, transportMessageID); err != nil {
+		w.logger.Warn("record post-submission delivery bookkeeping", "job_id", row.ID, "error", err)
+	}
+	return nil
+}
+
+func (w *Worker) recordSubmissionTracking(ctx context.Context, row *jobRow, transportMessageID string) error {
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin post-submission bookkeeping: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if row.QuotaReservationID != "" {
+		if err := quota.Retain(ctx, tx, quota.StreamMarketing, quota.SourceCampaignDelivery, row.QuotaReservationID); err != nil {
+			return fmt.Errorf("retain submitted campaign quota: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE delivery_jobs
+			SET quota_reservation_id = NULL, updated_at = now()
+			WHERE id = $1::uuid
+			  AND status = 'submitted'
+			  AND quota_reservation_id = $2::uuid
+		`, row.ID, row.QuotaReservationID); err != nil {
+			return fmt.Errorf("clear retained campaign quota reservation: %w", err)
+		}
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -743,8 +774,8 @@ func (w *Worker) recordSubmission(ctx context.Context, row *jobRow, result *deli
 		SET delivery_status = 'submitted',
 		    accepted_at = COALESCE(accepted_at, now()),
 		    updated_at = now()
-		WHERE delivery_job_id = $1
-		  AND organization_id = $2
+		WHERE delivery_job_id = $1::uuid
+		  AND organization_id = $2::uuid
 	`, row.ID, row.OrganizationID); err != nil {
 		return fmt.Errorf("update recipient tracking submission: %w", err)
 	}
@@ -753,10 +784,11 @@ func (w *Worker) recordSubmission(ctx context.Context, row *jobRow, result *deli
 		INSERT INTO email_tracking_events
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
 			 tracking_id, event_type, event_metadata, event_hash)
-		SELECT $1, $2, recipient_id, $3, $4, tracking_id, 'accepted', '{}'::jsonb,
-		       md5($4::text || ':accepted')
+		SELECT $1::uuid, $2::uuid, recipient_id, $3::uuid, $4::uuid,
+		       tracking_id, 'accepted'::text, '{}'::jsonb,
+		       md5($4::uuid::text || ':accepted')
 		FROM campaign_recipient_tracking
-		WHERE delivery_job_id = $4
+		WHERE delivery_job_id = $4::uuid
 		ON CONFLICT DO NOTHING
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID); err != nil {
 		return fmt.Errorf("record recipient tracking submission: %w", err)
@@ -765,7 +797,7 @@ func (w *Worker) recordSubmission(ctx context.Context, row *jobRow, result *deli
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO sending_domain_daily_stats
 			(organization_id, domain, sending_day, reserved_count, successful_count)
-		VALUES ($1, lower($2), CURRENT_DATE, 0, 1)
+		VALUES ($1::uuid, lower($2::text), CURRENT_DATE, 0, 1)
 		ON CONFLICT (organization_id, domain, sending_day)
 		DO UPDATE SET successful_count = sending_domain_daily_stats.successful_count + 1,
 		              updated_at = now()
@@ -775,8 +807,8 @@ func (w *Worker) recordSubmission(ctx context.Context, row *jobRow, result *deli
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE campaign_recipients
-		SET status = 'submitted', message_id = $3
-		WHERE campaign_id = $1 AND contact_id = $2
+		SET status = 'submitted', message_id = $3::text
+		WHERE campaign_id = $1::uuid AND contact_id = $2::uuid
 	`, row.CampaignID, row.ContactID, transportMessageID); err != nil {
 		return fmt.Errorf("mark recipient submitted: %w", err)
 	}
@@ -784,14 +816,14 @@ func (w *Worker) recordSubmission(ctx context.Context, row *jobRow, result *deli
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO message_events
 			(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)
-		VALUES ($1, $2, $3, $4, 'submitted', '{}'::jsonb)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'submitted'::text, '{}'::jsonb)
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID); err != nil {
 		return fmt.Errorf("record submitted event: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO usage_records (organization_id, metric, quantity)
-		VALUES ($1, 'email_submitted', 1)
+		VALUES ($1::uuid, 'email_submitted'::text, 1)
 	`, row.OrganizationID); err != nil {
 		return fmt.Errorf("record usage: %w", err)
 	}
@@ -848,11 +880,12 @@ func (w *Worker) handleSendFailure(ctx context.Context, row *jobRow, sendErr err
 		INSERT INTO email_tracking_events
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id, tracking_id,
 			 event_type, event_metadata, event_hash)
-		SELECT $1, $2, recipient_id, $3, $4, tracking_id, 'deferred',
-		       jsonb_build_object('error', $5::text, 'attempt', $6::int),
-		       md5($4::text || ':deferred:' || $6::text)
+		SELECT $1::uuid, $2::uuid, recipient_id, $3::uuid, $4::uuid,
+		       tracking_id, 'deferred'::text,
+		       jsonb_build_object('error', $5::text, 'attempt', $6::integer),
+		       md5($4::uuid::text || ':deferred:' || $6::integer::text)
 		FROM campaign_recipient_tracking
-		WHERE delivery_job_id = $4
+		WHERE delivery_job_id = $4::uuid
 		ON CONFLICT DO NOTHING
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID, truncateError(sendErr), attempts); err != nil {
 		w.logger.Warn("record recipient tracking deferral", "job_id", row.ID, "error", err)
@@ -861,7 +894,8 @@ func (w *Worker) handleSendFailure(ctx context.Context, row *jobRow, sendErr err
 	_, _ = w.pool.Exec(ctx, `
 		INSERT INTO message_events
 			(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)
-		VALUES ($1, $2, $3, $4, 'deferred', jsonb_build_object('error', $5::text, 'attempt', $6::int))
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'deferred'::text,
+		        jsonb_build_object('error', $5::text, 'attempt', $6::integer))
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID, truncateError(sendErr), attempts)
 
 	observability.DeliveryJobs.WithLabelValues("deferred").Inc()
@@ -908,7 +942,8 @@ func (w *Worker) failJob(ctx context.Context, row *jobRow, cause error) error {
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO message_events
 			(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)
-		VALUES ($1, $2, $3, $4, 'failed', jsonb_build_object('error', $5::text))
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'failed'::text,
+		        jsonb_build_object('error', $5::text))
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID, message); err != nil {
 		return fmt.Errorf("record failed event: %w", err)
 	}
@@ -923,11 +958,12 @@ func (w *Worker) failJob(ctx context.Context, row *jobRow, cause error) error {
 		INSERT INTO email_tracking_events
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
 			 tracking_id, event_type, event_metadata, event_hash)
-		SELECT $1, $2, recipient_id, $3, $4, tracking_id, 'failed',
+		SELECT $1::uuid, $2::uuid, recipient_id, $3::uuid, $4::uuid,
+		       tracking_id, 'failed'::text,
 		       jsonb_build_object('error', $5::text),
-		       md5($4::text || ':failed')
+		       md5($4::uuid::text || ':failed')
 		FROM campaign_recipient_tracking
-		WHERE delivery_job_id = $4
+		WHERE delivery_job_id = $4::uuid
 		ON CONFLICT DO NOTHING
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID, message); err != nil {
 		return fmt.Errorf("record recipient tracking failed event: %w", err)
@@ -980,7 +1016,8 @@ func (w *Worker) bounceJob(ctx context.Context, row *jobRow, cause error, bounce
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO message_events
 			(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)
-		VALUES ($1, $2, $3, $4, 'bounced', jsonb_build_object('error', $5::text, 'bounce_type', $6::text, 'smtp_code', $7::text))
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'bounced'::text,
+		        jsonb_build_object('error', $5::text, 'bounce_type', $6::text, 'smtp_code', $7::text))
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID, message, bounceType, smtpCode); err != nil {
 		return fmt.Errorf("record bounced event: %w", err)
 	}
@@ -995,11 +1032,12 @@ func (w *Worker) bounceJob(ctx context.Context, row *jobRow, cause error, bounce
 		INSERT INTO email_tracking_events
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
 			 tracking_id, event_type, event_metadata, event_hash)
-		SELECT $1, $2, recipient_id, $3, $4, tracking_id, 'bounced',
+		SELECT $1::uuid, $2::uuid, recipient_id, $3::uuid, $4::uuid,
+		       tracking_id, 'bounced'::text,
 		       jsonb_build_object('error', $5::text, 'bounce_type', $6::text, 'smtp_code', $7::text),
-		       md5($4::text || ':bounced')
+		       md5($4::uuid::text || ':bounced')
 		FROM campaign_recipient_tracking
-		WHERE delivery_job_id = $4
+		WHERE delivery_job_id = $4::uuid
 		ON CONFLICT DO NOTHING
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID, message, bounceType, smtpCode); err != nil {
 		return fmt.Errorf("record recipient tracking bounced event: %w", err)
@@ -1063,7 +1101,8 @@ func (w *Worker) deadLetterJob(ctx context.Context, row *jobRow, reason string, 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO message_events
 			(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)
-		VALUES ($1, $2, $3, $4, 'failed', jsonb_build_object('error', $5::text, 'dead_lettered', true, 'reason', $6::text))
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'failed'::text,
+		        jsonb_build_object('error', $5::text, 'dead_lettered', true, 'reason', $6::text))
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID, message, reason); err != nil {
 		return fmt.Errorf("record dead-lettered event: %w", err)
 	}
@@ -1078,11 +1117,12 @@ func (w *Worker) deadLetterJob(ctx context.Context, row *jobRow, reason string, 
 		INSERT INTO email_tracking_events
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
 			 tracking_id, event_type, event_metadata, event_hash)
-		SELECT $1, $2, recipient_id, $3, $4, tracking_id, 'failed',
+		SELECT $1::uuid, $2::uuid, recipient_id, $3::uuid, $4::uuid,
+		       tracking_id, 'failed'::text,
 		       jsonb_build_object('error', $5::text, 'dead_lettered', true, 'reason', $6::text),
-		       md5($4::text || ':dead-lettered')
+		       md5($4::uuid::text || ':dead-lettered')
 		FROM campaign_recipient_tracking
-		WHERE delivery_job_id = $4
+		WHERE delivery_job_id = $4::uuid
 		ON CONFLICT DO NOTHING
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID, message, reason); err != nil {
 		return fmt.Errorf("record recipient tracking dead-lettered event: %w", err)
@@ -1375,9 +1415,13 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 	if warmupProfile == "" {
 		warmupProfile = "standard"
 	}
-	revoked, reputation, err := domainwarmup.RevokeIfUnsafe(ctx, tx, warmupDomainID)
-	if err != nil {
-		return false, fmt.Errorf("check warm-up graduation reputation: %w", err)
+	var revoked bool
+	var reputation domainwarmup.Reputation
+	if warmupDomainID != "" {
+		revoked, reputation, err = domainwarmup.RevokeIfUnsafe(ctx, tx, warmupDomainID)
+		if err != nil {
+			return false, fmt.Errorf("check warm-up graduation reputation: %w", err)
+		}
 	}
 	if revoked {
 		graduatedAt.Valid = false

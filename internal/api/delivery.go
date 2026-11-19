@@ -461,7 +461,8 @@ func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte,
 		INSERT INTO delivery_feedback_ingest
 			(event_hash, organization_id, campaign_id, delivery_job_id, contact_id, email,
 			 event_type, enhanced_code, reason)
-		VALUES ($1, $2, $3, $4, $5, lower($6), $7, $8, $9)
+		VALUES ($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, lower($6::text),
+		        $7::text, $8::text, $9::text)
 		ON CONFLICT (event_hash) DO NOTHING
 	`, eventHash, claims.WorkspaceID, claims.CampaignID, jobID, contactID,
 		claims.Recipient, feedback.Type, feedback.EnhancedCode, feedback.Diagnostic)
@@ -472,7 +473,7 @@ func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte,
 		if feedback.Type == delivery.FeedbackSoftBounce && jobStatus == "deferred" {
 			if _, err := tx.Exec(ctx, `
 				UPDATE delivery_jobs SET status = 'processing', updated_at = now()
-				WHERE id = $1 AND status = 'deferred'
+				WHERE id = $1::uuid AND status = 'deferred'
 			`, jobID); err != nil {
 				return fmt.Errorf("claim soft-bounce retry: %w", err)
 			}
@@ -536,16 +537,16 @@ func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte,
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE delivery_jobs
-		SET status = $2, bounce_type = $3, smtp_enhanced_code = $4,
-		    last_error = NULLIF($5, ''), next_attempt_at = `+nextAttempt+`,
+		SET status = $2::text, bounce_type = $3::text, smtp_enhanced_code = $4::text,
+		    last_error = NULLIF($5::text, ''), next_attempt_at = `+nextAttempt+`,
 		    updated_at = now()
-		WHERE id = $1
+		WHERE id = $1::uuid
 	`, jobID, status, bounceType, feedback.EnhancedCode, feedback.Diagnostic); err != nil {
 		return fmt.Errorf("update delivery job from feedback: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE campaign_recipients SET status = $3
-		WHERE campaign_id = $1 AND contact_id = $2
+		WHERE campaign_id = $1::uuid AND contact_id = $2::uuid
 	`, claims.CampaignID, contactID, recipientStatus); err != nil {
 		return fmt.Errorf("update campaign recipient from feedback: %w", err)
 	}
@@ -563,13 +564,13 @@ func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte,
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE campaign_recipient_tracking
-		SET delivery_status = $2,
-		    bounced_at = CASE WHEN $2 = 'bounced' THEN now() ELSE bounced_at END,
-		    complained_at = CASE WHEN $2 = 'complained' THEN now() ELSE complained_at END,
-		    deferred_at = CASE WHEN $2 = 'deferred' THEN now() ELSE deferred_at END,
-		    delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE delivered_at END,
+		SET delivery_status = $2::text,
+		    bounced_at = CASE WHEN $2::text = 'bounced' THEN now() ELSE bounced_at END,
+		    complained_at = CASE WHEN $2::text = 'complained' THEN now() ELSE complained_at END,
+		    deferred_at = CASE WHEN $2::text = 'deferred' THEN now() ELSE deferred_at END,
+		    delivered_at = CASE WHEN $2::text = 'delivered' THEN now() ELSE delivered_at END,
 		    updated_at = now()
-		WHERE delivery_job_id = $1
+		WHERE delivery_job_id = $1::uuid
 	`, jobID, trackingStatus); err != nil {
 		return fmt.Errorf("update campaign recipient tracking feedback: %w", err)
 	}
@@ -577,11 +578,12 @@ func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte,
 		INSERT INTO email_tracking_events
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
 			 tracking_id, event_type, event_metadata, event_hash)
-		SELECT $1, $2, recipient_id, $3, $4, tracking_id, $5,
+		SELECT $1::uuid, $2::uuid, recipient_id, $3::uuid, $4::uuid,
+		       tracking_id, $5::text,
 		       jsonb_build_object('feedback_type', $6::text, 'enhanced_code', $7::text, 'reason', $8::text),
-		       md5($4::text || ':' || $5::text)
+		       md5($4::uuid::text || ':' || $5::text)
 		FROM campaign_recipient_tracking
-		WHERE delivery_job_id = $4
+		WHERE delivery_job_id = $4::uuid
 		ON CONFLICT DO NOTHING
 	`, claims.WorkspaceID, claims.CampaignID, contactID, jobID, trackingEvent,
 		feedback.Type, feedback.EnhancedCode, feedback.Diagnostic); err != nil {
@@ -590,7 +592,7 @@ func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte,
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO message_events
 			(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)
-		VALUES ($1, $2, $3, $4, $5, jsonb_build_object(
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::text, jsonb_build_object(
 			'feedback_type', $6::text, 'enhanced_code', $7::text, 'reason', $8::text))
 	`, claims.WorkspaceID, claims.CampaignID, contactID, jobID, eventType,
 		feedback.Type, feedback.EnhancedCode, feedback.Diagnostic); err != nil {
@@ -722,7 +724,8 @@ func (h *DeliveryHandler) recordReputationSignal(ctx context.Context, organizati
 		if _, err := h.pool.Exec(ctx, `
 			INSERT INTO message_events
 				(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)
-			VALUES ($1, $2, $3, $4, $5, jsonb_build_object('feedback', $6::text))
+				VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::text,
+				        jsonb_build_object('feedback', $6::text))
 		`, organizationID, item.campaignID, item.contactID, item.jobID, eventType, details); err != nil {
 			return fmt.Errorf("record campaign feedback event: %w", err)
 		}

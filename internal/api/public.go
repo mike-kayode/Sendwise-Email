@@ -267,11 +267,11 @@ func (s *Server) unsubscribe(r *http.Request) (bool, string) {
 		INSERT INTO email_tracking_events
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
 			 tracking_id, event_type, event_hash)
-		SELECT $1, campaign_id, recipient_id, contact_id, delivery_job_id,
+		SELECT $1::uuid, campaign_id, recipient_id, contact_id, delivery_job_id,
 		       tracking_id, 'unsubscribed',
 		       md5(delivery_job_id::text || ':unsubscribed')
 		FROM campaign_recipient_tracking
-		WHERE organization_id = $1 AND contact_id = $2
+		WHERE organization_id = $1::uuid AND contact_id = $2::uuid
 		ON CONFLICT DO NOTHING
 	`, claims.OrganizationID, claims.ContactID); err != nil {
 		return false, "We could not record the unsubscribe event."
@@ -304,7 +304,9 @@ func (s *Server) trackOpen(w http.ResponseWriter, r *http.Request) {
 			if _, insertErr := s.pool.Exec(ctx, `
 				INSERT INTO message_events
 					(organization_id, campaign_id, contact_id, delivery_job_id, event_type, user_agent, ip_address)
-				VALUES ($1, $2, $3, NULLIF($4, ''), 'opened', $5, $6)
+				VALUES ($1::uuid, NULLIF($2::text, '')::uuid, NULLIF($3::text, '')::uuid,
+				        NULLIF($4::text, '')::uuid, 'opened'::text, $5::text,
+				        NULLIF($6::text, '')::inet)
 			`, claims.OrganizationID, nullIfEmpty(claims.CampaignID),
 				nullIfEmpty(claims.ContactID), claims.Subject, r.UserAgent(), clientIP(r),
 			); insertErr != nil {
@@ -389,7 +391,9 @@ func (s *Server) trackClick(w http.ResponseWriter, r *http.Request) {
 		if _, insertErr := s.pool.Exec(ctx, `
 			INSERT INTO message_events
 				(organization_id, campaign_id, contact_id, delivery_job_id, event_type, url, user_agent, ip_address)
-			VALUES ($1, $2, $3, NULLIF($4, ''), 'clicked', $5, $6, $7)
+			VALUES ($1::uuid, NULLIF($2::text, '')::uuid, NULLIF($3::text, '')::uuid,
+			        NULLIF($4::text, '')::uuid, 'clicked'::text, $5::text, $6::text,
+			        NULLIF($7::text, '')::inet)
 		`, claims.OrganizationID, nullIfEmpty(claims.CampaignID),
 			nullIfEmpty(claims.ContactID), claims.Subject, claims.URL,
 			r.UserAgent(), clientIP(r),

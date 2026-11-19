@@ -2166,7 +2166,7 @@ func TestStalwartFeedbackHardSoftComplaintIsolationAndIdempotency(t *testing.T) 
 
 	makeFixture := func(email string) (string, string, string) {
 		t.Helper()
-		var campaignID, contactID, jobID string
+		var campaignID, contactID, recipientID, jobID string
 		if err := integrationPool.QueryRow(ctx, `
 			INSERT INTO campaigns (organization_id, created_by, name, status, sender_email)
 			VALUES ($1, $2, 'Feedback integration', 'sending', 'hello@example.test')
@@ -2181,10 +2181,11 @@ func TestStalwartFeedbackHardSoftComplaintIsolationAndIdempotency(t *testing.T) 
 		`, owner.Organization.ID, email).Scan(&contactID); err != nil {
 			t.Fatalf("create feedback contact: %v", err)
 		}
-		if _, err := integrationPool.Exec(ctx, `
+		if err := integrationPool.QueryRow(ctx, `
 			INSERT INTO campaign_recipients (organization_id, campaign_id, contact_id, email, status)
 			VALUES ($1, $2, $3, $4, 'submitted')
-		`, owner.Organization.ID, campaignID, contactID, email); err != nil {
+			RETURNING id
+		`, owner.Organization.ID, campaignID, contactID, email).Scan(&recipientID); err != nil {
 			t.Fatalf("create feedback recipient: %v", err)
 		}
 		if err := integrationPool.QueryRow(ctx, `
@@ -2193,6 +2194,15 @@ func TestStalwartFeedbackHardSoftComplaintIsolationAndIdempotency(t *testing.T) 
 			RETURNING id
 		`, owner.Organization.ID, campaignID, contactID).Scan(&jobID); err != nil {
 			t.Fatalf("create feedback delivery job: %v", err)
+		}
+		if _, err := integrationPool.Exec(ctx, `
+			INSERT INTO campaign_recipient_tracking
+				(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
+				 tracking_id, email, delivery_status)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 'submitted')
+		`, owner.Organization.ID, campaignID, recipientID, contactID, jobID,
+			"trk_"+strings.ReplaceAll(uuid.NewString(), "-", ""), email); err != nil {
+			t.Fatalf("create feedback recipient tracking: %v", err)
 		}
 		token, err := delivery.NewVERPToken(integrationCfg.JWTSecret, delivery.VERPClaims{
 			WorkspaceID: owner.Organization.ID,
@@ -3491,18 +3501,18 @@ func TestAnalyticsOverviewIntegration(t *testing.T) {
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
 			 tracking_id, email, delivery_status, accepted_at, open_count, click_count,
 			 first_opened_at, last_opened_at, first_clicked_at, last_clicked_at)
-		SELECT r.organization_id, r.campaign_id, r.id, r.contact_id, dj.id,
+		SELECT $1::uuid, $2::uuid, r.id, r.contact_id, dj.id,
 		       'trk_' || encode(gen_random_bytes(24), 'hex'), r.email, dj.status, now(),
-		       CASE WHEN r.contact_id = $3 THEN 1 ELSE 0 END,
-		       CASE WHEN r.contact_id IN ($3, $4) THEN 1 ELSE 0 END,
-		       CASE WHEN r.contact_id = $3 THEN now() ELSE NULL END,
-		       CASE WHEN r.contact_id = $3 THEN now() ELSE NULL END,
-		       CASE WHEN r.contact_id IN ($3, $4) THEN now() ELSE NULL END,
-		       CASE WHEN r.contact_id IN ($3, $4) THEN now() ELSE NULL END
+		       CASE WHEN r.contact_id = $3::uuid THEN 1 ELSE 0 END,
+		       CASE WHEN r.contact_id IN ($3::uuid, $4::uuid) THEN 1 ELSE 0 END,
+		       CASE WHEN r.contact_id = $3::uuid THEN now() ELSE NULL END,
+		       CASE WHEN r.contact_id = $3::uuid THEN now() ELSE NULL END,
+		       CASE WHEN r.contact_id IN ($3::uuid, $4::uuid) THEN now() ELSE NULL END,
+		       CASE WHEN r.contact_id IN ($3::uuid, $4::uuid) THEN now() ELSE NULL END
 		FROM campaign_recipients r
 		JOIN delivery_jobs dj
 		  ON dj.campaign_id = r.campaign_id AND dj.contact_id = r.contact_id
-		WHERE r.campaign_id = $2
+		WHERE r.campaign_id = $2::uuid
 	`, organizationID, campaign.ID, firstContactID, secondContactID); err != nil {
 		t.Fatalf("seed recipient tracking rows: %v", err)
 	}
