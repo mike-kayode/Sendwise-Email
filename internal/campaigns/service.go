@@ -417,6 +417,24 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 		return 0, fmt.Errorf("create delivery jobs: %w", err)
 	}
 
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO campaign_recipient_tracking
+			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
+			 tracking_id, email, delivery_status, queued_at)
+		SELECT r.organization_id, r.campaign_id, r.id, r.contact_id, dj.id,
+		       'trk_' || encode(gen_random_bytes(24), 'hex'), r.email, dj.status, now()
+		FROM campaign_recipients r
+		JOIN delivery_jobs dj
+		  ON dj.campaign_id = r.campaign_id AND dj.contact_id = r.contact_id
+		WHERE r.campaign_id = $1 AND r.organization_id = $2
+		ON CONFLICT (campaign_id, contact_id) DO UPDATE
+		SET delivery_job_id = EXCLUDED.delivery_job_id,
+		    email = EXCLUDED.email,
+		    updated_at = now()
+	`, campaignID, organizationID); err != nil {
+		return 0, fmt.Errorf("create recipient tracking rows: %w", err)
+	}
+
 	var recipientCount int
 	if err := tx.QueryRow(ctx,
 		`SELECT count(*) FROM campaign_recipients WHERE campaign_id = $1 AND organization_id = $2`,

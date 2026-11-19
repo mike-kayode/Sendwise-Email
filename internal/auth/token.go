@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"time"
@@ -15,6 +17,7 @@ type Claims struct {
 	Role           string `json:"role,omitempty"`
 	CampaignID     string `json:"cmp,omitempty"`
 	ContactID      string `json:"cid,omitempty"`
+	TrackingID     string `json:"tid,omitempty"`
 	URL            string `json:"url,omitempty"`
 	SessionID      string `json:"sid,omitempty"`
 	jwt.RegisteredClaims
@@ -84,27 +87,19 @@ func (m *Manager) IssueAccessWithSession(userID, organizationID, role string) (s
 	return token, sessionID, err
 }
 
-func (m *Manager) IssueTracking(jobID, organizationID, campaignID, contactID string) (string, error) {
-	return m.issue(Claims{
-		OrganizationID: organizationID,
-		CampaignID:     campaignID,
-		ContactID:      contactID,
-		RegisteredClaims: jwt.RegisteredClaims{
-			Subject: jobID,
-		},
-	}, 30*24*time.Hour)
+func (m *Manager) IssueTracking(jobID, organizationID, campaignID, contactID, trackingID string) (string, error) {
+	if trackingID == "" {
+		return "", fmt.Errorf("tracking ID is required")
+	}
+	return trackingID, nil
 }
 
-func (m *Manager) IssueClick(jobID, organizationID, campaignID, contactID, targetURL string) (string, error) {
-	return m.issue(Claims{
-		OrganizationID: organizationID,
-		CampaignID:     campaignID,
-		ContactID:      contactID,
-		URL:            targetURL,
-		RegisteredClaims: jwt.RegisteredClaims{
-			Subject: jobID,
-		},
-	}, 30*24*time.Hour)
+func (m *Manager) IssueClick(jobID, organizationID, campaignID, contactID, trackingID, targetURL string) (string, error) {
+	if trackingID == "" || targetURL == "" {
+		return "", fmt.Errorf("tracking ID and target URL are required")
+	}
+	sum := sha256.Sum256([]byte(trackingID + "\x00" + targetURL))
+	return "tcl_" + hex.EncodeToString(sum[:]), nil
 }
 
 func (m *Manager) IssueUnsubscribe(organizationID, contactID string) (string, error) {

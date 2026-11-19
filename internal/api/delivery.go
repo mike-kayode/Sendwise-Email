@@ -549,6 +549,44 @@ func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte,
 	`, claims.CampaignID, contactID, recipientStatus); err != nil {
 		return fmt.Errorf("update campaign recipient from feedback: %w", err)
 	}
+	trackingEvent := "bounced"
+	trackingStatus := "bounced"
+	if feedback.Type == delivery.FeedbackComplaint {
+		trackingEvent = "complained"
+		trackingStatus = "complained"
+	} else if feedback.Type == delivery.FeedbackSoftBounce {
+		trackingEvent = "deferred"
+		trackingStatus = "deferred"
+	} else if feedback.Type == delivery.FeedbackDelivered {
+		trackingEvent = "delivered"
+		trackingStatus = "delivered"
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE campaign_recipient_tracking
+		SET delivery_status = $2,
+		    bounced_at = CASE WHEN $2 = 'bounced' THEN now() ELSE bounced_at END,
+		    complained_at = CASE WHEN $2 = 'complained' THEN now() ELSE complained_at END,
+		    deferred_at = CASE WHEN $2 = 'deferred' THEN now() ELSE deferred_at END,
+		    delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE delivered_at END,
+		    updated_at = now()
+		WHERE delivery_job_id = $1
+	`, jobID, trackingStatus); err != nil {
+		return fmt.Errorf("update campaign recipient tracking feedback: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO email_tracking_events
+			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
+			 tracking_id, event_type, event_metadata, event_hash)
+		SELECT $1, $2, recipient_id, $3, $4, tracking_id, $5,
+		       jsonb_build_object('feedback_type', $6::text, 'enhanced_code', $7::text, 'reason', $8::text),
+		       md5($4::text || ':' || $5::text)
+		FROM campaign_recipient_tracking
+		WHERE delivery_job_id = $4
+		ON CONFLICT DO NOTHING
+	`, claims.WorkspaceID, claims.CampaignID, contactID, jobID, trackingEvent,
+		feedback.Type, feedback.EnhancedCode, feedback.Diagnostic); err != nil {
+		return fmt.Errorf("record campaign recipient tracking feedback: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO message_events
 			(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)

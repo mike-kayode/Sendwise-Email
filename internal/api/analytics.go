@@ -1,9 +1,13 @@
 package api
 
 import (
+	"encoding/csv"
 	"errors"
 	"math"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/khayode/email-platform/internal/httpx"
@@ -148,6 +152,28 @@ func (s *Server) campaignReport(w http.ResponseWriter, r *http.Request) {
 		topLinks = append(topLinks, stat)
 	}
 
+	var delivered, uniqueOpens, openEvents, uniqueClicks, clickEvents, failed, unsubscribes, complaints int64
+	if err := s.pool.QueryRow(r.Context(), `
+		SELECT
+			count(*) FILTER (WHERE delivery_status IN ('submitted', 'accepted', 'delivered')),
+			count(*) FILTER (WHERE open_count > 0),
+			COALESCE(sum(open_count), 0),
+			count(*) FILTER (WHERE click_count > 0),
+			COALESCE(sum(click_count), 0),
+			count(*) FILTER (WHERE delivery_status = 'failed'),
+			count(*) FILTER (WHERE delivery_status = 'unsubscribed'),
+			count(*) FILTER (WHERE delivery_status = 'complained')
+		FROM campaign_recipient_tracking
+		WHERE organization_id = $1 AND campaign_id = $2
+	`, orgID, campaignID).Scan(
+		&delivered, &uniqueOpens, &openEvents, &uniqueClicks, &clickEvents,
+		&failed, &unsubscribes, &complaints,
+	); err != nil {
+		s.logger.Error("load recipient tracking summary", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load recipient tracking summary.")
+		return
+	}
+
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"campaign": c,
 		"recipients": map[string]any{
@@ -158,9 +184,22 @@ func (s *Server) campaignReport(w http.ResponseWriter, r *http.Request) {
 			"by_type": events,
 		},
 		"rates": map[string]float64{
-			"open_rate":   percent(events["opened"], totalRecipients),
-			"click_rate":  percent(events["clicked"], totalRecipients),
-			"bounce_rate": percent(events["bounced"], totalRecipients),
+			"open_rate":      percent(events["opened"], totalRecipients),
+			"click_rate":     percent(events["clicked"], totalRecipients),
+			"bounce_rate":    percent(events["bounced"], totalRecipients),
+			"delivered_rate": percent(delivered, totalRecipients),
+		},
+		"summary": map[string]int64{
+			"total_recipients": totalRecipients,
+			"sent":             delivered,
+			"delivered":        delivered,
+			"unique_opens":     uniqueOpens,
+			"open_events":      openEvents,
+			"unique_clicks":    uniqueClicks,
+			"click_events":     clickEvents,
+			"failed":           failed,
+			"unsubscribes":     unsubscribes,
+			"complaints":       complaints,
 		},
 		"top_links": topLinks,
 	})
@@ -172,4 +211,232 @@ func percent(numerator, denominator int64) float64 {
 	}
 	value := float64(numerator) / float64(denominator) * 100
 	return math.Round(value*100) / 100
+}
+
+type campaignRecipientRow struct {
+	RecipientID              string  `json:"recipient_id"`
+	Name                     string  `json:"name"`
+	Email                    string  `json:"email"`
+	DeliveryStatus           string  `json:"delivery_status"`
+	QueuedAt                 *string `json:"queued_at"`
+	AcceptedAt               *string `json:"accepted_at"`
+	DeliveredAt              *string `json:"delivered_at"`
+	OpenCount                int64   `json:"open_count"`
+	FirstOpenedAt            *string `json:"first_opened_at"`
+	LastOpenedAt             *string `json:"last_opened_at"`
+	ClickCount               int64   `json:"click_count"`
+	LastClickedAt            *string `json:"last_clicked_at"`
+	LastActivityAt           *string `json:"last_activity_at"`
+	EngagementClassification string  `json:"engagement_classification"`
+}
+
+func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) {
+	orgID, campaignID := s.organizationID(r), r.PathValue("id")
+	if _, err := s.loadCampaign(r.Context(), campaignID, orgID); err != nil {
+		httpx.Error(w, http.StatusNotFound, "campaign_not_found", "Campaign not found.")
+		return
+	}
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	opened := strings.TrimSpace(r.URL.Query().Get("opened"))
+	clicked := strings.TrimSpace(r.URL.Query().Get("clicked"))
+	classification := strings.TrimSpace(r.URL.Query().Get("classification"))
+	sort := strings.TrimSpace(r.URL.Query().Get("sort"))
+	limit, offset := 25, 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 100 {
+			httpx.Error(w, http.StatusBadRequest, "invalid_limit", "Limit must be an integer from 1 to 100.")
+			return
+		}
+		limit = value
+	}
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			httpx.Error(w, http.StatusBadRequest, "invalid_offset", "Offset must be non-negative.")
+			return
+		}
+		offset = value
+	}
+	orderBy := "crt.last_opened_at DESC NULLS LAST, crt.last_clicked_at DESC NULLS LAST, crt.email"
+	switch sort {
+	case "open_count":
+		orderBy = "crt.open_count DESC, crt.email"
+	case "click_count":
+		orderBy = "crt.click_count DESC, crt.email"
+	case "delivery_date":
+		orderBy = "crt.delivered_at DESC NULLS LAST, crt.accepted_at DESC NULLS LAST"
+	case "last_activity":
+		orderBy = "GREATEST(crt.last_opened_at, crt.last_clicked_at) DESC NULLS LAST"
+	}
+	var total int
+	if err := s.pool.QueryRow(r.Context(), `
+		SELECT count(*)
+		FROM campaign_recipient_tracking crt
+		JOIN contacts c ON c.id = crt.contact_id
+		WHERE crt.organization_id = $1 AND crt.campaign_id = $2
+		  AND ($3 = '' OR crt.delivery_status = $3)
+		  AND ($4 = '' OR crt.email ILIKE '%' || $4 || '%' OR c.first_name ILIKE '%' || $4 || '%' OR c.last_name ILIKE '%' || $4 || '%')
+		  AND ($5 = '' OR ($5 = 'yes' AND crt.open_count > 0) OR ($5 = 'no' AND crt.open_count = 0))
+		  AND ($6 = '' OR ($6 = 'yes' AND crt.click_count > 0) OR ($6 = 'no' AND crt.click_count = 0))
+		  AND ($7 = '' OR crt.engagement_classification = $7)
+	`, orgID, campaignID, status, search, opened, clicked, classification).Scan(&total); err != nil {
+		s.logger.Error("count campaign recipients", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not count campaign recipients.")
+		return
+	}
+	query := `
+		SELECT crt.recipient_id::text,
+		       COALESCE(NULLIF(btrim(c.first_name || ' ' || c.last_name), ''), ''),
+		       crt.email, crt.delivery_status,
+		       crt.queued_at::text, crt.accepted_at::text, crt.delivered_at::text,
+		       crt.open_count, crt.first_opened_at::text, crt.last_opened_at::text,
+		       crt.click_count, crt.last_clicked_at::text,
+		       GREATEST(crt.last_opened_at, crt.last_clicked_at)::text,
+		       crt.engagement_classification
+		FROM campaign_recipient_tracking crt
+		JOIN contacts c ON c.id = crt.contact_id
+		WHERE crt.organization_id = $1 AND crt.campaign_id = $2
+		  AND ($3 = '' OR crt.delivery_status = $3)
+		  AND ($4 = '' OR crt.email ILIKE '%' || $4 || '%' OR c.first_name ILIKE '%' || $4 || '%' OR c.last_name ILIKE '%' || $4 || '%')
+		  AND ($5 = '' OR ($5 = 'yes' AND crt.open_count > 0) OR ($5 = 'no' AND crt.open_count = 0))
+		  AND ($6 = '' OR ($6 = 'yes' AND crt.click_count > 0) OR ($6 = 'no' AND crt.click_count = 0))
+		  AND ($7 = '' OR crt.engagement_classification = $7)
+		ORDER BY ` + orderBy + `
+		LIMIT $8 OFFSET $9
+	`
+	rows, err := s.pool.Query(r.Context(), query, orgID, campaignID, status, search, opened, clicked, classification, limit, offset)
+	if err != nil {
+		s.logger.Error("list campaign recipients", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not list campaign recipients.")
+		return
+	}
+	defer rows.Close()
+	result := make([]campaignRecipientRow, 0, limit)
+	for rows.Next() {
+		var row campaignRecipientRow
+		if err := rows.Scan(&row.RecipientID, &row.Name, &row.Email, &row.DeliveryStatus,
+			&row.QueuedAt, &row.AcceptedAt, &row.DeliveredAt, &row.OpenCount,
+			&row.FirstOpenedAt, &row.LastOpenedAt, &row.ClickCount, &row.LastClickedAt,
+			&row.LastActivityAt, &row.EngagementClassification,
+		); err != nil {
+			s.logger.Error("scan campaign recipient", "error", err)
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not list campaign recipients.")
+			return
+		}
+		result = append(result, row)
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"data":       result,
+		"pagination": map[string]int{"total": total, "limit": limit, "offset": offset},
+	})
+}
+
+func (s *Server) getCampaignRecipientActivity(w http.ResponseWriter, r *http.Request) {
+	orgID, campaignID, recipientID := s.organizationID(r), r.PathValue("id"), r.PathValue("recipientId")
+	var exists bool
+	if err := s.pool.QueryRow(r.Context(), `
+		SELECT EXISTS (
+			SELECT 1 FROM campaign_recipient_tracking
+			WHERE organization_id = $1 AND campaign_id = $2 AND recipient_id = $3
+		)
+	`, orgID, campaignID, recipientID).Scan(&exists); err != nil || !exists {
+		httpx.Error(w, http.StatusNotFound, "recipient_not_found", "Recipient activity not found.")
+		return
+	}
+	rows, err := s.pool.Query(r.Context(), `
+		SELECT event_type, event_timestamp::text, COALESCE(ip_address::text, ''),
+		       COALESCE(user_agent, ''), COALESCE(device_type, ''),
+		       COALESCE(browser, ''), COALESCE(operating_system, ''),
+		       COALESCE(country, ''), COALESCE(region, ''), COALESCE(city, ''),
+		       COALESCE(destination_url, ''), event_metadata,
+		       is_automated, automation_type
+		FROM email_tracking_events
+		WHERE organization_id = $1 AND campaign_id = $2 AND recipient_id = $3
+		ORDER BY event_timestamp ASC, id ASC
+	`, orgID, campaignID, recipientID)
+	if err != nil {
+		s.logger.Error("list recipient activity", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load recipient activity.")
+		return
+	}
+	defer rows.Close()
+	type activity struct {
+		EventType       string `json:"event_type"`
+		Timestamp       string `json:"timestamp"`
+		IPAddress       string `json:"ip_address"`
+		UserAgent       string `json:"user_agent"`
+		DeviceType      string `json:"device_type"`
+		Browser         string `json:"browser"`
+		OperatingSystem string `json:"operating_system"`
+		Country         string `json:"country"`
+		Region          string `json:"region"`
+		City            string `json:"city"`
+		DestinationURL  string `json:"destination_url"`
+		Metadata        []byte `json:"metadata"`
+		IsAutomated     bool   `json:"is_automated"`
+		AutomationType  string `json:"automation_type"`
+	}
+	result := make([]activity, 0)
+	for rows.Next() {
+		var item activity
+		if err := rows.Scan(&item.EventType, &item.Timestamp, &item.IPAddress, &item.UserAgent,
+			&item.DeviceType, &item.Browser, &item.OperatingSystem, &item.Country, &item.Region,
+			&item.City, &item.DestinationURL, &item.Metadata, &item.IsAutomated, &item.AutomationType,
+		); err != nil {
+			s.logger.Error("scan recipient activity", "error", err)
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load recipient activity.")
+			return
+		}
+		result = append(result, item)
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"data": result})
+}
+
+func (s *Server) exportCampaignRecipients(w http.ResponseWriter, r *http.Request) {
+	orgID, campaignID := s.organizationID(r), r.PathValue("id")
+	rows, err := s.pool.Query(r.Context(), `
+		SELECT crt.email, crt.delivery_status, crt.accepted_at, crt.delivered_at,
+		       crt.open_count, crt.first_opened_at, crt.last_opened_at,
+		       crt.click_count, crt.last_clicked_at,
+		       crt.engagement_classification
+		FROM campaign_recipient_tracking crt
+		WHERE crt.organization_id = $1 AND crt.campaign_id = $2
+		ORDER BY crt.email
+	`, orgID, campaignID)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not export recipient tracking.")
+		return
+	}
+	defer rows.Close()
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", `attachment; filename="campaign-recipient-tracking.csv"`)
+	writer := csv.NewWriter(w)
+	_ = writer.Write([]string{"recipient_email", "delivery_status", "accepted_at", "delivered_at", "open_count", "first_opened_at", "last_opened_at", "click_count", "last_clicked_at", "engagement_classification"})
+	for rows.Next() {
+		var email, status, classification string
+		var accepted, delivered, firstOpen, lastOpen, lastClick *time.Time
+		var opens, clicks int64
+		if err := rows.Scan(&email, &status, &accepted, &delivered, &opens, &firstOpen, &lastOpen, &clicks, &lastClick, &classification); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not export recipient tracking.")
+			return
+		}
+		writer.Write([]string{
+			email, status, timeValue(accepted), timeValue(delivered),
+			strconv.FormatInt(opens, 10), timeValue(firstOpen), timeValue(lastOpen),
+			strconv.FormatInt(clicks, 10), timeValue(lastClick), classification,
+		})
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		s.logger.Error("flush recipient tracking CSV", "error", err)
+	}
+}
+
+func timeValue(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
 }

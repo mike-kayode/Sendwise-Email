@@ -3385,6 +3385,26 @@ func TestAnalyticsOverviewIntegration(t *testing.T) {
 		t.Fatalf("seed analytics delivery jobs: %v", err)
 	}
 	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO campaign_recipient_tracking
+			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
+			 tracking_id, email, delivery_status, accepted_at, open_count, click_count,
+			 first_opened_at, last_opened_at, first_clicked_at, last_clicked_at)
+		SELECT r.organization_id, r.campaign_id, r.id, r.contact_id, dj.id,
+		       'trk_' || encode(gen_random_bytes(24), 'hex'), r.email, dj.status, now(),
+		       CASE WHEN r.contact_id = $3 THEN 1 ELSE 0 END,
+		       CASE WHEN r.contact_id IN ($3, $4) THEN 1 ELSE 0 END,
+		       CASE WHEN r.contact_id = $3 THEN now() ELSE NULL END,
+		       CASE WHEN r.contact_id = $3 THEN now() ELSE NULL END,
+		       CASE WHEN r.contact_id IN ($3, $4) THEN now() ELSE NULL END,
+		       CASE WHEN r.contact_id IN ($3, $4) THEN now() ELSE NULL END
+		FROM campaign_recipients r
+		JOIN delivery_jobs dj
+		  ON dj.campaign_id = r.campaign_id AND dj.contact_id = r.contact_id
+		WHERE r.campaign_id = $2
+	`, organizationID, campaign.ID, firstContactID, secondContactID); err != nil {
+		t.Fatalf("seed recipient tracking rows: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
 		INSERT INTO message_events (organization_id, campaign_id, contact_id, event_type, url)
 		VALUES
 			($1, $2, $3, 'opened', NULL),
@@ -3401,6 +3421,51 @@ func TestAnalyticsOverviewIntegration(t *testing.T) {
 			($1, 'analytics-unsubscribe@example.test', 'unsubscribe')
 	`, organizationID); err != nil {
 		t.Fatalf("seed analytics suppressions: %v", err)
+	}
+
+	var trackingID, trackingJobID, trackingRecipientID, trackingContactID string
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT crt.tracking_id, crt.delivery_job_id::text,
+		       crt.recipient_id::text, crt.contact_id::text
+		FROM campaign_recipient_tracking crt
+		JOIN contacts c ON c.id = crt.contact_id
+		WHERE crt.campaign_id = $1 AND c.email = 'analytics-one@example.test'
+	`, campaign.ID).Scan(&trackingID, &trackingJobID, &trackingRecipientID, &trackingContactID); err != nil {
+		t.Fatalf("load seeded tracking row: %v", err)
+	}
+	openResponse := doRequest(t, s, http.MethodGet, "/t/open/"+trackingID+".gif", "", "")
+	assertStatus(t, openResponse, http.StatusOK)
+	if openResponse.Header().Get("Content-Type") != "image/gif" {
+		t.Fatalf("open pixel content type = %q", openResponse.Header().Get("Content-Type"))
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO email_tracking_links
+			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
+			 tracking_id, link_token, destination_url)
+		VALUES ($1, $2, $3, $4, $5, $6, 'tcl_' || encode(gen_random_bytes(16), 'hex'),
+		        'https://example.test/tracked')
+	`, organizationID, campaign.ID, trackingRecipientID, trackingContactID, trackingJobID, trackingID); err != nil {
+		t.Fatalf("seed recipient tracking link: %v", err)
+	}
+	var linkToken string
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT link_token FROM email_tracking_links
+		WHERE delivery_job_id = $1
+	`, trackingJobID).Scan(&linkToken); err != nil {
+		t.Fatalf("load recipient tracking link token: %v", err)
+	}
+	clickResponse := doRequest(t, s, http.MethodGet, "/t/click/"+linkToken, "", "")
+	assertStatus(t, clickResponse, http.StatusFound)
+	var openCount, clickCount int64
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT open_count, click_count
+		FROM campaign_recipient_tracking
+		WHERE tracking_id = $1
+	`, trackingID).Scan(&openCount, &clickCount); err != nil {
+		t.Fatalf("load recipient tracking aggregates: %v", err)
+	}
+	if openCount != 2 || clickCount != 1 {
+		t.Fatalf("recipient tracking aggregates open=%d click=%d, want open=2 click=1", openCount, clickCount)
 	}
 
 	w := doRequest(t, s, "GET", "/api/v1/analytics/overview", "", token)
@@ -3465,6 +3530,43 @@ func TestAnalyticsOverviewIntegration(t *testing.T) {
 	}
 	if len(report.TopLinks) != 1 || report.TopLinks[0].URL != "https://example.test/offer" || report.TopLinks[0].Clicks != 2 {
 		t.Fatalf("campaign top links do not match seeded clicks: %+v", report.TopLinks)
+	}
+
+	recipientsResponse := doRequest(t, s, http.MethodGet,
+		"/api/v1/campaigns/"+campaign.ID+"/recipients?limit=25&offset=0&sort=open_count&opened=yes", "",
+		token)
+	assertStatus(t, recipientsResponse, http.StatusOK)
+	var recipients struct {
+		Data []struct {
+			RecipientID string `json:"recipient_id"`
+			Email       string `json:"email"`
+			OpenCount   int64  `json:"open_count"`
+		} `json:"data"`
+		Pagination struct {
+			Total int `json:"total"`
+		} `json:"pagination"`
+	}
+	if err := json.Unmarshal(recipientsResponse.Body.Bytes(), &recipients); err != nil {
+		t.Fatalf("decode recipient tracking list: %v", err)
+	}
+	if recipients.Pagination.Total != 1 || len(recipients.Data) != 1 ||
+		recipients.Data[0].Email != "analytics-one@example.test" ||
+		recipients.Data[0].OpenCount != 1 {
+		t.Fatalf("recipient tracking list = %+v", recipients)
+	}
+	recipientID := recipients.Data[0].RecipientID
+	activityResponse := doRequest(t, s, http.MethodGet,
+		"/api/v1/campaigns/"+campaign.ID+"/recipients/"+recipientID+"/activity", "",
+		token)
+	assertStatus(t, activityResponse, http.StatusOK)
+
+	exportResponse := doRequest(t, s, http.MethodGet,
+		"/api/v1/campaigns/"+campaign.ID+"/recipients/export", "", token)
+	assertStatus(t, exportResponse, http.StatusOK)
+	if !strings.Contains(exportResponse.Header().Get("Content-Type"), "text/csv") ||
+		!strings.Contains(exportResponse.Body.String(), "analytics-one@example.test") {
+		t.Fatalf("recipient tracking CSV response = status=%d content-type=%q body=%q",
+			exportResponse.Code, exportResponse.Header().Get("Content-Type"), exportResponse.Body.String())
 	}
 }
 
