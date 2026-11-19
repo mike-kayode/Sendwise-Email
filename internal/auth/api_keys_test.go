@@ -34,7 +34,7 @@ func TestAPIKeyHashAndVerify(t *testing.T) {
 }
 
 func TestVerifyAPIKeyRejectsUnsafeHashes(t *testing.T) {
-	hash, err := hashAPIKey("sk_test-api-key-value")
+	hash, err := hashAPIKey("fake-test-api-key-value")
 	if err != nil {
 		t.Fatalf("hashAPIKey() error = %v", err)
 	}
@@ -44,7 +44,7 @@ func TestVerifyAPIKeyRejectsUnsafeHashes(t *testing.T) {
 		strings.Replace(hash, "m=65536", "m=4294967295", 1),
 	}
 	for _, encoded := range malformed {
-		if verifyAPIKey(encoded, "sk_test-api-key-value") {
+		if verifyAPIKey(encoded, "fake-test-api-key-value") {
 			t.Fatal("verifyAPIKey() accepted an unsupported hash")
 		}
 	}

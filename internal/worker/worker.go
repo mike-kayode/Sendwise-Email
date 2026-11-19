@@ -18,6 +18,7 @@ import (
 	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/config"
 	"github.com/khayode/email-platform/internal/delivery"
+	"github.com/khayode/email-platform/internal/domainwarmup"
 	"github.com/khayode/email-platform/internal/messaging"
 	"github.com/khayode/email-platform/internal/observability"
 	"github.com/khayode/email-platform/internal/quota"
@@ -39,6 +40,107 @@ type Worker struct {
 	domainMu       sync.Mutex
 	domainInFlight map[string]int
 	recipientRates map[string]*rate.Limiter
+	smtpBreaker    smtpCircuitBreaker
+}
+
+func (w *Worker) releaseProcessingLease(ctx context.Context, jobID string) error {
+	_, err := w.pool.Exec(ctx, `
+		UPDATE delivery_jobs
+		SET status = 'queued', processing_started_at = NULL,
+		    nats_published_at = now(), updated_at = now()
+		WHERE id = $1 AND status = 'processing'
+	`, jobID)
+	if err != nil {
+		return fmt.Errorf("release delivery job processing lease: %w", err)
+	}
+	return nil
+}
+
+func (w *Worker) closeSMTPBreaker() {
+	if w.smtpBreaker.ProbeSucceeded(time.Now()) {
+		observability.SMTPBreakerOpen.Set(0)
+		w.logger.Info("SMTP circuit breaker closed; probe succeeded")
+	}
+}
+
+func (w *Worker) claimForProcessing(ctx context.Context, row *jobRow) bool {
+	tag, err := w.pool.Exec(ctx, `
+		UPDATE delivery_jobs
+		SET status = 'processing', processing_started_at = now(),
+		    nats_publish_claimed_at = NULL, updated_at = now()
+		WHERE id = $1 AND status IN ('queued', 'deferred')
+		  AND next_attempt_at <= now()
+		  AND processing_started_at IS NULL
+	`, row.ID)
+	if err != nil {
+		w.logger.Error("claim delivery job for processing", "job_id", row.ID, "error", err)
+		return false
+	}
+	return tag.RowsAffected() == 1
+}
+
+func (w *Worker) processingHeartbeat(ctx context.Context, jobID string) {
+	interval := w.cfg.NATSStalePublishTimeout / 3
+	if interval <= 0 || interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := w.pool.Exec(ctx, `
+				UPDATE delivery_jobs
+				SET processing_started_at = now(), updated_at = now()
+				WHERE id = $1 AND status = 'processing'
+			`, jobID); err != nil && ctx.Err() == nil {
+				w.logger.Warn("refresh delivery processing lease", "job_id", jobID, "error", err)
+			}
+		}
+	}
+}
+
+func (w *Worker) deferWithoutAge(ctx context.Context, row *jobRow, delay time.Duration, reason string) error {
+	if delay < time.Second {
+		delay = time.Second
+	}
+	_, err := w.pool.Exec(ctx, `
+		UPDATE delivery_jobs
+		SET status = 'deferred', next_attempt_at = now() + $2::interval,
+		    failure_started_at = NULL, processing_started_at = NULL,
+		    nats_publish_claimed_at = NULL, nats_published_at = NULL,
+		    last_error = $3, updated_at = now()
+		WHERE id = $1 AND status = 'processing'
+	`, row.ID, fmt.Sprintf("%f seconds", delay.Seconds()), reason)
+	if err != nil {
+		return fmt.Errorf("defer delivery job without age limit: %w", err)
+	}
+	row.Status = "deferred"
+	return nil
+}
+
+func (w *Worker) deferInfrastructureFailure(ctx context.Context, row *jobRow, sendErr error, until time.Time) error {
+	if err := w.releaseCampaignQuota(ctx, row); err != nil {
+		return fmt.Errorf("release campaign quota after SMTP infrastructure failure: %w", err)
+	}
+	if until.Before(time.Now()) {
+		until = time.Now().Add(30 * time.Second)
+	}
+	_, err := w.pool.Exec(ctx, `
+		UPDATE delivery_jobs
+		SET status = 'deferred', next_attempt_at = $2,
+		    failure_started_at = NULL, processing_started_at = NULL,
+		    nats_publish_claimed_at = NULL, nats_published_at = NULL,
+		    last_error = $3, updated_at = now()
+		WHERE id = $1 AND status = 'processing'
+	`, row.ID, until, truncateError(sendErr))
+	if err != nil {
+		return fmt.Errorf("defer delivery after SMTP infrastructure failure: %w", err)
+	}
+	row.Status = "deferred"
+	return nil
 }
 
 var errWorkspaceSuspended = errors.New("workspace is suspended")
@@ -82,6 +184,7 @@ type jobRow struct {
 	QuotaReservationID  string
 	QuotaDeferred       bool
 	CreatedAt           time.Time
+	FailureStartedAt    pgtype.Timestamptz
 }
 
 func New(
@@ -101,6 +204,9 @@ func New(
 	}
 	if cfg.MaxDailyEmails < 1 {
 		cfg.MaxDailyEmails = 10000
+	}
+	if cfg.NATSStalePublishTimeout <= 0 {
+		cfg.NATSStalePublishTimeout = 10 * time.Minute
 	}
 	if cfg.PlatformMaxDomainRate < 1 {
 		cfg.PlatformMaxDomainRate = 1000
@@ -135,7 +241,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		return err
 	}
 
-	if n, err := w.campaigns.RepublishPending(ctx, 500); err != nil {
+	if n, err := w.campaigns.RepublishPendingWithStaleTimeout(ctx, 500, w.cfg.NATSStalePublishTimeout); err != nil {
 		w.logger.Warn("republish pending jobs", "error", err)
 	} else if n > 0 {
 		w.logger.Info("republished pending delivery jobs", "count", n)
@@ -168,6 +274,11 @@ func (w *Worker) handleMessage(ctx context.Context, msg jetstream.Msg) {
 	}
 
 	retryAfter, err := w.process(ctx, job)
+	if err != nil || retryAfter > 0 {
+		if releaseErr := w.releaseProcessingLease(ctx, job.JobID); releaseErr != nil {
+			w.logger.Error("release delivery processing lease", "job_id", job.JobID, "error", releaseErr)
+		}
+	}
 	if err != nil {
 		w.logger.Error("process delivery job", "job_id", job.JobID, "error", err)
 		if retryAfter <= 0 {
@@ -198,16 +309,19 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		return 0, nil
 	}
 
-	// Maximum message age: do not retry jobs older than the configured age.
-	if !row.QuotaDeferred && w.cfg.MaxMessageAge > 0 && time.Since(row.CreatedAt) > w.cfg.MaxMessageAge {
-		return 0, w.deadLetterJob(ctx, row, "message_expired", fmt.Errorf("message exceeded max age %s", w.cfg.MaxMessageAge))
+	if row.Status == "processing" || !w.claimForProcessing(ctx, row) {
+		return 0, nil
 	}
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	defer stopHeartbeat()
+	go w.processingHeartbeat(heartbeatCtx, row.ID)
+	row.Status = "processing"
 
 	if row.CampaignStatus == "cancelled" || row.CampaignStatus == "failed" {
 		return 0, w.cancelPendingJob(ctx, row, "campaign_"+row.CampaignStatus)
 	}
 	if row.CampaignStatus == "paused" {
-		return time.Minute, nil
+		return 0, w.deferWithoutAge(ctx, row, time.Minute, "campaign paused")
 	}
 
 	if row.ContactStatus != "subscribed" {
@@ -297,7 +411,7 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	// Workspace suspension and abuse pauses remain independent of domain quotas.
 	if err := w.checkTenantQuota(ctx, row.OrganizationID); err != nil {
 		if errors.Is(err, errWorkspaceSuspended) {
-			return time.Minute, nil
+			return 0, w.deferWithoutAge(ctx, row, time.Minute, "workspace sending suspended")
 		}
 		return 0, w.failJob(ctx, row, err)
 	}
@@ -434,18 +548,44 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	}
 	defer w.releaseDomainSlot(recipientDomain)
 
-	deferred, retryAt, err := w.reserveCampaignQuota(ctx, row)
+	deferred, _, err = w.reserveCampaignQuota(ctx, row)
 	if err != nil {
 		return 30 * time.Second, err
 	}
 	if deferred {
-		return max(retryAt.Sub(time.Now()), time.Second), nil
+		return 0, nil
 	}
 
+	// Cap- and quota-deferred jobs clear this clock before they are resumed.
+	if row.FailureStartedAt.Valid && w.cfg.MaxMessageAge > 0 &&
+		time.Since(row.FailureStartedAt.Time) > w.cfg.MaxMessageAge {
+		if err := w.releaseWarmupReservation(ctx, row); err != nil {
+			return 30 * time.Second, err
+		}
+		return 0, w.deadLetterJob(ctx, row, "message_expired", fmt.Errorf("message exceeded max age %s", w.cfg.MaxMessageAge))
+	}
+
+	if allowed, until := w.smtpBreaker.Allow(time.Now()); !allowed {
+		return 0, w.deferWithoutAge(ctx, row, time.Until(until), "smtp circuit breaker open")
+	}
 	result, err := w.transport.Send(ctx, message)
 	if err != nil {
+		if delivery.IsInfrastructureError(err) {
+			until, opened := w.smtpBreaker.Failure(time.Now())
+			if opened {
+				observability.SMTPBreakerOpen.Set(1)
+				w.logger.Warn("SMTP circuit breaker opened",
+					"failure_threshold", smtpBreakerFailureThreshold,
+					"failure_window", smtpBreakerFailureWindow.String(),
+					"cooldown", time.Until(until).Round(time.Second).String(),
+				)
+			}
+			return 0, w.deferInfrastructureFailure(ctx, row, err, until)
+		}
+		w.closeSMTPBreaker()
 		return w.handleSendFailure(ctx, row, err)
 	}
+	w.closeSMTPBreaker()
 
 	if err := w.recordSubmission(ctx, row, result); err != nil {
 		return 30 * time.Second, err
@@ -473,7 +613,7 @@ func (w *Worker) loadJob(ctx context.Context, jobID string) (*jobRow, error) {
 		       COALESCE(sp.country, ''), COALESCE(sp.website, ''), COALESCE(sp.support_email, ''),
 		       COALESCE(sp.footer_text, ''), COALESCE(sp.social_links, '[]'::jsonb),
 		       dj.warmup_reserved_on, COALESCE(dj.quota_reservation_id::text, ''),
-		       dj.quota_deferred, dj.created_at
+		       dj.quota_deferred, dj.created_at, dj.failure_started_at
 		FROM delivery_jobs dj
 		JOIN campaigns cp ON cp.id = dj.campaign_id
 		JOIN organizations o ON o.id = dj.organization_id
@@ -496,7 +636,7 @@ func (w *Worker) loadJob(ctx context.Context, jobID string) (*jobRow, error) {
 		&row.SenderFooterText, &row.SenderSocialLinks,
 		&row.WarmupReservedOn,
 		&row.QuotaReservationID, &row.QuotaDeferred,
-		&row.CreatedAt,
+		&row.CreatedAt, &row.FailureStartedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -529,6 +669,8 @@ func (w *Worker) recordSubmission(ctx context.Context, row *jobRow, result *deli
 		    transport_message_id = $2,
 		    quota_reservation_id = NULL,
 		    quota_deferred = false,
+		    failure_started_at = NULL,
+		    processing_started_at = NULL,
 		    last_error = NULL,
 		    updated_at = now()
 		WHERE id = $1 AND status IN ('queued', 'processing', 'deferred')
@@ -604,6 +746,8 @@ func (w *Worker) handleSendFailure(ctx context.Context, row *jobRow, sendErr err
 		SET status = 'deferred',
 		    attempts = $2,
 		    next_attempt_at = now() + $3::interval,
+		    failure_started_at = COALESCE(failure_started_at, now()),
+		    processing_started_at = NULL,
 		    nats_publish_claimed_at = NULL,
 		    nats_published_at = NULL,
 		    last_error = $4,
@@ -627,7 +771,7 @@ func (w *Worker) handleSendFailure(ctx context.Context, row *jobRow, sendErr err
 		"retry_in", delay.String(),
 		"error", sendErr,
 	)
-	return delay, nil
+	return 0, nil
 }
 
 func (w *Worker) failJob(ctx context.Context, row *jobRow, cause error) error {
@@ -645,6 +789,7 @@ func (w *Worker) failJob(ctx context.Context, row *jobRow, cause error) error {
 		UPDATE delivery_jobs
 		SET status = 'failed',
 		    attempts = attempts + 1,
+		    processing_started_at = NULL,
 		    last_error = $2,
 		    updated_at = now()
 		WHERE id = $1
@@ -694,6 +839,7 @@ func (w *Worker) bounceJob(ctx context.Context, row *jobRow, cause error, bounce
 		UPDATE delivery_jobs
 		SET status = 'bounced',
 		    attempts = attempts + 1,
+		    processing_started_at = NULL,
 		    bounce_type = $2,
 		    smtp_code = $3,
 		    last_error = $4,
@@ -750,6 +896,7 @@ func (w *Worker) deadLetterJob(ctx context.Context, row *jobRow, reason string, 
 		SET status = 'failed',
 		    attempts = attempts + 1,
 		    dead_lettered_at = now(),
+		    processing_started_at = NULL,
 		    last_error = $2,
 		    updated_at = now()
 		WHERE id = $1
@@ -776,7 +923,7 @@ func (w *Worker) deadLetterJob(ctx context.Context, row *jobRow, reason string, 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO message_events
 			(organization_id, campaign_id, contact_id, delivery_job_id, event_type, metadata)
-		VALUES ($1, $2, $3, $4, 'failed', jsonb_build_object('error', $5::text, 'dead_lettered', true, 'reason', $6))
+		VALUES ($1, $2, $3, $4, 'failed', jsonb_build_object('error', $5::text, 'dead_lettered', true, 'reason', $6::text))
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID, message, reason); err != nil {
 		return fmt.Errorf("record dead-lettered event: %w", err)
 	}
@@ -908,6 +1055,7 @@ func (w *Worker) reserveCampaignQuota(ctx context.Context, row *jobRow) (bool, t
 		if _, updateErr := tx.Exec(ctx, `
 			UPDATE delivery_jobs
 			SET status = 'deferred', next_attempt_at = $2, quota_deferred = true,
+			    failure_started_at = NULL, processing_started_at = NULL,
 			    nats_publish_claimed_at = NULL, nats_published_at = NULL,
 			    quota_reservation_id = NULL, last_error = $3, updated_at = now()
 			WHERE id = $1 AND status IN ('queued', 'processing', 'deferred')
@@ -982,6 +1130,36 @@ func (w *Worker) releaseCampaignQuotaTx(ctx context.Context, tx pgx.Tx, row *job
 	return nil
 }
 
+func (w *Worker) releaseWarmupReservation(ctx context.Context, row *jobRow) error {
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin warm-up reservation release: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `
+		UPDATE delivery_jobs
+		SET warmup_reserved_on = NULL, updated_at = now()
+		WHERE id = $1 AND warmup_reserved_on = CURRENT_DATE
+	`, row.ID)
+	if err != nil {
+		return fmt.Errorf("clear expired job warm-up reservation: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		if _, err := tx.Exec(ctx, `
+			UPDATE sending_domain_daily_stats
+			SET reserved_count = GREATEST(reserved_count - 1, 0), updated_at = now()
+			WHERE organization_id = $1 AND lower(domain) = lower($2)
+			  AND sending_day = CURRENT_DATE
+		`, row.OrganizationID, domainOf(row.SenderEmail)); err != nil {
+			return fmt.Errorf("release expired job warm-up usage: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit warm-up reservation release: %w", err)
+	}
+	return nil
+}
+
 func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, error) {
 	domain := strings.ToLower(domainOf(row.SenderEmail))
 	if domain == "" {
@@ -1011,12 +1189,15 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 	var warmupProfile string
 	var overrideValue pgtype.Int4
 	var overrideExpiresAt pgtype.Timestamptz
+	var graduatedAt pgtype.Timestamptz
+	var warmupDomainID string
 	var dailyDefault, dailyOverride pgtype.Int8
 	var unlimited bool
 	var now time.Time
 	if err := tx.QueryRow(ctx, `
-		SELECT sd.warmup_profile, sd.warmup_daily_cap_override,
-		       sd.warmup_override_expires_at, pd.daily_limit, dq.daily_limit,
+		SELECT sd.id::text, sd.warmup_profile, sd.warmup_daily_cap_override,
+		       sd.warmup_override_expires_at, sd.warmup_graduated_at,
+		       pd.daily_limit, dq.daily_limit,
 		       COALESCE(dq.unlimited, false), now()
 		FROM sending_domains sd
 		LEFT JOIN platform_quota_defaults pd ON pd.stream = 'marketing'
@@ -1025,13 +1206,26 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 		ORDER BY sd.created_at
 		LIMIT 1
 	`, row.OrganizationID, domain).Scan(
-		&warmupProfile, &overrideValue, &overrideExpiresAt,
+		&warmupDomainID, &warmupProfile, &overrideValue, &overrideExpiresAt,
+		&graduatedAt,
 		&dailyDefault, &dailyOverride, &unlimited, &now,
 	); err != nil && err != pgx.ErrNoRows {
 		return false, fmt.Errorf("load sending-domain warm-up profile: %w", err)
 	}
 	if warmupProfile == "" {
 		warmupProfile = "standard"
+	}
+	revoked, reputation, err := domainwarmup.RevokeIfUnsafe(ctx, tx, warmupDomainID)
+	if err != nil {
+		return false, fmt.Errorf("check warm-up graduation reputation: %w", err)
+	}
+	if revoked {
+		graduatedAt.Valid = false
+		w.logger.Warn("warm-up graduation automatically revoked",
+			"domain", domain,
+			"bounce_rate_7_days", reputation.BounceRate,
+			"complaint_rate_7_days", reputation.ComplaintRate,
+		)
 	}
 	var successfulDays int
 	qualifiedDayFilter := ""
@@ -1047,15 +1241,6 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 		return false, fmt.Errorf("count successful warm-up days: %w", err)
 	}
 	curveCap := delivery.WarmupDailyCap(warmupProfile, w.cfg.WarmupStartPerDay, w.cfg.WarmupGrowthFactor, w.cfg.MaxDailyEmails, successfulDays)
-	var override *int
-	if overrideValue.Valid {
-		value := int(overrideValue.Int32)
-		override = &value
-	}
-	var expiresAt *time.Time
-	if overrideExpiresAt.Valid {
-		expiresAt = &overrideExpiresAt.Time
-	}
 	var dailyQuota *int64
 	if !unlimited {
 		effectiveDailyQuota := dailyOverride
@@ -1065,6 +1250,18 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 		if effectiveDailyQuota.Valid {
 			dailyQuota = &effectiveDailyQuota.Int64
 		}
+	}
+	if graduatedAt.Valid {
+		curveCap = delivery.GraduatedWarmupDailyCap(dailyQuota, unlimited)
+	}
+	var override *int
+	if overrideValue.Valid {
+		value := int(overrideValue.Int32)
+		override = &value
+	}
+	var expiresAt *time.Time
+	if overrideExpiresAt.Valid {
+		expiresAt = &overrideExpiresAt.Time
 	}
 	cap := delivery.EffectiveWarmupDailyCap(
 		curveCap, override, expiresAt, now, dailyQuota, unlimited,
@@ -1092,6 +1289,7 @@ func (w *Worker) reserveWarmupSlot(ctx context.Context, row *jobRow) (bool, erro
 			UPDATE delivery_jobs
 			SET status = 'deferred',
 			    next_attempt_at = date_trunc('day', now()) + interval '1 day',
+			    failure_started_at = NULL, processing_started_at = NULL,
 			    nats_publish_claimed_at = NULL,
 			    nats_published_at = NULL,
 			    last_error = 'sending domain warm-up daily cap reached',
@@ -1256,7 +1454,10 @@ func (w *Worker) cancelPendingJob(ctx context.Context, row *jobRow, reason strin
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE delivery_jobs
-		SET status = 'cancelled', last_error = $2, updated_at = now()
+		SET status = 'cancelled', last_error = $2,
+		    failure_started_at = NULL, processing_started_at = NULL,
+		    nats_publish_claimed_at = NULL, nats_published_at = NULL,
+		    updated_at = now()
 		WHERE id = $1 AND status IN ('queued', 'processing', 'deferred')
 	`, row.ID, reason); err != nil {
 		return fmt.Errorf("cancel job: %w", err)
@@ -1304,7 +1505,7 @@ func (w *Worker) schedulerLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			observability.QueuePolls.Inc()
-			resumed, err := w.campaigns.RepublishPending(ctx, 1000)
+			resumed, err := w.campaigns.RepublishPendingWithStaleTimeout(ctx, 1000, w.cfg.NATSStalePublishTimeout)
 			if err != nil {
 				w.logger.Error("resume deferred delivery jobs", "error", err)
 			} else if resumed > 0 {

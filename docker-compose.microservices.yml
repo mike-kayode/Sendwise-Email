@@ -129,6 +129,10 @@ services:
       MIGRATIONS_DIR: /app/services/identity/migrations
       JWT_ISSUER: ${JWT_ISSUER:-email-platform}
       ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
+      IDENTITY_ACCESS_TOKEN_TTL: ${IDENTITY_ACCESS_TOKEN_TTL:-15m}
+      IDENTITY_REFRESH_TOKEN_TTL: ${IDENTITY_REFRESH_TOKEN_TTL:-168h}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ADMIN_IP_ALLOWLIST: ${ADMIN_IP_ALLOWLIST:-}
       APP_BASE_URL: ${APP_BASE_URL:-https://campaign.pipsleague.com}
       MAIL_PROVIDER: ${MAIL_PROVIDER:-smtp}
       SMTP_ADDR: ${SMTP_ADDR:-mailpit:1025}
@@ -175,6 +179,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:-}
       SERVICE_TOKEN: ${SERVICE_TOKEN:?Set SERVICE_TOKEN in .env}
       JWT_ISSUER: ${JWT_ISSUER:-email-platform}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+      ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
+      WORKSPACE_INVITATION_TTL: ${WORKSPACE_INVITATION_TTL:-168h}
       IDENTITY_URL: http://identity:8080
     depends_on:
       workspace-db-migrate:
@@ -198,6 +205,7 @@ services:
       SERVICE_TOKEN: ${SERVICE_TOKEN:?Set SERVICE_TOKEN in .env}
       JWT_SECRET: ${JWT_SECRET:-}
       JWT_ISSUER: ${JWT_ISSUER:-email-platform}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       GATEWAY_AUTH_RATE_PER_MINUTE: ${GATEWAY_AUTH_RATE_PER_MINUTE:-60}
       GATEWAY_AUTH_BURST: ${GATEWAY_AUTH_BURST:-20}
     depends_on:

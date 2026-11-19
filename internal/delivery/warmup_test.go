@@ -76,3 +76,38 @@ func TestValidateWarmupOverrideDuration(t *testing.T) {
 		})
 	}
 }
+
+func TestWarmupGraduationEligibilityThresholds(t *testing.T) {
+	tests := []struct {
+		name         string
+		days         int
+		successes    int64
+		bounced      int64
+		sent         int64
+		wantEligible bool
+	}{
+		{name: "eligible at all thresholds", days: 3, successes: 5000, bounced: 19, sent: 981, wantEligible: true},
+		{name: "too few successful days", days: 2, successes: 5000, bounced: 0, sent: 1000},
+		{name: "too few successful sends", days: 3, successes: 4999, bounced: 0, sent: 1000},
+		{name: "bounce threshold is exclusive", days: 3, successes: 5000, bounced: 20, sent: 980},
+		{name: "no sends in seven days", days: 3, successes: 5000, wantEligible: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := CheckWarmupGraduationEligibility(test.days, test.successes, test.bounced, test.sent)
+			if got.Eligible != test.wantEligible {
+				t.Fatalf("eligibility = %+v, want eligible=%t", got, test.wantEligible)
+			}
+		})
+	}
+}
+
+func TestGraduatedWarmupDailyCapUsesEffectiveQuota(t *testing.T) {
+	quota := int64(9000)
+	if got := GraduatedWarmupDailyCap(&quota, false); got != 9000 {
+		t.Fatalf("graduated cap = %d, want effective quota 9000", got)
+	}
+	if got := GraduatedWarmupDailyCap(nil, true); got != 1<<31-1 {
+		t.Fatalf("graduated cap with unlimited quota = %d, want max integer", got)
+	}
+}

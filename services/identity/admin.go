@@ -196,6 +196,8 @@ func (h *Handler) adminRoutes() http.Handler {
 	mux.Handle("GET /admin/domains/{domainID}/warmup", h.requireAdminMFA(AdminReadDomains, http.HandlerFunc(h.getAdminDomainWarmup)))
 	mux.Handle("PUT /admin/domains/{domainID}/warmup-override", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.setAdminDomainWarmupOverride)))
 	mux.Handle("DELETE /admin/domains/{domainID}/warmup-override", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.clearAdminDomainWarmupOverride)))
+	mux.Handle("POST /admin/domains/{domainID}/warmup-graduation", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.graduateAdminDomainWarmup)))
+	mux.Handle("DELETE /admin/domains/{domainID}/warmup-graduation", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.revokeAdminDomainWarmupGraduation)))
 	mux.Handle("POST /admin/domains/{domainID}/verify", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.recheckAdminDomain)))
 	mux.Handle("PATCH /admin/domains/{domainID}/disabled", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.setAdminDomainDisabled)))
 	mux.Handle("DELETE /admin/domains/{domainID}", h.requireAdminMFA(AdminManageDomains, http.HandlerFunc(h.deleteAdminDomain)))
@@ -205,6 +207,9 @@ func (h *Handler) adminRoutes() http.Handler {
 	mux.Handle("GET /admin/quotas/near-limit", h.requireAdminMFA(AdminViewOverview, http.HandlerFunc(h.getAdminQuotasNearLimit)))
 	mux.Handle("GET /admin/campaigns", h.requireAdminMFA(AdminReadCampaigns, http.HandlerFunc(h.getAdminCampaigns)))
 	mux.Handle("POST /admin/campaigns/{campaignID}/stop", h.requireAdminMFA(AdminManageCampaigns, http.HandlerFunc(h.stopAdminCampaign)))
+	mux.Handle("GET /admin/campaigns/{campaignID}/delivery", h.requireAdminMFA(AdminReadCampaigns, http.HandlerFunc(h.getAdminCampaignDelivery)))
+	mux.Handle("POST /admin/campaigns/{campaignID}/resume-deferred", h.requireAdminMFA(AdminManageCampaigns, http.HandlerFunc(h.resumeAdminCampaignDeferredJobs)))
+	mux.Handle("POST /admin/campaigns/{campaignID}/replay-dead-letter", h.requireAdminMFA(AdminManageCampaigns, http.HandlerFunc(h.replayAdminCampaignDeadLetters)))
 	mux.Handle("GET /admin/transactional-messages", h.requireAdminMFA(AdminReadDelivery, http.HandlerFunc(h.searchAdminTransactionalMessages)))
 	mux.Handle("GET /admin/suppressions", h.requireAdminMFA(AdminManageSuppressions, http.HandlerFunc(h.getAdminSuppressions)))
 	mux.Handle("POST /admin/suppressions", h.requireAdminMFA(AdminManageSuppressions, http.HandlerFunc(h.createAdminSuppression)))
@@ -1681,6 +1686,191 @@ func (h *Handler) clearAdminDomainWarmupOverride(w http.ResponseWriter, r *http.
 	})
 }
 
+func (h *Handler) graduateAdminDomainWarmup(w http.ResponseWriter, r *http.Request) {
+	actor, _ := r.Context().Value(adminActorKey{}).(*adminActor)
+	if !adminMFAIsRecent(actor.session.AdminMFAVerifiedAt, time.Now()) {
+		kit.Error(w, http.StatusForbidden, "admin_reauth_required", "Re-verify your authenticator before graduating warm-up.")
+		return
+	}
+	domainID := r.PathValue("domainID")
+	if _, err := uuid.Parse(domainID); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_domain_id", "The sending domain ID must be a UUID.")
+		return
+	}
+	var request struct {
+		Reason            string `json:"reason"`
+		ConfirmIneligible bool   `json:"confirm_ineligible"`
+	}
+	if err := kit.Decode(w, r, &request); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_warmup_graduation", "Provide a valid warm-up graduation request.")
+		return
+	}
+	request.Reason = strings.TrimSpace(request.Reason)
+	if request.Reason == "" || len(request.Reason) > 500 {
+		kit.Error(w, http.StatusBadRequest, "admin_reason_required", "Provide a reason of 1 to 500 characters.")
+		return
+	}
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain could not be graduated.")
+		return
+	}
+	domain, err := h.legacyAPI.AdminDomain(r.Context(), domainID)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("load domain before warm-up graduation", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain could not be graduated.")
+		return
+	}
+	before, err := h.legacyAPI.AdminDomainWarmup(r.Context(), domainID)
+	if err != nil {
+		h.logger.Error("load warm-up state before graduation", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain could not be graduated.")
+		return
+	}
+	var state struct {
+		Graduated             bool `json:"graduated"`
+		GraduationEligibility struct {
+			Eligible bool `json:"eligible"`
+		} `json:"graduation_eligibility"`
+	}
+	if err := json.Unmarshal(before, &state); err != nil {
+		h.logger.Error("decode warm-up state before graduation", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain could not be graduated.")
+		return
+	}
+	if state.Graduated {
+		kit.Error(w, http.StatusConflict, "warmup_already_graduated", "The sending domain is already graduated.")
+		return
+	}
+	if !state.GraduationEligibility.Eligible && !request.ConfirmIneligible {
+		kit.Error(w, http.StatusConflict, "warmup_graduation_ineligible", "Confirm ineligible graduation explicitly and provide a reason.")
+		return
+	}
+	beforeState, err := warmupGraduationAuditState(before)
+	if err != nil {
+		h.logger.Error("encode warm-up graduation before state", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain could not be graduated.")
+		return
+	}
+	afterState, err := json.Marshal(map[string]any{
+		"graduated": true, "graduated_by": actor.user.ID,
+		"graduated_reason": request.Reason, "eligible_at_change": state.GraduationEligibility.Eligible,
+	})
+	if err != nil {
+		h.logger.Error("encode warm-up graduation after state", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusInternalServerError, "admin_warmup_unavailable", "The domain could not be graduated.")
+		return
+	}
+	record := h.adminAuditRecord(r, actor, "admin_domain_warmup_graduated", "domain", domainID, request.Reason)
+	record.WorkspaceID = &domain.WorkspaceID
+	record.BeforeState = beforeState
+	record.AfterState = afterState
+	if err := h.writeAdminAuditRecord(r, record); err != nil {
+		h.logger.Error("audit domain warm-up graduation", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusInternalServerError, "admin_warmup_unavailable", "The domain could not be graduated.")
+		return
+	}
+	data, err := h.legacyAPI.GraduateAdminDomainWarmup(
+		r.Context(), domainID, actor.user.ID, request.Reason, request.ConfirmIneligible,
+	)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("graduate domain warm-up", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_update_failed", "The domain could not be graduated.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{"data": data, "platform_role": actor.user.PlatformRole})
+}
+
+func (h *Handler) revokeAdminDomainWarmupGraduation(w http.ResponseWriter, r *http.Request) {
+	actor, _ := r.Context().Value(adminActorKey{}).(*adminActor)
+	if !adminMFAIsRecent(actor.session.AdminMFAVerifiedAt, time.Now()) {
+		kit.Error(w, http.StatusForbidden, "admin_reauth_required", "Re-verify your authenticator before revoking warm-up graduation.")
+		return
+	}
+	domainID := r.PathValue("domainID")
+	if _, err := uuid.Parse(domainID); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_domain_id", "The sending domain ID must be a UUID.")
+		return
+	}
+	var request struct {
+		Reason string `json:"reason"`
+	}
+	if err := kit.Decode(w, r, &request); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_warmup_graduation", "Provide a valid warm-up graduation revoke request.")
+		return
+	}
+	request.Reason = strings.TrimSpace(request.Reason)
+	if request.Reason == "" || len(request.Reason) > 500 {
+		kit.Error(w, http.StatusBadRequest, "admin_reason_required", "Provide a reason of 1 to 500 characters.")
+		return
+	}
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain graduation could not be revoked.")
+		return
+	}
+	domain, err := h.legacyAPI.AdminDomain(r.Context(), domainID)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("load domain before warm-up graduation revoke", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain graduation could not be revoked.")
+		return
+	}
+	before, err := h.legacyAPI.AdminDomainWarmup(r.Context(), domainID)
+	if err != nil {
+		h.logger.Error("load warm-up state before graduation revoke", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain graduation could not be revoked.")
+		return
+	}
+	var state struct {
+		Graduated bool `json:"graduated"`
+	}
+	if err := json.Unmarshal(before, &state); err != nil {
+		h.logger.Error("decode warm-up state before graduation revoke", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain graduation could not be revoked.")
+		return
+	}
+	if !state.Graduated {
+		kit.Error(w, http.StatusConflict, "warmup_not_graduated", "The sending domain is not graduated.")
+		return
+	}
+	beforeState, err := warmupGraduationAuditState(before)
+	if err != nil {
+		h.logger.Error("encode warm-up graduation before revoke state", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_unavailable", "The domain graduation could not be revoked.")
+		return
+	}
+	record := h.adminAuditRecord(r, actor, "admin_domain_warmup_graduation_revoked", "domain", domainID, request.Reason)
+	record.WorkspaceID = &domain.WorkspaceID
+	record.BeforeState = beforeState
+	record.AfterState = json.RawMessage(`{"graduated":false}`)
+	if err := h.writeAdminAuditRecord(r, record); err != nil {
+		h.logger.Error("audit domain warm-up graduation revoke", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusInternalServerError, "admin_warmup_unavailable", "The domain graduation could not be revoked.")
+		return
+	}
+	data, err := h.legacyAPI.RevokeAdminDomainWarmupGraduation(r.Context(), domainID, actor.user.ID, request.Reason)
+	if errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_domain_not_found", "Sending domain not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("revoke domain warm-up graduation", "error", err, "domain_id", domainID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_warmup_update_failed", "The domain graduation could not be revoked.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{"data": data, "platform_role": actor.user.PlatformRole})
+}
+
 func (h *Handler) getAdminQuotaDefaults(w http.ResponseWriter, r *http.Request) {
 	if h.legacyAPI == nil {
 		kit.Error(w, http.StatusServiceUnavailable, "admin_quotas_unavailable", "Platform quota defaults could not be loaded.")
@@ -2236,6 +2426,115 @@ func (h *Handler) stopAdminCampaign(w http.ResponseWriter, r *http.Request) {
 	kit.JSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
+func (h *Handler) getAdminCampaignDelivery(w http.ResponseWriter, r *http.Request) {
+	campaignID := r.PathValue("campaignID")
+	if _, err := uuid.Parse(campaignID); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_campaign_id", "The campaign ID must be a UUID.")
+		return
+	}
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_campaigns_unavailable", "Campaign delivery diagnostics could not be loaded.")
+		return
+	}
+	data, err := h.legacyAPI.AdminCampaignDelivery(r.Context(), campaignID)
+	if errors.Is(err, ErrAdminCampaignNotFound) || errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_campaign_not_found", "Campaign not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("load admin campaign delivery diagnostics", "error", err, "campaign_id", campaignID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_campaigns_unavailable", "Campaign delivery diagnostics could not be loaded.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{"data": data})
+}
+
+func (h *Handler) resumeAdminCampaignDeferredJobs(w http.ResponseWriter, r *http.Request) {
+	h.runAdminCampaignDeliveryAction(w, r, "resume_deferred", "resume deferred jobs")
+}
+
+func (h *Handler) replayAdminCampaignDeadLetters(w http.ResponseWriter, r *http.Request) {
+	h.runAdminCampaignDeliveryAction(w, r, "replay_dead_letter", "replay dead-lettered jobs")
+}
+
+func (h *Handler) runAdminCampaignDeliveryAction(w http.ResponseWriter, r *http.Request, action, label string) {
+	actor, _ := r.Context().Value(adminActorKey{}).(*adminActor)
+	if !adminMFAIsRecent(actor.session.AdminMFAVerifiedAt, time.Now()) {
+		kit.Error(w, http.StatusForbidden, "admin_reauth_required", "Re-verify your authenticator before managing campaign delivery jobs.")
+		return
+	}
+	campaignID := r.PathValue("campaignID")
+	if _, err := uuid.Parse(campaignID); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_campaign_id", "The campaign ID must be a UUID.")
+		return
+	}
+	var request struct {
+		Reason string `json:"reason"`
+	}
+	if err := kit.Decode(w, r, &request); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_admin_action", "Provide a valid campaign delivery action request.")
+		return
+	}
+	request.Reason = strings.TrimSpace(request.Reason)
+	if request.Reason == "" || len(request.Reason) > 500 {
+		kit.Error(w, http.StatusBadRequest, "admin_reason_required", "Provide a reason of 1 to 500 characters.")
+		return
+	}
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "admin_campaigns_unavailable", "Campaign delivery jobs could not be updated.")
+		return
+	}
+	before, err := h.legacyAPI.AdminCampaignDelivery(r.Context(), campaignID)
+	if errors.Is(err, ErrAdminCampaignNotFound) || errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_campaign_not_found", "Campaign not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("load campaign delivery state before admin action", "error", err, "campaign_id", campaignID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_campaigns_unavailable", "Campaign delivery jobs could not be updated.")
+		return
+	}
+	var count int64
+	if action == "resume_deferred" {
+		count, err = h.legacyAPI.ResumeAdminCampaignDeferredJobs(r.Context(), campaignID)
+	} else {
+		count, err = h.legacyAPI.ReplayAdminCampaignDeadLetters(r.Context(), campaignID)
+	}
+	if errors.Is(err, ErrAdminCampaignNotFound) || errors.Is(err, ErrNotFound) {
+		kit.Error(w, http.StatusNotFound, "admin_campaign_not_found", "Campaign not found.")
+		return
+	}
+	if err != nil {
+		h.logger.Error("run admin campaign delivery action", "error", err, "campaign_id", campaignID, "action", action)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_campaign_action_failed", "Campaign delivery jobs could not be updated.")
+		return
+	}
+	after, err := h.legacyAPI.AdminCampaignDelivery(r.Context(), campaignID)
+	if err != nil {
+		h.logger.Error("load campaign delivery state after admin action", "error", err, "campaign_id", campaignID)
+		kit.Error(w, http.StatusServiceUnavailable, "admin_campaign_action_failed", "The jobs were updated but the resulting delivery state could not be loaded.")
+		return
+	}
+	beforeState, err := json.Marshal(before)
+	if err != nil {
+		h.logger.Error("encode before campaign delivery audit state", "error", err, "campaign_id", campaignID)
+		kit.Error(w, http.StatusInternalServerError, "admin_campaign_action_failed", "Campaign delivery jobs could not be updated.")
+		return
+	}
+	afterState, err := json.Marshal(map[string]any{"diagnostics": after, "affected": count, "action": action})
+	if err != nil {
+		h.logger.Error("encode after campaign delivery audit state", "error", err, "campaign_id", campaignID)
+		kit.Error(w, http.StatusInternalServerError, "admin_campaign_action_failed", "Campaign delivery jobs could not be updated.")
+		return
+	}
+	if err := h.writeAdminAudit(r, actor, "admin_campaign_"+action, "campaign", campaignID, request.Reason, beforeState, afterState); err != nil {
+		h.logger.Error("audit campaign delivery action", "error", err, "campaign_id", campaignID, "action", action)
+		kit.Error(w, http.StatusInternalServerError, "admin_campaign_action_failed", "The campaign delivery action completed but could not be audited.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{"count": count, "action": label})
+}
+
 func (h *Handler) searchAdminTransactionalMessages(w http.ResponseWriter, r *http.Request) {
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	if len(search) < 2 || len(search) > 100 {
@@ -2570,6 +2869,24 @@ func warmupOverrideAuditState(data []byte) ([]byte, error) {
 	}{Override: state.Override})
 	if err != nil {
 		return nil, fmt.Errorf("encode warm-up override audit state: %w", err)
+	}
+	return result, nil
+}
+
+func warmupGraduationAuditState(data []byte) ([]byte, error) {
+	var state struct {
+		Graduated             bool            `json:"graduated"`
+		GraduatedAt           json.RawMessage `json:"graduated_at"`
+		GraduatedBy           json.RawMessage `json:"graduated_by"`
+		GraduatedReason       string          `json:"graduated_reason"`
+		GraduationEligibility json.RawMessage `json:"graduation_eligibility"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("decode warm-up graduation audit state: %w", err)
+	}
+	result, err := json.Marshal(state)
+	if err != nil {
+		return nil, fmt.Errorf("encode warm-up graduation audit state: %w", err)
 	}
 	return result, nil
 }

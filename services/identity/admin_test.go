@@ -133,6 +133,18 @@ func (f *fakeLegacyAPIAdmin) StopAdminCampaign(_ context.Context, campaignID str
 	return f.campaignStopErr
 }
 
+func (f *fakeLegacyAPIAdmin) AdminCampaignDelivery(context.Context, string) (json.RawMessage, error) {
+	return json.RawMessage(`{"status_counts":{}}`), f.err
+}
+
+func (f *fakeLegacyAPIAdmin) ResumeAdminCampaignDeferredJobs(context.Context, string) (int64, error) {
+	return 0, f.err
+}
+
+func (f *fakeLegacyAPIAdmin) ReplayAdminCampaignDeadLetters(context.Context, string) (int64, error) {
+	return 0, f.err
+}
+
 func (f *fakeLegacyAPIAdmin) SearchAdminTransactionalMessages(_ context.Context, search string, limit, offset int) ([]AdminTransactionalMessage, int, error) {
 	f.transactionalSearch, f.limit, f.offset = search, limit, offset
 	return f.transactionalMessages, f.total, f.err
@@ -171,6 +183,18 @@ func (f *fakeLegacyAPIAdmin) ClearAdminDomainWarmupOverride(
 	_ context.Context, _, _, _ string,
 ) (json.RawMessage, error) {
 	f.warmupOverrideCleared = true
+	return f.domainWarmupData, f.warmupOverrideError
+}
+
+func (f *fakeLegacyAPIAdmin) GraduateAdminDomainWarmup(
+	_ context.Context, _, _, _ string, _ bool,
+) (json.RawMessage, error) {
+	return f.domainWarmupData, f.warmupOverrideError
+}
+
+func (f *fakeLegacyAPIAdmin) RevokeAdminDomainWarmupGraduation(
+	_ context.Context, _, _, _ string,
+) (json.RawMessage, error) {
 	return f.domainWarmupData, f.warmupOverrideError
 }
 

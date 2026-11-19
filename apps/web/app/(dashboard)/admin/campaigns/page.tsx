@@ -34,6 +34,12 @@ type AdminCampaignResponse = {
   pagination: { total: number; limit: number; offset: number };
 };
 
+type CampaignDeliveryDiagnostics = {
+  status_counts: Record<string, number>;
+  common_errors: { error: string; count: number }[];
+  oldest_queued_at: string | null;
+};
+
 const pageSize = 25;
 
 function timeLabel(value?: string | null) {
@@ -50,6 +56,9 @@ export default function AdminCampaignsPage() {
   const [offset, setOffset] = useState(0);
   const [stopCampaign, setStopCampaign] = useState<AdminCampaign | null>(null);
   const [stopReason, setStopReason] = useState("");
+  const [deliveryCampaign, setDeliveryCampaign] = useState<AdminCampaign | null>(null);
+  const [deliveryReason, setDeliveryReason] = useState("");
+  const [deliveryMFACode, setDeliveryMFACode] = useState("");
   const queryClient = useQueryClient();
   const sessionQuery = useQuery({
     queryKey: ["admin-session"],
@@ -69,6 +78,12 @@ export default function AdminCampaignsPage() {
     enabled: Boolean(sessionQuery.data?.mfa_verified),
     retry: false,
   });
+  const deliveryQuery = useQuery({
+    queryKey: ["admin-campaign-delivery", deliveryCampaign?.id],
+    queryFn: () => apiFetch<{ data: CampaignDeliveryDiagnostics }>(`/admin/campaigns/${encodeURIComponent(deliveryCampaign!.id)}/delivery`),
+    enabled: Boolean(deliveryCampaign && sessionQuery.data?.mfa_verified),
+    retry: false,
+  });
   const stopMutation = useMutation({
     mutationFn: () => {
       if (!stopCampaign) throw new Error("Select a campaign to stop.");
@@ -80,6 +95,22 @@ export default function AdminCampaignsPage() {
     onSuccess: async () => {
       setStopCampaign(null);
       setStopReason("");
+      await queryClient.invalidateQueries({ queryKey: ["admin-campaigns"] });
+    },
+  });
+  const deliveryActionMutation = useMutation({
+    mutationFn: async (action: "resume-deferred" | "replay-dead-letter") => {
+      if (!deliveryCampaign) throw new Error("Select a campaign first.");
+      await apiFetch("/admin/mfa/verify", { method: "POST", body: JSON.stringify({ code: deliveryMFACode.trim() }) });
+      return apiFetch<{ count: number }>(`/admin/campaigns/${encodeURIComponent(deliveryCampaign.id)}/${action}`, {
+        method: "POST",
+        body: JSON.stringify({ reason: deliveryReason.trim() }),
+      });
+    },
+    onSuccess: async () => {
+      setDeliveryReason("");
+      setDeliveryMFACode("");
+      await deliveryQuery.refetch();
       await queryClient.invalidateQueries({ queryKey: ["admin-campaigns"] });
     },
   });
@@ -156,6 +187,9 @@ export default function AdminCampaignsPage() {
                   <tr key={campaign.id}>
                     <td className="px-4 py-3">
                       <p className="font-medium text-slate-900">{campaign.name}</p>
+                      <button type="button" onClick={() => { setDeliveryCampaign(campaign); setDeliveryReason(""); setDeliveryMFACode(""); deliveryActionMutation.reset(); }} className="mt-1 text-xs font-medium text-emerald-800 underline">
+                        Delivery jobs
+                      </button>
                       <Link href={`/admin/workspaces/${encodeURIComponent(campaign.workspace_id)}`} className="mt-1 inline-block text-xs text-emerald-800 hover:underline">
                         {campaign.workspace_name} · /{campaign.workspace_slug}
                       </Link>
@@ -222,6 +256,58 @@ export default function AdminCampaignsPage() {
                 {stopMutation.isPending ? "Stopping..." : "Stop campaign"}
               </button>
             </div>
+          </section>
+        </div>
+      ) : null}
+      {deliveryCampaign ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="presentation">
+          <section role="dialog" aria-modal="true" aria-labelledby="campaign-delivery-title" className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-5 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 id="campaign-delivery-title" className="text-lg font-semibold text-slate-900">Delivery jobs</h2>
+                <p className="mt-1 text-sm text-slate-600">{deliveryCampaign.name}</p>
+              </div>
+              <button type="button" onClick={() => setDeliveryCampaign(null)} className="rounded-lg px-3 py-1.5 text-sm text-slate-700 ring-1 ring-slate-200">Close</button>
+            </div>
+            {deliveryQuery.isLoading ? <p className="mt-4 text-sm text-slate-500">Loading delivery diagnostics...</p> : null}
+            {deliveryQuery.error ? <p role="alert" className="mt-4 text-sm text-rose-700">Diagnostics unavailable: {deliveryQuery.error.message}</p> : null}
+            {deliveryQuery.data ? (
+              <div className="mt-4 space-y-4">
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {Object.entries(deliveryQuery.data.data.status_counts).map(([jobStatus, count]) => (
+                    <div key={jobStatus} className="rounded-lg bg-slate-50 p-3 text-sm">
+                      <span className="capitalize text-slate-500">{jobStatus}</span>
+                      <span className="ml-2 font-semibold text-slate-900">{count.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-slate-600">Oldest queued job: {timeLabel(deliveryQuery.data.data.oldest_queued_at)}</p>
+                <div>
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Common delivery errors</h3>
+                  {deliveryQuery.data.data.common_errors.length ? (
+                    <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                      {deliveryQuery.data.data.common_errors.map((entry) => <li key={entry.error}>{entry.count.toLocaleString()} × {entry.error}</li>)}
+                    </ul>
+                  ) : <p className="mt-2 text-xs text-slate-500">No delivery errors recorded.</p>}
+                </div>
+                {session.platform_role === "super_admin" ? (
+                  <div className="border-t border-slate-100 pt-4">
+                    <label className="block text-xs font-medium text-slate-700">Required reason
+                      <textarea value={deliveryReason} onChange={(event) => setDeliveryReason(event.target.value)} maxLength={500} rows={2} className="mt-1 w-full rounded-lg border border-slate-200 p-3 text-sm" />
+                    </label>
+                    <label className="mt-3 block text-xs font-medium text-slate-700">Authenticator or recovery code
+                      <input value={deliveryMFACode} onChange={(event) => setDeliveryMFACode(event.target.value)} autoComplete="one-time-code" className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" />
+                    </label>
+                    {deliveryActionMutation.error ? <p role="alert" className="mt-3 text-sm text-rose-700">{deliveryActionMutation.error.message}</p> : null}
+                    {deliveryActionMutation.data ? <p role="status" className="mt-3 text-sm text-emerald-800">{deliveryActionMutation.data.count.toLocaleString()} jobs updated.</p> : null}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button type="button" disabled={!deliveryReason.trim() || !deliveryMFACode.trim() || deliveryActionMutation.isPending} onClick={() => { if (window.confirm("Make deferred jobs for this sending campaign due now? This action is audited.")) deliveryActionMutation.mutate("resume-deferred"); }} className="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">Resume deferred jobs</button>
+                      <button type="button" disabled={!deliveryReason.trim() || !deliveryMFACode.trim() || deliveryActionMutation.isPending} onClick={() => { if (window.confirm("Replay up to 1,000 unsubmitted dead-lettered jobs? Replay is idempotent and audited.")) deliveryActionMutation.mutate("replay-dead-letter"); }} className="rounded-lg bg-amber-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">Replay dead-lettered jobs</button>
+                    </div>
+                  </div>
+                ) : <p className="border-t border-slate-100 pt-3 text-xs text-slate-500">Support admins can inspect diagnostics but cannot change delivery jobs.</p>}
+              </div>
+            ) : null}
           </section>
         </div>
       ) : null}

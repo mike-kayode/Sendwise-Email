@@ -55,7 +55,7 @@ func (p *SMTPPool) Send(ctx context.Context, message Message) (*Result, error) {
 	}
 	connection, err := p.acquire(ctx)
 	if err != nil {
-		return nil, err
+		return nil, infrastructureError(err)
 	}
 	defer p.releaseSlot()
 	deadline := time.Now().Add(p.dialTimeout)
@@ -64,7 +64,7 @@ func (p *SMTPPool) Send(ctx context.Context, message Message) (*Result, error) {
 	}
 	if err := connection.conn.SetDeadline(deadline); err != nil {
 		p.discard(connection)
-		return nil, fmt.Errorf("set smtp deadline: %w", err)
+		return nil, infrastructureError(fmt.Errorf("set smtp deadline: %w", err))
 	}
 
 	envelopeSender := message.EnvelopeFrom
@@ -78,7 +78,7 @@ func (p *SMTPPool) Send(ctx context.Context, message Message) (*Result, error) {
 	}
 	if err := connection.client.Mail(from); err != nil {
 		p.discard(connection)
-		return nil, classifySMTP(fmt.Errorf("smtp mail from: %w", err))
+		return nil, infrastructureError(classifySMTP(fmt.Errorf("smtp mail from: %w", err)))
 	}
 	to, err := parseEnvelopeAddress(message.To)
 	if err != nil {
@@ -92,20 +92,20 @@ func (p *SMTPPool) Send(ctx context.Context, message Message) (*Result, error) {
 	writer, err := connection.client.Data()
 	if err != nil {
 		p.discard(connection)
-		return nil, classifySMTP(fmt.Errorf("smtp data: %w", err))
+		return nil, infrastructureError(classifySMTP(fmt.Errorf("smtp data: %w", err)))
 	}
 	if _, err := io.Copy(writer, bytes.NewReader(raw)); err != nil {
 		_ = writer.Close()
 		p.discard(connection)
-		return nil, fmt.Errorf("write message: %w", err)
+		return nil, infrastructureError(fmt.Errorf("write message: %w", err))
 	}
 	if err := writer.Close(); err != nil {
 		p.discard(connection)
-		return nil, classifySMTP(fmt.Errorf("finish message: %w", err))
+		return nil, infrastructureError(classifySMTP(fmt.Errorf("finish message: %w", err)))
 	}
 	if err := connection.client.Reset(); err != nil {
 		p.discard(connection)
-		return nil, classifySMTP(fmt.Errorf("reset smtp transaction: %w", err))
+		return &Result{MessageID: formatMessageID(message.ID), Accepted: true}, nil
 	}
 	p.release(connection)
 	return &Result{MessageID: formatMessageID(message.ID), Accepted: true}, nil
@@ -144,7 +144,7 @@ func (p *SMTPPool) dial(ctx context.Context) (*smtpConnection, error) {
 	dialer := &net.Dialer{Timeout: p.dialTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", p.addr)
 	if err != nil {
-		return nil, fmt.Errorf("dial smtp: %w", err)
+		return nil, infrastructureError(fmt.Errorf("dial smtp: %w", err))
 	}
 	deadline := time.Now().Add(p.dialTimeout)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
@@ -152,17 +152,17 @@ func (p *SMTPPool) dial(ctx context.Context) (*smtpConnection, error) {
 	}
 	if err := conn.SetDeadline(deadline); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("set smtp handshake deadline: %w", err)
+		return nil, infrastructureError(fmt.Errorf("set smtp handshake deadline: %w", err))
 	}
 	client, err := smtp.NewClient(conn, p.host)
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("create smtp client: %w", err)
+		return nil, infrastructureError(fmt.Errorf("create smtp client: %w", err))
 	}
 	hasSTARTTLS, _ := client.Extension("STARTTLS")
 	if err := ensureSTARTTLS(hasSTARTTLS, p.tlsInsecure); err != nil {
 		_ = client.Close()
-		return nil, err
+		return nil, infrastructureError(err)
 	}
 	if hasSTARTTLS {
 		if err := client.StartTLS(&tls.Config{
@@ -171,7 +171,7 @@ func (p *SMTPPool) dial(ctx context.Context) (*smtpConnection, error) {
 			InsecureSkipVerify: p.tlsInsecure,
 		}); err != nil {
 			_ = client.Close()
-			return nil, fmt.Errorf("starttls: %w", err)
+			return nil, infrastructureError(fmt.Errorf("starttls: %w", err))
 		}
 	}
 	if p.username != "" {
@@ -183,12 +183,12 @@ func (p *SMTPPool) dial(ctx context.Context) (*smtpConnection, error) {
 					Message:   fmt.Sprintf("smtp auth: %v", err),
 				}}
 			}
-			return nil, fmt.Errorf("smtp auth: %w", err)
+			return nil, infrastructureError(fmt.Errorf("smtp auth: %w", err))
 		}
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("clear smtp handshake deadline: %w", err)
+		return nil, infrastructureError(fmt.Errorf("clear smtp handshake deadline: %w", err))
 	}
 	return &smtpConnection{client: client, conn: conn}, nil
 }

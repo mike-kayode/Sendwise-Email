@@ -2439,7 +2439,7 @@ func TestTransactionalAPIKeySendReadRotateAndRevoke(t *testing.T) {
 	if err := json.Unmarshal(createKeyResponse.Body.Bytes(), &createdKey); err != nil {
 		t.Fatalf("decode transactional API key: %v", err)
 	}
-	if createdKey.PlainKey == "" || !strings.HasPrefix(createdKey.PlainKey, "sw_tx_test_") {
+	if createdKey.PlainKey == "" || !strings.HasPrefix(createdKey.PlainKey, "fake_tx_test_") {
 		t.Fatalf("created key did not return a one-time test secret: %+v", createdKey)
 	}
 

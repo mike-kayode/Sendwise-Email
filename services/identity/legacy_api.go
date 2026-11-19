@@ -107,6 +107,9 @@ type LegacyAPIAdminClient interface {
 	SetAdminWorkspaceStatus(ctx context.Context, workspaceID, expectedStatus, status string) (string, error)
 	AdminCampaigns(ctx context.Context, search, status, workspaceID string, limit, offset int) ([]AdminCampaign, int, error)
 	StopAdminCampaign(ctx context.Context, campaignID string) error
+	AdminCampaignDelivery(ctx context.Context, campaignID string) (json.RawMessage, error)
+	ResumeAdminCampaignDeferredJobs(ctx context.Context, campaignID string) (int64, error)
+	ReplayAdminCampaignDeadLetters(ctx context.Context, campaignID string) (int64, error)
 	SearchAdminTransactionalMessages(ctx context.Context, search string, limit, offset int) ([]AdminTransactionalMessage, int, error)
 	AdminOperationalMetrics(ctx context.Context) (AdminOperationalMetrics, error)
 	AdminDomainQuotas(ctx context.Context, domainID string) (json.RawMessage, error)
@@ -114,6 +117,8 @@ type LegacyAPIAdminClient interface {
 	AdminDomainWarmup(ctx context.Context, domainID string) (json.RawMessage, error)
 	SetAdminDomainWarmupOverride(ctx context.Context, domainID, updatedBy string, dailyCap int, expiresAt time.Time, reason string) (json.RawMessage, error)
 	ClearAdminDomainWarmupOverride(ctx context.Context, domainID, updatedBy, reason string) (json.RawMessage, error)
+	GraduateAdminDomainWarmup(ctx context.Context, domainID, updatedBy, reason string, confirmIneligible bool) (json.RawMessage, error)
+	RevokeAdminDomainWarmupGraduation(ctx context.Context, domainID, updatedBy, reason string) (json.RawMessage, error)
 	AdminQuotaDefaults(ctx context.Context) (json.RawMessage, error)
 	SetAdminQuotaDefaults(ctx context.Context, updatedBy, reason string, defaults json.RawMessage) (json.RawMessage, error)
 	AdminQuotasNearLimit(ctx context.Context) (json.RawMessage, error)
@@ -204,6 +209,30 @@ func (c *httpLegacyAPIAdminClient) ClearAdminDomainWarmupOverride(
 	}
 	return c.adminQuotaRequest(ctx, http.MethodDelete,
 		"/internal/admin/domains/"+url.PathEscape(domainID)+"/warmup-override", body)
+}
+
+func (c *httpLegacyAPIAdminClient) GraduateAdminDomainWarmup(
+	ctx context.Context, domainID, updatedBy, reason string, confirmIneligible bool,
+) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]any{
+		"updated_by": updatedBy, "reason": reason, "confirm_ineligible": confirmIneligible,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode warm-up graduation request: %w", err)
+	}
+	return c.adminQuotaRequest(ctx, http.MethodPost,
+		"/internal/admin/domains/"+url.PathEscape(domainID)+"/warmup-graduation", body)
+}
+
+func (c *httpLegacyAPIAdminClient) RevokeAdminDomainWarmupGraduation(
+	ctx context.Context, domainID, updatedBy, reason string,
+) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]any{"updated_by": updatedBy, "reason": reason})
+	if err != nil {
+		return nil, fmt.Errorf("encode warm-up graduation revoke request: %w", err)
+	}
+	return c.adminQuotaRequest(ctx, http.MethodDelete,
+		"/internal/admin/domains/"+url.PathEscape(domainID)+"/warmup-graduation", body)
 }
 
 func (c *httpLegacyAPIAdminClient) AdminQuotaDefaults(ctx context.Context) (json.RawMessage, error) {
@@ -565,6 +594,32 @@ func (c *httpLegacyAPIAdminClient) StopAdminCampaign(ctx context.Context, campai
 	default:
 		return fmt.Errorf("legacy API admin campaign stop returned %d", response.StatusCode)
 	}
+}
+
+func (c *httpLegacyAPIAdminClient) AdminCampaignDelivery(ctx context.Context, campaignID string) (json.RawMessage, error) {
+	return c.adminQuotaRequest(ctx, http.MethodGet,
+		"/internal/admin/campaigns/"+url.PathEscape(campaignID)+"/delivery", nil)
+}
+
+func (c *httpLegacyAPIAdminClient) ResumeAdminCampaignDeferredJobs(ctx context.Context, campaignID string) (int64, error) {
+	return c.adminCampaignDeliveryAction(ctx, campaignID, "resume-deferred", "resumed")
+}
+
+func (c *httpLegacyAPIAdminClient) ReplayAdminCampaignDeadLetters(ctx context.Context, campaignID string) (int64, error) {
+	return c.adminCampaignDeliveryAction(ctx, campaignID, "replay-dead-letter", "replayed")
+}
+
+func (c *httpLegacyAPIAdminClient) adminCampaignDeliveryAction(ctx context.Context, campaignID, action, field string) (int64, error) {
+	data, err := c.adminQuotaRequest(ctx, http.MethodPost,
+		"/internal/admin/campaigns/"+url.PathEscape(campaignID)+"/"+action, nil)
+	if err != nil {
+		return 0, err
+	}
+	var result map[string]int64
+	if err := json.Unmarshal(data, &result); err != nil {
+		return 0, fmt.Errorf("decode admin campaign %s result: %w", action, err)
+	}
+	return result[field], nil
 }
 
 func (c *httpLegacyAPIAdminClient) SearchAdminTransactionalMessages(ctx context.Context, search string, limit, offset int) ([]AdminTransactionalMessage, int, error) {

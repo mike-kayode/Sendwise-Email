@@ -22,6 +22,8 @@ platform role.
 | Change per-domain quotas and platform defaults | No | Yes; requires a typed reason, recent MFA, and before/after audit state |
 | Read domain warm-up state | Yes | Yes |
 | Set or clear a domain warm-up cap override | No | Yes; requires a typed reason, recent MFA, and before/after audit state |
+| Graduate or revoke warm-up graduation | No | Yes; requires eligibility review or explicit ineligible confirmation, fresh MFA, typed reason, and audit |
+| Inspect campaign delivery jobs and recover stuck jobs | Support can read | Super admin only; resume/replay writes require fresh MFA, typed reason, and audit |
 | View, add, or remove global suppression records | No | Yes; writes are reasoned, recent-MFA protected, and audited |
 | Stop a running campaign | No | Yes, reasoned, recent-MFA protected, and audited |
 | Manage platform settings, roles, and customer operations | No | Yes |
@@ -197,6 +199,13 @@ Currently implemented security endpoints are:
   by the domain's effective daily marketing quota unless that quota is
   unlimited. It does not bypass other quotas or sending safeguards; expiry is
   evaluated on reads and sends without a cron job.
+- `POST /api/v1/admin/domains/{domainID}/warmup-graduation` — super-admin-only
+  permanent warm-up graduation until manually or automatically revoked. Eligible
+  domains require at least three successful days, 5,000 successful sends, and a
+  seven-day bounce rate below 2%. An ineligible graduation requires extra UI
+  confirmation. Fresh MFA and a typed reason are required.
+- `DELETE /api/v1/admin/domains/{domainID}/warmup-graduation` — super-admin-only
+  manual revoke with fresh MFA and a typed reason.
 - `GET /api/v1/admin/quota-defaults` and `PUT /api/v1/admin/quota-defaults` —
   read or change the marketing and transactional platform defaults. Writes are
   super_admin-only and require fresh MFA, a reason, and before/after audit

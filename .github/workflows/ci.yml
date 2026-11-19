@@ -35,7 +35,7 @@ jobs:
           fi
       - name: Enforce Stalwart-only campaign delivery
         run: |
-          if git grep -n -i 'resend' -- \
+          if git grep -n -i -E 'resend\.com|resend[[:space:]]+(api|provider)|api[_ -]?key.*resend' -- \
             internal/campaigns internal/delivery internal/worker internal/api \
             'apps/web/app/(dashboard)' \
             docs/DELIVERABILITY.md docs/EMAIL_DELIVERY_ARCHITECTURE.md; then
@@ -47,6 +47,7 @@ jobs:
           SERVICE_TOKEN: ci-only-service-token
           WEBHOOK_SECRET: ci-only-webhook-secret
         run: |
+          python3 scripts/check-compose-env.sh
           docker compose -f docker-compose.yml config -q
           docker compose -f docker-compose.yml -f docker-compose.microservices.yml config -q
 

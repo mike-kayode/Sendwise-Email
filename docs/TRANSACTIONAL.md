@@ -64,6 +64,15 @@ read/send time; deferred campaign deliveries remain eligible for the next
 daily window. Transactional API and SMTP deliveries continue to use their
 transactional quotas and do not use the marketing warm-up curve.
 
+## Docker SMTP addressing
+
+When the worker runs in Docker and connects to the co-located Stalwart service,
+set `SMTP_ADDR=stalwart:587` and keep `SMTP_HOST` as the public relay hostname
+used in the TLS certificate check. Container connections must not depend on the
+host's public IP. `SMTP_POOL_SIZE`, `MAX_DELIVERY_ATTEMPTS`, `MAX_MESSAGE_AGE`
+and `NATS_STALE_PUBLISH_TIMEOUT` are passed to worker containers through
+docker-compose and should match `.env.example` defaults.
+
 ## Customer quota endpoints
 
 - `GET /api/v1/domains/{id}/quotas` returns effective limits, current daily,

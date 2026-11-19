@@ -49,10 +49,17 @@ var (
 			Help: "Number of times the campaign scheduler has polled for due campaigns.",
 		},
 	)
+
+	SMTPBreakerOpen = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "smtp_circuit_breaker_open",
+			Help: "Whether the worker SMTP circuit breaker is open.",
+		},
+	)
 )
 
 func init() {
-	prometheus.MustRegister(HTTPRequests, HTTPDuration, DeliveryJobs, ProviderFallbacks, QueuePolls)
+	prometheus.MustRegister(HTTPRequests, HTTPDuration, DeliveryJobs, ProviderFallbacks, QueuePolls, SMTPBreakerOpen)
 }
 
 func MetricsHandler() http.Handler {

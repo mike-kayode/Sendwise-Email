@@ -778,6 +778,26 @@ upgrade notice. No production service or database was changed. Before rollout,
 follow the server verification checklist for migration `0034` and
 authorization, effective-cap, expiry, deferral, and audit behavior.
 
+## Delivery reliability and warm-up graduation
+
+Migrations `0036_delivery_reliability.sql` and
+`0037_domain_warmup_graduation.sql` add processing/retry-age claims and
+per-domain graduation state. Due and stale jobs resume through atomic claims;
+SMTP infrastructure failures use a circuit breaker and do not consume recipient
+attempts; age limits apply only to transient delivery failures.
+
+Graduated domains use the effective marketing daily quota instead of the warm-up
+curve. Automatic revocation occurs above a 2% seven-day bounce rate or 0.05%
+complaint rate. Super admins can graduate eligible or explicitly confirmed
+ineligible domains, and manually revoke graduation, with fresh MFA, typed
+reasons and before/after audit entries. Campaign diagnostics expose deferred,
+failed, and stale error state and provide audited recovery actions.
+
+One new environment key is used by the worker:
+`NATS_STALE_PUBLISH_TIMEOUT=10m`. Docker compose pass-through was updated for
+Go config keys, and campaign workers are documented to use `stalwart:587` for
+`SMTP_ADDR` while keeping `SMTP_HOST` as the public certificate hostname.
+
 ## Per-domain sending quotas — 2026-11-14
 
 **Locally verified against PostgreSQL; not production verified.** Migration

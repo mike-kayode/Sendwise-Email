@@ -3,12 +3,97 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/config"
 	"github.com/khayode/email-platform/internal/testutil"
 )
+
+type noDuplicatePublisher struct {
+	published int
+}
+
+func (p *noDuplicatePublisher) Publish(context.Context, string, []byte) error {
+	p.published++
+	return fmt.Errorf("unexpected publish")
+}
+
+func TestDeadLetterFailureIsAtomicAndNotRepublished(t *testing.T) {
+	pool := testutil.NewPostgres(t)
+	ctx := context.Background()
+	var organizationID, contactID, campaignID, jobID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO organizations (name, slug)
+		VALUES ('Dead letter regression', 'dead-letter-' || gen_random_uuid()::text)
+		RETURNING id::text
+	`).Scan(&organizationID); err != nil {
+		t.Fatalf("create test organization: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO contacts (organization_id, email, status)
+		VALUES ($1, 'recipient@example.test', 'subscribed')
+		RETURNING id::text
+	`, organizationID).Scan(&contactID); err != nil {
+		t.Fatalf("create test contact: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO campaigns (organization_id, name, subject, sender_name, sender_email, content, status)
+		VALUES ($1, 'Dead letter test', 'Test', 'Sendwise', 'sender@example.test', '{}'::jsonb, 'sending')
+		RETURNING id::text
+	`, organizationID).Scan(&campaignID); err != nil {
+		t.Fatalf("create test campaign: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status, attempts)
+		VALUES ($1, $2, $3, 'dead-letter@example.test', 'processing', 2)
+		RETURNING id::text
+	`, organizationID, campaignID, contactID).Scan(&jobID); err != nil {
+		t.Fatalf("create exhausted delivery job: %v", err)
+	}
+
+	worker := &Worker{pool: pool, logger: slog.Default()}
+	row := &jobRow{
+		ID: jobID, OrganizationID: organizationID, CampaignID: campaignID,
+		ContactID: contactID, Email: "recipient@example.test", Attempts: 2,
+	}
+	if err := worker.deadLetterJob(ctx, row, "max_attempts_exceeded", errors.New("fake SMTP failure")); err != nil {
+		t.Fatalf("deadLetterJob(): %v", err)
+	}
+	var status string
+	var attempts int
+	if err := pool.QueryRow(ctx, `SELECT status, attempts FROM delivery_jobs WHERE id = $1`, jobID).Scan(&status, &attempts); err != nil {
+		t.Fatalf("load failed job: %v", err)
+	}
+	if status != "failed" || attempts != 3 {
+		t.Fatalf("delivery job status=%q attempts=%d, want failed and 3", status, attempts)
+	}
+	var deadLetterRows, eventRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM dead_letter_queue WHERE delivery_job_id = $1`, jobID).Scan(&deadLetterRows); err != nil {
+		t.Fatalf("count dead-letter rows: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM message_events
+		WHERE delivery_job_id = $1 AND event_type = 'failed'
+		  AND metadata->>'reason' = 'max_attempts_exceeded'
+	`, jobID).Scan(&eventRows); err != nil {
+		t.Fatalf("count dead-letter message events: %v", err)
+	}
+	if deadLetterRows != 1 || eventRows != 1 {
+		t.Fatalf("dead-letter rows=%d event rows=%d, want one each", deadLetterRows, eventRows)
+	}
+	publisher := &noDuplicatePublisher{}
+	service := campaigns.NewService(pool, publisher, slog.Default(), 3, false)
+	if published, err := service.RepublishPending(ctx, 1000); err != nil || published != 0 {
+		t.Fatalf("RepublishPending() = %d, %v; want failed job not republished", published, err)
+	}
+	if publisher.published != 0 {
+		t.Fatalf("publisher received %d failed-job publishes, want zero", publisher.published)
+	}
+}
 
 func TestCheckTenantQuotaRejectsSuspendedWorkspace(t *testing.T) {
 	pool := testutil.NewPostgres(t)

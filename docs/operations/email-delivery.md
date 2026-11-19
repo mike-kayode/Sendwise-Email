@@ -127,6 +127,25 @@ Automatic operational pause on abuse signals is supported via
 - Per-domain concurrency controls, tenant quotas, and automatic operational pause on abuse signals
   are implemented in the worker and should still be validated against production configuration.
 
+## Delivery reliability controls
+- Migrations `0036_delivery_reliability.sql` and `0037_domain_warmup_graduation.sql` add delivery
+  failure-age and processing lease fields, and per-domain warm-up graduation fields.
+- `MAX_MESSAGE_AGE` applies only to repeated transient delivery failures, measured from
+  `failure_started_at`. Warm-up, quota, pause, suspended-workspace and admin deferrals clear the
+  delivery-age clock and never expire for age. A scheduler wake or override change restarts the
+  eligible window.
+- SMTP connection, greeting EOF, TLS and relay-infrastructure failures do not consume recipient
+  delivery attempts or dead-letter jobs. The SMTP circuit breaker stops job intake after five
+  consecutive infrastructure failures in 30 seconds, doubles the cool-down from 30 seconds to at
+  most five minutes, and allows one probe to recover.
+- Due deferred jobs and stale/processing/queued jobs are claimed atomically with
+  `FOR UPDATE SKIP LOCKED`. Publishing is deduplicated with the delivery-job ID as the NATS
+  message ID. `NATS_STALE_PUBLISH_TIMEOUT` defaults to ten minutes.
+- Dead-letter replay is idempotent. Replay resets attempts and the failure-age clock and only
+  requeues jobs that have not already submitted, accepted or delivered.
+- Docker campaign workers must use `stalwart:587` for `SMTP_ADDR` and the public relay hostname
+  for `SMTP_HOST` (TLS certificate identity). Do not point the worker at the host's public IP.
+
 ## Compliance
 - RFC 8058 one-click unsubscribe: `List-Unsubscribe` and `List-Unsubscribe-Post` headers on
   marketing messages; clear unsubscribe link in every email.

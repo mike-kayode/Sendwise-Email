@@ -98,6 +98,12 @@ export default function CampaignDetailPage() {
           {alert.message}
         </div>
       ))}
+      {campaign.delivery_wait ? (
+        <div role="status" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          <p className="font-semibold">{campaign.delivery_wait.message}</p>
+          <p className="mt-1 text-xs">{formatNumber(campaign.delivery_wait.deferred_count)} recipients are waiting for sending capacity.</p>
+        </div>
+      ) : null}
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Recipients" value={recipientTotal} icon={<Users className="h-4 w-4" />} />

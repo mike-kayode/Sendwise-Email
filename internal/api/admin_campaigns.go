@@ -30,6 +30,212 @@ type adminCampaign struct {
 	CreatedAt      time.Time  `json:"created_at"`
 }
 
+type adminCampaignDeliveryDiagnostics struct {
+	StatusCounts map[string]int `json:"status_counts"`
+	CommonErrors []struct {
+		Error string `json:"error"`
+		Count int    `json:"count"`
+	} `json:"common_errors"`
+	OldestQueuedAt *time.Time `json:"oldest_queued_at"`
+}
+
+func (s *Server) getAdminCampaignDelivery(w http.ResponseWriter, r *http.Request) {
+	campaignID := r.PathValue("id")
+	if _, err := uuid.Parse(campaignID); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_campaign_id", "The campaign ID is invalid.")
+		return
+	}
+	var exists bool
+	if err := s.pool.QueryRow(r.Context(), `SELECT EXISTS (SELECT 1 FROM campaigns WHERE id = $1)`, campaignID).Scan(&exists); err != nil {
+		s.logger.Error("check admin campaign delivery target", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+		return
+	}
+	if !exists {
+		httpx.Error(w, http.StatusNotFound, "campaign_not_found", "The campaign could not be found.")
+		return
+	}
+	var result adminCampaignDeliveryDiagnostics
+	result.StatusCounts = make(map[string]int)
+	if err := s.pool.QueryRow(r.Context(), `
+		SELECT min(created_at) FILTER (WHERE status = 'queued')
+		FROM delivery_jobs
+		WHERE campaign_id = $1
+	`, campaignID).Scan(&result.OldestQueuedAt); err != nil {
+		s.logger.Error("load oldest queued admin campaign job", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+		return
+	}
+	rows, err := s.pool.Query(r.Context(), `
+		SELECT status, count(*)::int
+		FROM delivery_jobs
+		WHERE campaign_id = $1
+		GROUP BY status
+	`, campaignID)
+	if err != nil {
+		s.logger.Error("load admin campaign job counts", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+		return
+	}
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			rows.Close()
+			s.logger.Error("scan admin campaign job counts", "error", err, "campaign_id", campaignID)
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+			return
+		}
+		result.StatusCounts[status] = count
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		s.logger.Error("iterate admin campaign job counts", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+		return
+	}
+	rows.Close()
+	errorsRows, err := s.pool.Query(r.Context(), `
+		SELECT last_error, count(*)::int
+		FROM delivery_jobs
+		WHERE campaign_id = $1 AND NULLIF(btrim(last_error), '') IS NOT NULL
+		GROUP BY last_error
+		ORDER BY count(*) DESC, last_error
+		LIMIT 5
+	`, campaignID)
+	if err != nil {
+		s.logger.Error("load common admin campaign delivery errors", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+		return
+	}
+	result.CommonErrors = make([]struct {
+		Error string `json:"error"`
+		Count int    `json:"count"`
+	}, 0, 5)
+	for errorsRows.Next() {
+		var entry struct {
+			Error string `json:"error"`
+			Count int    `json:"count"`
+		}
+		if err := errorsRows.Scan(&entry.Error, &entry.Count); err != nil {
+			errorsRows.Close()
+			s.logger.Error("scan common admin campaign delivery errors", "error", err, "campaign_id", campaignID)
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+			return
+		}
+		result.CommonErrors = append(result.CommonErrors, entry)
+	}
+	if err := errorsRows.Err(); err != nil {
+		errorsRows.Close()
+		s.logger.Error("iterate common admin campaign delivery errors", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+		return
+	}
+	errorsRows.Close()
+	httpx.JSON(w, http.StatusOK, map[string]any{"data": result})
+}
+
+func (s *Server) resumeAdminCampaignDeferredJobs(w http.ResponseWriter, r *http.Request) {
+	campaignID := r.PathValue("id")
+	if _, err := uuid.Parse(campaignID); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_campaign_id", "The campaign ID is invalid.")
+		return
+	}
+	tag, err := s.pool.Exec(r.Context(), `
+		UPDATE delivery_jobs dj
+		SET next_attempt_at = now(), failure_started_at = NULL,
+		    nats_publish_claimed_at = NULL, nats_published_at = NULL,
+		    updated_at = now()
+		FROM campaigns c
+		WHERE dj.campaign_id = $1 AND dj.organization_id = c.organization_id
+		  AND c.id = dj.campaign_id AND c.status = 'sending'
+		  AND dj.status = 'deferred'
+	`, campaignID)
+	if err != nil {
+		s.logger.Error("resume deferred admin campaign jobs", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not resume deferred campaign jobs.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]int64{"resumed": tag.RowsAffected()})
+}
+
+func (s *Server) replayAdminCampaignDeadLetters(w http.ResponseWriter, r *http.Request) {
+	campaignID := r.PathValue("id")
+	if _, err := uuid.Parse(campaignID); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_campaign_id", "The campaign ID is invalid.")
+		return
+	}
+	tx, err := s.pool.Begin(r.Context())
+	if err != nil {
+		s.logger.Error("begin admin campaign dead-letter replay", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not replay dead-lettered campaign jobs.")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var replayed int64
+	err = tx.QueryRow(r.Context(), `
+		WITH candidates AS (
+			SELECT dlq.id, dj.id AS job_id, dj.organization_id, dj.campaign_id, dj.contact_id
+			FROM dead_letter_queue dlq
+			JOIN delivery_jobs dj ON dj.id = dlq.delivery_job_id
+			JOIN campaigns c ON c.id = dj.campaign_id
+			    AND c.organization_id = dj.organization_id AND c.status = 'sending'
+			WHERE dj.campaign_id = $1 AND dlq.replayed_at IS NULL
+			  AND dj.status = 'failed'
+			  AND NOT EXISTS (
+			      SELECT 1 FROM message_events prior
+			      WHERE prior.delivery_job_id = dj.id
+			        AND prior.event_type IN ('submitted', 'accepted', 'delivered')
+			  )
+			  AND NOT EXISTS (
+			      SELECT 1 FROM dead_letter_queue earlier
+			      WHERE earlier.delivery_job_id = dj.id AND earlier.replayed_at IS NULL
+			        AND (earlier.created_at, earlier.id) < (dlq.created_at, dlq.id)
+			  )
+			ORDER BY dlq.created_at, dlq.id
+			LIMIT 1000
+			FOR UPDATE OF dlq, dj SKIP LOCKED
+		),
+		replayed AS (
+			UPDATE delivery_jobs dj
+			SET status = 'queued', attempts = 0, failure_started_at = NULL,
+			    dead_lettered_at = NULL, next_attempt_at = now(),
+			    nats_publish_claimed_at = NULL, nats_published_at = NULL,
+			    processing_started_at = NULL, last_error = NULL, updated_at = now()
+			FROM candidates
+			WHERE dj.id = candidates.job_id
+			RETURNING dj.id, dj.campaign_id, dj.contact_id
+		),
+		marked AS (
+			UPDATE dead_letter_queue dlq
+			SET replayed_at = now()
+			FROM replayed
+			WHERE dlq.delivery_job_id = replayed.id AND dlq.replayed_at IS NULL
+			RETURNING replayed.campaign_id, replayed.contact_id
+		)
+		, updated_recipients AS (
+			UPDATE campaign_recipients cr
+		SET status = 'queued'
+		FROM (SELECT DISTINCT campaign_id, contact_id FROM marked) marked
+		WHERE cr.campaign_id = marked.campaign_id
+		  AND cr.contact_id = marked.contact_id
+			RETURNING cr.contact_id
+		)
+		SELECT count(*) FROM replayed
+	`, campaignID).Scan(&replayed)
+	if err != nil {
+		s.logger.Error("replay admin campaign dead letters", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not replay dead-lettered campaign jobs.")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.logger.Error("commit admin campaign dead-letter replay", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not replay dead-lettered campaign jobs.")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]int64{"replayed": replayed})
+}
+
 func (s *Server) listAdminCampaigns(w http.ResponseWriter, r *http.Request) {
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))

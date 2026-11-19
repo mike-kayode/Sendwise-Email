@@ -50,6 +50,29 @@ func TestClassifySMTPResponse(t *testing.T) {
 	}
 }
 
+func TestSMTPTransportClassifiesGreetingEOFAsInfrastructureFailure(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			_ = conn.Close()
+		}
+	}()
+	transport := NewSMTPTransport(listener.Addr().String(), "localhost", "", "", true)
+	transport.DialTimeout = time.Second
+	_, err = transport.Send(t.Context(), Message{
+		ID: "infrastructure-eof", From: "sender@example.test",
+		To: "recipient@example.test", Subject: "Test", Text: "body",
+	})
+	if err == nil || !IsInfrastructureError(err) {
+		t.Fatalf("Send() error = %v, want infrastructure-classified greeting EOF", err)
+	}
+}
+
 func TestFormatMessageID(t *testing.T) {
 	if got, want := formatMessageID("job-123"), "<job-123@email-platform.local>"; got != want {
 		t.Fatalf("formatMessageID() = %q, want %q", got, want)

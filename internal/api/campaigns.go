@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/khayode/email-platform/internal/campaigns"
 	segmentcontacts "github.com/khayode/email-platform/internal/contacts"
 	"github.com/khayode/email-platform/internal/delivery"
@@ -24,31 +25,38 @@ const campaignColumns = `
 `
 
 type campaign struct {
-	ID                  string          `json:"id"`
-	OrganizationID      string          `json:"organization_id,omitempty"`
-	Name                string          `json:"name"`
-	Subject             string          `json:"subject"`
-	PreviewText         string          `json:"preview_text"`
-	SenderName          string          `json:"sender_name"`
-	SenderEmail         string          `json:"sender_email"`
-	SenderIdentityID    *string         `json:"sender_identity_id"`
-	ReplyTo             string          `json:"reply_to"`
-	SenderPostalAddress string          `json:"sender_postal_address"`
-	ListID              *string         `json:"list_id"`
-	SegmentID           *string         `json:"segment_id"`
-	TemplateID          *string         `json:"template_id"`
-	Content             json.RawMessage `json:"content"`
-	Status              string          `json:"status"`
-	RecipientCount      int             `json:"recipient_count"`
-	TrackOpens          bool            `json:"track_opens"`
-	TrackClicks         bool            `json:"track_clicks"`
-	ScheduledAt         *time.Time      `json:"scheduled_at"`
-	StartedAt           *time.Time      `json:"started_at"`
-	CompletedAt         *time.Time      `json:"completed_at"`
-	PausedAt            *time.Time      `json:"paused_at"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
-	Alerts              []campaignAlert `json:"alerts,omitempty"`
+	ID                  string                `json:"id"`
+	OrganizationID      string                `json:"organization_id,omitempty"`
+	Name                string                `json:"name"`
+	Subject             string                `json:"subject"`
+	PreviewText         string                `json:"preview_text"`
+	SenderName          string                `json:"sender_name"`
+	SenderEmail         string                `json:"sender_email"`
+	SenderIdentityID    *string               `json:"sender_identity_id"`
+	ReplyTo             string                `json:"reply_to"`
+	SenderPostalAddress string                `json:"sender_postal_address"`
+	ListID              *string               `json:"list_id"`
+	SegmentID           *string               `json:"segment_id"`
+	TemplateID          *string               `json:"template_id"`
+	Content             json.RawMessage       `json:"content"`
+	Status              string                `json:"status"`
+	RecipientCount      int                   `json:"recipient_count"`
+	TrackOpens          bool                  `json:"track_opens"`
+	TrackClicks         bool                  `json:"track_clicks"`
+	ScheduledAt         *time.Time            `json:"scheduled_at"`
+	StartedAt           *time.Time            `json:"started_at"`
+	CompletedAt         *time.Time            `json:"completed_at"`
+	PausedAt            *time.Time            `json:"paused_at"`
+	CreatedAt           time.Time             `json:"created_at"`
+	UpdatedAt           time.Time             `json:"updated_at"`
+	Alerts              []campaignAlert       `json:"alerts,omitempty"`
+	DeliveryWait        *campaignDeliveryWait `json:"delivery_wait,omitempty"`
+}
+
+type campaignDeliveryWait struct {
+	DeferredCount int       `json:"deferred_count"`
+	ResumeAt      time.Time `json:"resume_at"`
+	Message       string    `json:"message"`
 }
 
 type campaignAlert struct {
@@ -283,6 +291,30 @@ func (s *Server) getCampaign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
+	var deferredCount int
+	var resumeAt pgtype.Timestamptz
+	var waitReason string
+	if err := s.pool.QueryRow(r.Context(), `
+		SELECT count(*)::int, min(next_attempt_at), COALESCE(min(last_error), '')
+		FROM delivery_jobs
+		WHERE campaign_id = $1 AND organization_id = $2 AND status = 'deferred'
+	`, c.ID, c.OrganizationID).Scan(&deferredCount, &resumeAt, &waitReason); err != nil {
+		s.logger.Error("load deferred campaign delivery status", "error", err, "campaign_id", c.ID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery status.")
+		return
+	}
+	if deferredCount > 0 && resumeAt.Valid {
+		message := "Delivery is waiting for the next available sending window."
+		if strings.Contains(strings.ToLower(waitReason), "warm-up") ||
+			strings.Contains(strings.ToLower(waitReason), "quota") ||
+			strings.Contains(strings.ToLower(waitReason), "daily limit") {
+			message = "Waiting for today's sending limit; resumes " +
+				resumeAt.Time.In(time.Local).Format("Jan 2 at 3:04 PM") + "."
+		}
+		c.DeliveryWait = &campaignDeliveryWait{
+			DeferredCount: deferredCount, ResumeAt: resumeAt.Time, Message: message,
+		}
+	}
 	httpx.JSON(w, http.StatusOK, c)
 }
 

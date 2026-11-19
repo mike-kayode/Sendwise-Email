@@ -459,7 +459,7 @@ func TestGatewayForwardsTransactionalAPIKeys(t *testing.T) {
 		ServiceToken: "test-service-token",
 	})
 
-	const apiKey = "sw_tx_live_4D2twKqjM5Vnul8bI-lY96Uqe8zX95swd0uvy9YbOZw"
+	const apiKey = "fake_tx_test_key_not_a_secret"
 
 	// 1. Key-authenticated message routes must reach the legacy API with the
 	// Authorization header intact — the gateway must not read sw_tx_* keys as

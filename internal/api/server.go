@@ -93,6 +93,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /internal/admin/domains/{id}/warmup-override", kit.Chain(
 		http.HandlerFunc(s.clearAdminDomainWarmupOverride), kit.ServiceAuth(s.cfg.ServiceToken),
 	))
+	mux.Handle("POST /internal/admin/domains/{id}/warmup-graduation", kit.Chain(
+		http.HandlerFunc(s.graduateAdminDomainWarmup), kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("DELETE /internal/admin/domains/{id}/warmup-graduation", kit.Chain(
+		http.HandlerFunc(s.revokeAdminDomainWarmupGraduation), kit.ServiceAuth(s.cfg.ServiceToken),
+	))
 	mux.Handle("GET /internal/admin/quota-defaults", kit.Chain(
 		http.HandlerFunc(s.getAdminQuotaDefaults), kit.ServiceAuth(s.cfg.ServiceToken),
 	))
@@ -132,6 +138,18 @@ func (s *Server) Handler() http.Handler {
 	))
 	mux.Handle("POST /internal/admin/campaigns/{id}/stop", kit.Chain(
 		http.HandlerFunc(s.stopAdminCampaign),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("GET /internal/admin/campaigns/{id}/delivery", kit.Chain(
+		http.HandlerFunc(s.getAdminCampaignDelivery),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("POST /internal/admin/campaigns/{id}/resume-deferred", kit.Chain(
+		http.HandlerFunc(s.resumeAdminCampaignDeferredJobs),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("POST /internal/admin/campaigns/{id}/replay-dead-letter", kit.Chain(
+		http.HandlerFunc(s.replayAdminCampaignDeadLetters),
 		kit.ServiceAuth(s.cfg.ServiceToken),
 	))
 	mux.Handle("GET /internal/admin/transactional-messages", kit.Chain(

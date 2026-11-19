@@ -161,6 +161,16 @@ test("super admin can set and clear a domain warm-up override", async ({ page })
     override,
     usage_today: { reserved: 80, successful: 75, bounced: 1 },
     warnings: { verified_within_14_days: false, has_sending_history: true, recent_bounce_rate: 0.001 },
+    graduated: false,
+    graduated_at: null,
+    graduated_by: null,
+    graduated_reason: "",
+    graduation_eligibility: {
+      eligible: false,
+      successful_days: 2,
+      successful_sends: 100,
+      bounce_rate_7_days: 0.001,
+    },
   });
   await page.addInitScript(() => {
     const token = "admin-warmup-test-token";
@@ -256,10 +266,11 @@ test("super admin can set and clear a domain warm-up override", async ({ page })
   await page.goto(`/admin/domains/${domainID}`);
   const warmupPanel = page.getByRole("region", { name: "Warm-up" });
   await expect(warmupPanel.getByText("100", { exact: true }).first()).toBeVisible();
-  await warmupPanel.getByLabel("Daily cap").fill("10000");
-  await warmupPanel.getByLabel("Required reason").fill("Temporary launch capacity");
-  await warmupPanel.getByLabel("Authenticator or recovery code").fill("123456");
-  await warmupPanel.getByRole("button", { name: "Review and set override" }).click();
+  const overrideForm = warmupPanel.getByRole("button", { name: "Review and set override" }).locator("..");
+  await overrideForm.getByLabel("Daily cap").fill("10000");
+  await overrideForm.getByLabel("Required reason").fill("Temporary launch capacity");
+  await overrideForm.getByLabel("Authenticator or recovery code").fill("123456");
+  await overrideForm.getByRole("button", { name: "Review and set override" }).click();
   await expect(warmupPanel.getByText("1,000", { exact: true })).toBeVisible();
   await expect(warmupPanel.getByText(/Active · 10,000 per day/)).toBeVisible();
 

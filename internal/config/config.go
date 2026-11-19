@@ -50,6 +50,7 @@ type Config struct {
 	MaxDeliveryAttempts            int
 	SchedulerInterval              time.Duration
 	MaxMessageAge                  time.Duration
+	NATSStalePublishTimeout        time.Duration
 	MaxDailyEmails                 int
 	WarmupStartPerDay              int
 	WarmupGrowthFactor             float64
@@ -128,6 +129,10 @@ func load(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	maxMessageAge, err := getenvDuration(lookup, "MAX_MESSAGE_AGE", 48*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	natsStalePublishTimeout, err := getenvDuration(lookup, "NATS_STALE_PUBLISH_TIMEOUT", 10*time.Minute)
 	if err != nil {
 		return Config{}, err
 	}
@@ -263,6 +268,7 @@ func load(lookup func(string) string) (Config, error) {
 		MaxDeliveryAttempts:            maxDeliveryAttempts,
 		SchedulerInterval:              schedulerInterval,
 		MaxMessageAge:                  maxMessageAge,
+		NATSStalePublishTimeout:        natsStalePublishTimeout,
 		MaxDailyEmails:                 maxDailyEmails,
 		WarmupStartPerDay:              warmupStartPerDay,
 		WarmupGrowthFactor:             warmupGrowthFactor,
@@ -404,6 +410,9 @@ func load(lookup func(string) string) (Config, error) {
 	}
 	if cfg.MaxMessageAge < 0 {
 		return cfg, fmt.Errorf("MAX_MESSAGE_AGE must not be negative")
+	}
+	if cfg.NATSStalePublishTimeout <= 0 {
+		return cfg, fmt.Errorf("NATS_STALE_PUBLISH_TIMEOUT must be positive")
 	}
 	if cfg.MaxDailyEmails < 1 {
 		return cfg, fmt.Errorf("MAX_DAILY_EMAILS must be at least 1")

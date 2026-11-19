@@ -192,6 +192,7 @@ export type Campaign = {
   sender_identity_id?: string;
   sender_postal_address?: string;
   alerts?: { type: string; message: string; created_at: string }[];
+  delivery_wait?: { deferred_count: number; resume_at: string; message: string };
   reply_to?: string;
   list_id?: string;
   segment_id?: string;

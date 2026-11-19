@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -63,15 +64,22 @@ func NewService(pool *pgxpool.Pool, publisher Publisher, logger *slog.Logger, ma
 // RepublishPending re-enqueues durable jobs that have no in-flight NATS
 // message. Claims are shared across workers and stale claims are recoverable.
 func (s *Service) RepublishPending(ctx context.Context, limit int) (int, error) {
-	return s.republishPending(ctx, "", "", limit)
+	return s.republishPending(ctx, "", "", limit, 10*time.Minute)
 }
 
-func (s *Service) republishPending(ctx context.Context, campaignID, organizationID string, limit int) (int, error) {
+func (s *Service) RepublishPendingWithStaleTimeout(ctx context.Context, limit int, staleAfter time.Duration) (int, error) {
+	return s.republishPending(ctx, "", "", limit, staleAfter)
+}
+
+func (s *Service) republishPending(ctx context.Context, campaignID, organizationID string, limit int, staleAfter time.Duration) (int, error) {
 	if s.publisher == nil {
 		return 0, nil
 	}
 	if limit <= 0 {
 		return 0, nil
+	}
+	if staleAfter <= 0 {
+		staleAfter = 10 * time.Minute
 	}
 	if limit > 1000 {
 		limit = 1000
@@ -95,11 +103,21 @@ func (s *Service) republishPending(ctx context.Context, campaignID, organization
 				  dj.status = 'deferred'
 				  OR (
 					  dj.status = 'queued'
-					  AND dj.nats_published_at IS NULL
+					  AND dj.processing_started_at IS NULL
 					  AND (
-						  dj.nats_publish_claimed_at IS NULL
-						  OR dj.nats_publish_claimed_at < now() - interval '5 minutes'
+						  (
+							  dj.nats_published_at IS NULL
+							  AND (
+								  dj.nats_publish_claimed_at IS NULL
+								  OR dj.nats_publish_claimed_at < now() - interval '5 minutes'
+							  )
+						  )
+						  OR dj.nats_published_at < now() - $4::interval
 					  )
+				  )
+				  OR (
+					  dj.status = 'processing'
+					  AND dj.processing_started_at < now() - $4::interval
 				  )
 			  )
 			  AND ($2::text = '' OR dj.campaign_id::text = $2)
@@ -112,11 +130,12 @@ func (s *Service) republishPending(ctx context.Context, campaignID, organization
 		SET status = 'queued',
 		    nats_publish_claimed_at = now(),
 		    nats_published_at = NULL,
+		    processing_started_at = NULL,
 		    updated_at = now()
 		FROM candidates
 		WHERE dj.id = candidates.id
 		RETURNING dj.id, dj.organization_id, dj.campaign_id, dj.contact_id
-	`, limit, campaignID, organizationID)
+	`, limit, campaignID, organizationID, fmt.Sprintf("%f seconds", staleAfter.Seconds()))
 	if err != nil {
 		return 0, fmt.Errorf("claim pending jobs: %w", err)
 	}
@@ -445,7 +464,7 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 
 	const publishBatchSize = 500
 	for {
-		published, err := s.republishPending(ctx, campaignID, organizationID, publishBatchSize)
+		published, err := s.republishPending(ctx, campaignID, organizationID, publishBatchSize, 10*time.Minute)
 		if err != nil {
 			return queuedCount, fmt.Errorf("publish campaign delivery jobs: %w", err)
 		}

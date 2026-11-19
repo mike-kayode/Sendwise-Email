@@ -49,7 +49,7 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 	dialer := &net.Dialer{Timeout: t.DialTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", t.Addr)
 	if err != nil {
-		return nil, fmt.Errorf("dial smtp: %w", err)
+		return nil, infrastructureError(fmt.Errorf("dial smtp: %w", err))
 	}
 
 	if deadline, ok := ctx.Deadline(); ok {
@@ -59,13 +59,13 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 	client, err := smtp.NewClient(conn, t.Host)
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("create smtp client: %w", err)
+		return nil, infrastructureError(fmt.Errorf("create smtp client: %w", err))
 	}
 	defer client.Close()
 
 	hasSTARTTLS, _ := client.Extension("STARTTLS")
 	if err := ensureSTARTTLS(hasSTARTTLS, t.TLSInsecure); err != nil {
-		return nil, err
+		return nil, infrastructureError(err)
 	}
 	if hasSTARTTLS {
 		if err := client.StartTLS(&tls.Config{
@@ -73,7 +73,7 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: t.TLSInsecure,
 		}); err != nil {
-			return nil, fmt.Errorf("starttls: %w", err)
+			return nil, infrastructureError(fmt.Errorf("starttls: %w", err))
 		}
 	}
 
@@ -89,7 +89,7 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 			if isPermanentSMTPError(err) {
 				return nil, &PermanentError{Err: &ProviderError{Temporary: true, Message: fmt.Sprintf("smtp auth: %v", err)}}
 			}
-			return nil, fmt.Errorf("smtp auth: %w", err)
+			return nil, infrastructureError(fmt.Errorf("smtp auth: %w", err))
 		}
 	}
 
@@ -102,7 +102,7 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 		return nil, classifySMTP(fmt.Errorf("smtp mail from: invalid sender address: %w", err))
 	}
 	if err := client.Mail(envelopeFrom); err != nil {
-		return nil, classifySMTP(fmt.Errorf("smtp mail from: %w", err))
+		return nil, infrastructureError(classifySMTP(fmt.Errorf("smtp mail from: %w", err)))
 	}
 	envelopeTo, err := parseEnvelopeAddress(msg.To)
 	if err != nil {
@@ -114,19 +114,17 @@ func (t *SMTPTransport) Send(ctx context.Context, msg Message) (*Result, error) 
 
 	writer, err := client.Data()
 	if err != nil {
-		return nil, classifySMTP(fmt.Errorf("smtp data: %w", err))
+		return nil, infrastructureError(classifySMTP(fmt.Errorf("smtp data: %w", err)))
 	}
 
 	if _, err := io.Copy(writer, bytes.NewReader(messageData)); err != nil {
 		_ = writer.Close()
-		return nil, fmt.Errorf("write message: %w", err)
+		return nil, infrastructureError(fmt.Errorf("write message: %w", err))
 	}
 	if err := writer.Close(); err != nil {
-		return nil, classifySMTP(fmt.Errorf("finish message: %w", err))
+		return nil, infrastructureError(classifySMTP(fmt.Errorf("finish message: %w", err)))
 	}
-	if err := client.Quit(); err != nil {
-		return nil, classifySMTP(fmt.Errorf("smtp quit: %w", err))
-	}
+	_ = client.Quit()
 
 	messageID := formatMessageID(msg.ID)
 	return &Result{MessageID: messageID, Accepted: true}, nil

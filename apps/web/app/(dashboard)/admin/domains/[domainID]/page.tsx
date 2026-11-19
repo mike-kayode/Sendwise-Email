@@ -122,6 +122,16 @@ type WarmupData = {
     has_sending_history: boolean;
     recent_bounce_rate: number;
   };
+  graduated: boolean;
+  graduated_at?: string | null;
+  graduated_by?: string | null;
+  graduated_reason?: string;
+  graduation_eligibility: {
+    eligible: boolean;
+    successful_days: number;
+    successful_sends: number;
+    bounce_rate_7_days: number;
+  };
 };
 
 function AdminDomainQuotaPanel({ domainID, role }: { domainID: string; role: AdminSession["platform_role"] }) {
@@ -300,6 +310,10 @@ function AdminDomainWarmupPanel({ domainID, role }: { domainID: string; role: Ad
   const [mfaCode, setMfaCode] = useState("");
   const [clearReason, setClearReason] = useState("");
   const [clearMFACode, setClearMFACode] = useState("");
+  const [graduationReason, setGraduationReason] = useState("");
+  const [graduationMFACode, setGraduationMFACode] = useState("");
+  const [revokeReason, setRevokeReason] = useState("");
+  const [revokeMFACode, setRevokeMFACode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
@@ -353,6 +367,54 @@ function AdminDomainWarmupPanel({ domainID, role }: { domainID: string; role: Ad
       await warmupQuery.refetch();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "The warm-up override could not be cleared.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const graduateWarmup = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (role !== "super_admin" || !graduationReason.trim() || !graduationMFACode.trim() || !warmup || busy) return;
+    const ineligible = !warmup.graduation_eligibility.eligible;
+    const confirmation = ineligible
+      ? "This domain does not meet the graduation eligibility thresholds. Graduate it anyway? The reason and action will be audited."
+      : "Graduate this domain from warm-up? It will use the effective marketing daily quota. This action will be audited.";
+    if (!window.confirm(confirmation)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiFetch("/admin/mfa/verify", { method: "POST", body: JSON.stringify({ code: graduationMFACode.trim() }) });
+      await apiFetch(`/admin/domains/${encodeURIComponent(domainID)}/warmup-graduation`, {
+        method: "POST",
+        body: JSON.stringify({ reason: graduationReason.trim(), confirm_ineligible: ineligible }),
+      });
+      setGraduationReason("");
+      setGraduationMFACode("");
+      await warmupQuery.refetch();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The domain could not be graduated.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revokeGraduation = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (role !== "super_admin" || !revokeReason.trim() || !revokeMFACode.trim() || busy) return;
+    if (!window.confirm("Revoke warm-up graduation and return this domain to the profile curve? This will be audited.")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiFetch("/admin/mfa/verify", { method: "POST", body: JSON.stringify({ code: revokeMFACode.trim() }) });
+      await apiFetch(`/admin/domains/${encodeURIComponent(domainID)}/warmup-graduation`, {
+        method: "DELETE",
+        body: JSON.stringify({ reason: revokeReason.trim() }),
+      });
+      setRevokeReason("");
+      setRevokeMFACode("");
+      await warmupQuery.refetch();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The domain graduation could not be revoked.");
     } finally {
       setBusy(false);
     }
@@ -420,6 +482,46 @@ function AdminDomainWarmupPanel({ domainID, role }: { domainID: string; role: Ad
               <button type="button" onClick={() => setClearOpen((open) => !open)} className="mt-3 rounded-lg px-3 py-2 text-xs font-semibold text-rose-800 ring-1 ring-rose-200 hover:bg-rose-50">
                 {clearOpen ? "Cancel clear" : "Clear override"}
               </button>
+            ) : null}
+          </div>
+          <div className="rounded-lg border border-slate-200 p-3">
+            <h3 className="text-xs font-semibold text-slate-900">Warm-up graduation</h3>
+            <p className="mt-1 text-xs text-slate-600">
+              Eligibility: {warmup.graduation_eligibility.successful_days}/3 successful days · {warmup.graduation_eligibility.successful_sends.toLocaleString()}/5,000 successful sends · {(warmup.graduation_eligibility.bounce_rate_7_days * 100).toFixed(2)}% 7-day bounce rate (must be under 2%).
+            </p>
+            <p className="mt-1 text-xs font-medium text-slate-700">
+              {warmup.graduated ? `Graduated${warmup.graduated_at ? ` on ${timeLabel(warmup.graduated_at)}` : ""}. Effective cap follows the marketing daily quota.` : warmup.graduation_eligibility.eligible ? "Eligible for graduation." : "Not currently eligible; super admin confirmation and a reason are required to override eligibility."}
+            </p>
+            {warmup.graduated && warmup.graduated_reason ? <p className="mt-1 text-xs text-slate-500">Reason: {warmup.graduated_reason}</p> : null}
+            {role === "super_admin" && !warmup.graduated ? (
+              <form onSubmit={(event) => void graduateWarmup(event)} className="mt-3 grid gap-3 sm:grid-cols-2">
+                <label className="text-xs font-medium text-slate-700">
+                  Required reason
+                  <textarea required maxLength={500} value={graduationReason} onChange={(event) => setGraduationReason(event.target.value)} className="mt-1 min-h-20 w-full rounded-lg border border-slate-200 bg-white p-3 text-sm" />
+                </label>
+                <label className="text-xs font-medium text-slate-700">
+                  Authenticator or recovery code
+                  <input required autoComplete="one-time-code" value={graduationMFACode} onChange={(event) => setGraduationMFACode(event.target.value)} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" />
+                </label>
+                <button type="submit" disabled={busy} className="justify-self-start rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 sm:col-span-2">
+                  {busy ? "Graduating..." : "Review and graduate"}
+                </button>
+              </form>
+            ) : null}
+            {role === "super_admin" && warmup.graduated ? (
+              <form onSubmit={(event) => void revokeGraduation(event)} className="mt-3 grid gap-3 rounded-lg border border-rose-200 bg-rose-50 p-3 sm:grid-cols-2">
+                <label className="text-xs font-medium text-slate-700">
+                  Required revoke reason
+                  <textarea required maxLength={500} value={revokeReason} onChange={(event) => setRevokeReason(event.target.value)} className="mt-1 min-h-20 w-full rounded-lg border border-slate-200 bg-white p-3 text-sm" />
+                </label>
+                <label className="text-xs font-medium text-slate-700">
+                  Authenticator or recovery code
+                  <input required autoComplete="one-time-code" value={revokeMFACode} onChange={(event) => setRevokeMFACode(event.target.value)} className="mt-1 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" />
+                </label>
+                <button type="submit" disabled={busy} className="justify-self-start rounded-lg bg-rose-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 sm:col-span-2">
+                  {busy ? "Revoking..." : "Review and revoke graduation"}
+                </button>
+              </form>
             ) : null}
           </div>
           {role === "super_admin" ? (

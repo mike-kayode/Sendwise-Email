@@ -72,3 +72,33 @@ func EffectiveWarmupDailyCap(
 	}
 	return *override
 }
+
+type WarmupGraduationEligibility struct {
+	Eligible        bool    `json:"eligible"`
+	SuccessfulDays  int     `json:"successful_days"`
+	SuccessfulSends int64   `json:"successful_sends"`
+	BounceRate7d    float64 `json:"bounce_rate_7_days"`
+}
+
+func CheckWarmupGraduationEligibility(successfulDays int, successfulSends, bounced7d, sent7d int64) WarmupGraduationEligibility {
+	rate := float64(0)
+	if total := bounced7d + sent7d; total > 0 {
+		rate = float64(bounced7d) / float64(total)
+	}
+	return WarmupGraduationEligibility{
+		Eligible:        successfulDays >= 3 && successfulSends >= 5000 && rate < 0.02,
+		SuccessfulDays:  successfulDays,
+		SuccessfulSends: successfulSends,
+		BounceRate7d:    rate,
+	}
+}
+
+func GraduatedWarmupDailyCap(dailyQuota *int64, unlimited bool) int {
+	if unlimited || dailyQuota == nil || *dailyQuota >= 1<<31-1 {
+		return 1<<31 - 1
+	}
+	if *dailyQuota < 1 {
+		return 1
+	}
+	return int(*dailyQuota)
+}

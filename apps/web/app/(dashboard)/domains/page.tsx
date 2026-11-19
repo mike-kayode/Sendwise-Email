@@ -48,6 +48,7 @@ type DomainQuotaData = {
     curve_cap: number;
     effective_cap_today: number;
     override_active: boolean;
+    warmup_complete: boolean;
   };
 };
 
@@ -126,6 +127,9 @@ function DomainQuotaPanel({ domainId, domainName }: { domainId: string; domainNa
       <section className="mt-3 rounded-lg border border-slate-200 bg-white p-3" aria-label="Warm-up capacity">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs font-semibold text-slate-800">Warm-up capacity today</p>
+          {quotaQuery.data.data.warmup.warmup_complete ? (
+            <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-900">Warm-up complete</span>
+          ) : null}
           {quotaQuery.data.data.warmup.override_active ? (
             <span className="rounded-full bg-amber-100 px-2 py-1 text-[10px] font-semibold text-amber-900">Admin override active</span>
           ) : null}

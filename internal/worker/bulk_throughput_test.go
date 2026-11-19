@@ -44,7 +44,7 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.NewPostgres(t)
 
-	var organizationID, campaignID, sendingDomain string
+	var organizationID, campaignID, sendingDomainID, sendingDomain string
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO organizations (name, slug)
 		VALUES ('100k SMTP sink proof', 'bulk-sink-' || gen_random_uuid()::text)
@@ -76,9 +76,15 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 		)
 		VALUES ($1, 'bulk-' || replace(gen_random_uuid()::text, '-', '') || '.example.test',
 		        'verified', 'mail', $2, $3, 'verified')
-		RETURNING domain
-	`, organizationID, dkimPublicKey, dkimPrivateKey).Scan(&sendingDomain); err != nil {
+		RETURNING id, domain
+	`, organizationID, dkimPublicKey, dkimPrivateKey).Scan(&sendingDomainID, &sendingDomain); err != nil {
 		t.Fatalf("seed throughput sending domain: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO domain_quotas (domain_id, stream, daily_limit, monthly_limit, per_second_limit, unlimited)
+		VALUES ($1, 'marketing', $2, $2, $2, false)
+	`, sendingDomainID, bulkRecipientCount); err != nil {
+		t.Fatalf("seed throughput marketing quota: %v", err)
 	}
 	var senderIdentityID string
 	if err := pool.QueryRow(ctx, `
@@ -151,6 +157,7 @@ func TestBulkCampaignSMTPThroughput100k(t *testing.T) {
 		MaxDeliveryAttempts:    2,
 		MaxMessageAge:          48 * time.Hour,
 		MaxDailyEmails:         bulkRecipientCount,
+		PlatformMaxDomainRate:  bulkRecipientCount,
 		WarmupStartPerDay:      bulkRecipientCount,
 		WarmupGrowthFactor:     1.5,
 		RecipientDomainDefault: 100000,

@@ -3,6 +3,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+python3 "$ROOT/scripts/check-compose-env.sh"
+
 # Validates the effective environment (values are never printed, only names).
 #
 # Usage:
