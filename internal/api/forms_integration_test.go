@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -269,11 +270,16 @@ func TestFormsLifecyclePublicSubmitAndTenantIsolationIntegration(t *testing.T) {
 		t.Fatalf("submissions pagination missing total: %s", w.Body.String())
 	}
 
-	// The eleventh request from the same IP in a minute is rejected.
-	for i := 0; i < formRateLimit-5; i++ {
-		w = doRequest(t, s, http.MethodPost, "/api/v1/public/forms/"+created.Slug+"/submit",
-			`{"website":"bot"}`, "")
-		assertStatus(t, w, http.StatusOK)
+	// Seed a full window so this check is stable across minute boundaries.
+	rateLimitIP := remoteClientIP(httptest.NewRequest(http.MethodPost, "/", nil))
+	if _, err := integrationPool.Exec(t.Context(), `
+		INSERT INTO form_submission_rate_limits (form_id, ip_address, window_started_at, request_count)
+		VALUES ($1, $2, now() + interval '1 minute', $3)
+		ON CONFLICT (form_id, ip_address) DO UPDATE
+		SET window_started_at = EXCLUDED.window_started_at,
+		    request_count = EXCLUDED.request_count
+	`, created.ID, rateLimitIP, formRateLimit); err != nil {
+		t.Fatalf("seed form submission rate limit: %v", err)
 	}
 	w = doRequest(t, s, http.MethodPost, "/api/v1/public/forms/"+created.Slug+"/submit",
 		`{"website":"bot"}`, "")

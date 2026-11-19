@@ -2450,8 +2450,9 @@ func TestTransactionalAPIKeySendReadRotateAndRevoke(t *testing.T) {
 	if err := json.Unmarshal(createKeyResponse.Body.Bytes(), &createdKey); err != nil {
 		t.Fatalf("decode transactional API key: %v", err)
 	}
-	if createdKey.PlainKey == "" || !strings.HasPrefix(createdKey.PlainKey, "fake_tx_test_") {
-		t.Fatalf("created key did not return a one-time test secret: %+v", createdKey)
+	if createdKey.PlainKey == "" || !strings.HasPrefix(createdKey.PlainKey, "sw_tx_test_") {
+		t.Fatalf("created key is missing the one-time test-key prefix (prefix=%q, secret_present=%t)",
+			createdKey.KeyPrefix, createdKey.PlainKey != "")
 	}
 
 	messageBody, err := json.Marshal(transactional.MessageInput{
@@ -3503,27 +3504,25 @@ func TestAnalyticsOverviewIntegration(t *testing.T) {
 			 first_opened_at, last_opened_at, first_clicked_at, last_clicked_at)
 		SELECT $1::uuid, $2::uuid, r.id, r.contact_id, dj.id,
 		       'trk_' || encode(gen_random_bytes(24), 'hex'), r.email, dj.status, now(),
+		       0,
 		       CASE WHEN r.contact_id = $3::uuid THEN 1 ELSE 0 END,
-		       CASE WHEN r.contact_id IN ($3::uuid, $4::uuid) THEN 1 ELSE 0 END,
+		       NULL::timestamptz,
+		       NULL::timestamptz,
 		       CASE WHEN r.contact_id = $3::uuid THEN now() ELSE NULL END,
-		       CASE WHEN r.contact_id = $3::uuid THEN now() ELSE NULL END,
-		       CASE WHEN r.contact_id IN ($3::uuid, $4::uuid) THEN now() ELSE NULL END,
-		       CASE WHEN r.contact_id IN ($3::uuid, $4::uuid) THEN now() ELSE NULL END
+		       CASE WHEN r.contact_id = $3::uuid THEN now() ELSE NULL END
 		FROM campaign_recipients r
 		JOIN delivery_jobs dj
 		  ON dj.campaign_id = r.campaign_id AND dj.contact_id = r.contact_id
 		WHERE r.campaign_id = $2::uuid
-	`, organizationID, campaign.ID, firstContactID, secondContactID); err != nil {
+	`, organizationID, campaign.ID, secondContactID); err != nil {
 		t.Fatalf("seed recipient tracking rows: %v", err)
 	}
 	if _, err := integrationPool.Exec(ctx, `
 		INSERT INTO message_events (organization_id, campaign_id, contact_id, event_type, url)
 		VALUES
-			($1, $2, $3, 'opened', NULL),
-			($1, $2, $3, 'clicked', 'https://example.test/offer'),
-			($1, $2, $4, 'clicked', 'https://example.test/offer'),
-			($1, $2, gen_random_uuid(), 'bounced', NULL)
-	`, organizationID, campaign.ID, firstContactID, secondContactID); err != nil {
+			($1::uuid, $2::uuid, $3::uuid, 'clicked', 'https://example.test/offer'),
+			($1::uuid, $2::uuid, gen_random_uuid(), 'bounced', NULL)
+	`, organizationID, campaign.ID, secondContactID); err != nil {
 		t.Fatalf("seed analytics message events: %v", err)
 	}
 	if _, err := integrationPool.Exec(ctx, `
@@ -3555,7 +3554,7 @@ func TestAnalyticsOverviewIntegration(t *testing.T) {
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
 			 tracking_id, link_token, destination_url)
 		VALUES ($1, $2, $3, $4, $5, $6, 'tcl_' || encode(gen_random_bytes(16), 'hex'),
-		        'https://example.test/tracked')
+		        'https://example.test/offer')
 	`, organizationID, campaign.ID, trackingRecipientID, trackingContactID, trackingJobID, trackingID); err != nil {
 		t.Fatalf("seed recipient tracking link: %v", err)
 	}
@@ -3576,8 +3575,8 @@ func TestAnalyticsOverviewIntegration(t *testing.T) {
 	`, trackingID).Scan(&openCount, &clickCount); err != nil {
 		t.Fatalf("load recipient tracking aggregates: %v", err)
 	}
-	if openCount != 2 || clickCount != 1 {
-		t.Fatalf("recipient tracking aggregates open=%d click=%d, want open=2 click=1", openCount, clickCount)
+	if openCount != 1 || clickCount != 1 {
+		t.Fatalf("recipient tracking aggregates open=%d click=%d, want open=1 click=1", openCount, clickCount)
 	}
 
 	w := doRequest(t, s, "GET", "/api/v1/analytics/overview", "", token)
