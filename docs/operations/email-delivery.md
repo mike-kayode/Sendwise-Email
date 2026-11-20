@@ -59,6 +59,42 @@ processed as separate events and update `message_events` and `suppressions`.
 - Firewall restricting SMTP submission/admin ports.
 - DKIM private keys stored securely (secret manager / encrypted at rest), never logged.
 
+## Stalwart outbound port 25
+If campaign jobs stay **submitted forever, nothing delivered**, the worker may have successfully
+handed messages to Stalwart while Stalwart's outbound connections to recipient MX servers are being
+dropped. Check outbound TCP/25 from the host:
+
+```sh
+sudo tcpdump -ni eth0 'tcp dst port 25 and (tcp[tcpflags] & tcp-syn != 0)'
+```
+
+Compare the same TLS/SMTP connection from the bridge-network Stalwart container and a temporary
+host-network container using the same image:
+
+```sh
+docker compose exec -T stalwart sh -c \
+  'timeout 15s openssl s_client -4 -connect gmail-smtp-in.l.google.com:25 -starttls smtp -brief </dev/null'
+
+docker run --rm --network host --entrypoint sh \
+  stalwartlabs/stalwart@sha256:73c684a84c24f5b4206ec266a8deb8986fe44a9f623997e07f084388d943c8bd \
+  -c 'timeout 15s openssl s_client -4 -connect gmail-smtp-in.l.google.com:25 -starttls smtp -brief </dev/null'
+```
+
+If `tcpdump` shows bridge-container SYNs leaving `eth0` without SYN-ACKs, while the
+host-network connection succeeds, the hosting provider may be dropping NAT-forwarded port-25
+traffic because of its packet TTL. The workaround is to set the Stalwart container's
+`net.ipv4.ip_default_ttl` to `65`; Docker's bridge NAT decrements it to `64` on egress. This is
+configured on the `stalwart` service in `docker-compose.yml` and is checked during deployment
+smoke tests. To verify the running container setting:
+
+```sh
+docker compose exec -T stalwart cat /proc/sys/net/ipv4/ip_default_ttl
+```
+
+The outbound smoke-test host defaults to `gmail-smtp-in.l.google.com` and can be overridden with
+`OUTBOUND_SMTP_CHECK_HOST`. Set `SKIP_OUTBOUND_SMTP_CHECK=true` only in environments that
+intentionally have no internet access.
+
 ## Domain verification
 Each sending domain must be verified before campaigns can send from it (enforced when
 `REQUIRE_VERIFIED_DOMAIN=true`). Verification performs actual DNS lookups:

@@ -345,6 +345,25 @@ http_check() {
   fail "smoke check failed: $name (status=$status url=$url body=${body:0:200})"
 }
 
+outbound_smtp_check() {
+  local host="${OUTBOUND_SMTP_CHECK_HOST:-gmail-smtp-in.l.google.com}"
+  local result
+  if [ "${SKIP_OUTBOUND_SMTP_CHECK:-false}" = "true" ]; then
+    log "  skip outbound-smtp-port-25 (SKIP_OUTBOUND_SMTP_CHECK=true)"
+    return 0
+  fi
+  [ -n "$host" ] || fail "OUTBOUND_SMTP_CHECK_HOST must not be empty"
+  log "Checking Stalwart outbound SMTP on port 25 ($host)..."
+  if result="$("${COMPOSE[@]}" exec -T stalwart sh -c \
+    'timeout 15s openssl s_client -4 -connect "$1:25" -starttls smtp -brief </dev/null 2>&1' \
+    sh "$host" 2>&1)" &&
+    printf '%s\n' "$result" | grep -Fq "Ciphersuite:"; then
+    log "  ok  stalwart-outbound-smtp-port-25"
+    return 0
+  fi
+  fail "smoke check failed: Stalwart could not establish outbound SMTP on $host:25"
+}
+
 smoke_tests() {
   log "Running smoke tests against the combined stack..."
   http_check "legacy-api-ready"  "http://127.0.0.1:8080/readyz" "-"
@@ -354,6 +373,7 @@ smoke_tests() {
   http_check "gateway-ready"     "http://127.0.0.1:8084/readyz" '"legacy":"up"'
   http_check "worker-health"     "http://127.0.0.1:9091/healthz" "-"
   http_check "web"               "http://127.0.0.1:3000" "-"
+  outbound_smtp_check
   local caddy_status
   caddy_status="$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:80/ || echo 000)"
   case "$caddy_status" in
