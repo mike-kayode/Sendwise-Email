@@ -22,6 +22,7 @@ import (
 	"github.com/khayode/email-platform/internal/auth"
 	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/delivery"
+	"github.com/khayode/email-platform/internal/deliveryjourney"
 	"github.com/khayode/email-platform/internal/httpx"
 	"github.com/khayode/email-platform/internal/messaging"
 	"github.com/khayode/email-platform/internal/transactional"
@@ -488,14 +489,17 @@ func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte,
 	status := "bounced"
 	eventType := "bounced"
 	recipientStatus := status
+	journeyStatus := "bounced"
 	suppressReason := ""
 	retry := false
 	bounceType := "hard"
 	switch feedback.Type {
 	case delivery.FeedbackComplaint:
 		status, eventType, suppressReason = "complained", "complained", "complaint"
+		journeyStatus = "complained"
 	case delivery.FeedbackSoftBounce:
 		bounceType = "soft"
+		journeyStatus = "deferred_by_recipient"
 		var softBounceCount int
 		if err := tx.QueryRow(ctx, `
 			SELECT count(*) FROM delivery_feedback_ingest
@@ -510,6 +514,9 @@ func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte,
 		}
 	case delivery.FeedbackHardBounce:
 		suppressReason = "hard_bounce"
+	case delivery.FeedbackDelivered:
+		status, eventType, recipientStatus = "accepted", "delivered", "delivered"
+		journeyStatus = "accepted_by_recipient_server"
 	default:
 		return fmt.Errorf("unsupported feedback type %q", feedback.Type)
 	}
@@ -597,6 +604,26 @@ func (h *DeliveryHandler) applyStalwartFeedback(ctx context.Context, raw []byte,
 	`, claims.WorkspaceID, claims.CampaignID, contactID, jobID, eventType,
 		feedback.Type, feedback.EnhancedCode, feedback.Diagnostic); err != nil {
 		return fmt.Errorf("record campaign feedback event: %w", err)
+	}
+	nextRetryAt := (*time.Time)(nil)
+	if retry {
+		value := time.Now().Add(30 * time.Minute)
+		nextRetryAt = &value
+	}
+	if _, err := deliveryjourney.RecordTx(ctx, tx, deliveryjourney.Event{
+		OrganizationID: claims.WorkspaceID,
+		JobID:          jobID,
+		Type:           journeyStatus,
+		Source:         "dsn",
+		SourceEventID:  eventHash,
+		EventHash:      "dsn:" + eventHash + ":" + string(journeyStatus),
+		OccurredAt:     time.Now().UTC(),
+		EnhancedCode:   feedback.EnhancedCode,
+		Reason:         feedback.Diagnostic,
+		NextRetryAt:    nextRetryAt,
+		Metadata:       json.RawMessage(fmt.Sprintf(`{"feedback_type":%q,"action":%q}`, feedback.Type, feedback.Action)),
+	}); err != nil {
+		return fmt.Errorf("record delivery journey feedback: %w", err)
 	}
 	if !retry {
 		if err := h.pauseCampaignForFeedback(ctx, tx, claims.WorkspaceID, claims.CampaignID); err != nil {

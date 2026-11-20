@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/config"
 	"github.com/khayode/email-platform/internal/delivery"
+	"github.com/khayode/email-platform/internal/deliveryjourney"
 	"github.com/khayode/email-platform/internal/domainwarmup"
 	"github.com/khayode/email-platform/internal/messaging"
 	"github.com/khayode/email-platform/internal/observability"
@@ -37,10 +39,11 @@ type Worker struct {
 	logger    *slog.Logger
 	limiter   *rate.Limiter
 
-	domainMu       sync.Mutex
-	domainInFlight map[string]int
-	recipientRates map[string]*rate.Limiter
-	smtpBreaker    smtpCircuitBreaker
+	domainMu          sync.Mutex
+	domainInFlight    map[string]int
+	recipientRates    map[string]*rate.Limiter
+	smtpBreaker       smtpCircuitBreaker
+	journeyReconciler *deliveryjourney.Reconciler
 }
 
 func (w *Worker) releaseProcessingLease(ctx context.Context, jobID string) error {
@@ -118,6 +121,7 @@ func (w *Worker) deferWithoutAge(ctx context.Context, row *jobRow, delay time.Du
 		return fmt.Errorf("defer delivery job without age limit: %w", err)
 	}
 	row.Status = "deferred"
+	w.recordJourneyEvent(ctx, row, "deferred_by_sendwise", "sendwise", reason, nil, nil, nil)
 	return nil
 }
 
@@ -140,6 +144,50 @@ func (w *Worker) deferInfrastructureFailure(ctx context.Context, row *jobRow, se
 		return fmt.Errorf("defer delivery after SMTP infrastructure failure: %w", err)
 	}
 	row.Status = "deferred"
+	w.recordJourneyEvent(ctx, row, "deferred_by_sendwise", "sendwise", truncateError(sendErr), nil, nil, &until)
+	return nil
+}
+
+func (w *Worker) recordJourneyEvent(
+	ctx context.Context,
+	row *jobRow,
+	stage, source, reason string,
+	smtpCode, attempt *int,
+	nextRetryAt *time.Time,
+) {
+	metadata, err := json.Marshal(map[string]string{"reason": reason})
+	if err != nil {
+		w.logger.Warn("encode delivery journey event", "job_id", row.ID, "error", err)
+		return
+	}
+	now := time.Now().UTC()
+	_, err = deliveryjourney.NewStore(w.pool).Record(ctx, deliveryjourney.Event{
+		OrganizationID: row.OrganizationID,
+		JobID:          row.ID,
+		Type:           stage,
+		Source:         source,
+		SourceEventID:  fmt.Sprintf("%s:%s:%d", row.ID, stage, now.UnixNano()),
+		OccurredAt:     now,
+		SMTPCode:       smtpCode,
+		Reason:         reason,
+		Attempt:        attempt,
+		NextRetryAt:    nextRetryAt,
+		Metadata:       metadata,
+	})
+	if err != nil {
+		w.logger.Warn("record delivery journey event", "job_id", row.ID, "stage", stage, "error", err)
+	}
+}
+
+func (w *Worker) recordJourneyEventTx(ctx context.Context, tx pgx.Tx, event deliveryjourney.Event) error {
+	if _, err := deliveryjourney.RecordTx(ctx, tx, event); err != nil {
+		if errors.Is(err, deliveryjourney.ErrMissingRecipientTracking) {
+			w.logger.Warn("skip delivery journey event without recipient tracking row",
+				"job_id", event.JobID, "stage", event.Type)
+			return nil
+		}
+		return err
+	}
 	return nil
 }
 
@@ -209,6 +257,15 @@ func New(
 	if cfg.NATSStalePublishTimeout <= 0 {
 		cfg.NATSStalePublishTimeout = 10 * time.Minute
 	}
+	if cfg.DeliveryJourneyReconcileInterval <= 0 {
+		cfg.DeliveryJourneyReconcileInterval = time.Minute
+	}
+	if cfg.DeliveryJourneyStuckAfter <= 0 {
+		cfg.DeliveryJourneyStuckAfter = 30 * time.Minute
+	}
+	if cfg.DeliveryJourneyReconcileBatch < 1 || cfg.DeliveryJourneyReconcileBatch > 1000 {
+		cfg.DeliveryJourneyReconcileBatch = 100
+	}
 	if cfg.PlatformMaxDomainRate < 1 {
 		cfg.PlatformMaxDomainRate = 1000
 	}
@@ -222,7 +279,7 @@ func New(
 	if burst < 1 {
 		burst = 1
 	}
-	return &Worker{
+	worker := &Worker{
 		cfg:            cfg,
 		pool:           pool,
 		bus:            bus,
@@ -235,6 +292,13 @@ func New(
 		domainInFlight: make(map[string]int),
 		recipientRates: make(map[string]*rate.Limiter),
 	}
+	if cfg.StalwartAdminUsername != "" && cfg.StalwartAdminPassword != "" {
+		worker.journeyReconciler = deliveryjourney.NewReconciler(
+			pool, cfg.StalwartManagementURL, cfg.StalwartAdminUsername,
+			cfg.StalwartAdminPassword, cfg.BounceDomain,
+		)
+	}
+	return worker
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -317,6 +381,7 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	defer stopHeartbeat()
 	go w.processingHeartbeat(heartbeatCtx, row.ID)
 	row.Status = "processing"
+	w.recordJourneyEvent(ctx, row, "processing", "sendwise", "", nil, nil, nil)
 
 	if row.CampaignStatus == "cancelled" || row.CampaignStatus == "failed" {
 		return 0, w.cancelPendingJob(ctx, row, "campaign_"+row.CampaignStatus)
@@ -422,6 +487,8 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		return 30 * time.Second, err
 	}
 	if deferred {
+		w.recordJourneyEvent(ctx, row, "deferred_by_sendwise", "sendwise",
+			"sending domain warm-up daily cap reached", nil, nil, nil)
 		return 0, nil
 	}
 
@@ -582,6 +649,8 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 		return 30 * time.Second, err
 	}
 	if deferred {
+		w.recordJourneyEvent(ctx, row, "deferred_by_sendwise", "sendwise",
+			"sending quota reached", nil, nil, nil)
 		return 0, nil
 	}
 
@@ -793,6 +862,18 @@ func (w *Worker) recordSubmissionTracking(ctx context.Context, row *jobRow, tran
 	`, row.OrganizationID, row.CampaignID, row.ContactID, row.ID); err != nil {
 		return fmt.Errorf("record recipient tracking submission: %w", err)
 	}
+	if err := w.recordJourneyEventTx(ctx, tx, deliveryjourney.Event{
+		OrganizationID: row.OrganizationID,
+		JobID:          row.ID,
+		Type:           "submitted_to_mail_server",
+		Source:         "sendwise",
+		SourceEventID:  "smtp-accepted:" + row.ID,
+		EventHash:      "smtp-accepted:" + row.ID,
+		OccurredAt:     time.Now().UTC(),
+		Metadata:       json.RawMessage(`{"smtp_accepted":true}`),
+	}); err != nil {
+		return fmt.Errorf("record submitted delivery journey event: %w", err)
+	}
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO sending_domain_daily_stats
@@ -876,6 +957,13 @@ func (w *Worker) handleSendFailure(ctx context.Context, row *jobRow, sendErr err
 	`, row.ID); err != nil {
 		w.logger.Warn("update recipient tracking deferral", "job_id", row.ID, "error", err)
 	}
+	var smtpCodeValue *int
+	if code, parseErr := strconv.Atoi(smtpCode); parseErr == nil {
+		smtpCodeValue = &code
+	}
+	nextRetryAt := time.Now().Add(delay)
+	w.recordJourneyEvent(ctx, row, "deferred_by_recipient", "sendwise",
+		truncateError(sendErr), smtpCodeValue, &attempts, &nextRetryAt)
 	if _, err := w.pool.Exec(ctx, `
 		INSERT INTO email_tracking_events
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id, tracking_id,
@@ -954,6 +1042,17 @@ func (w *Worker) failJob(ctx context.Context, row *jobRow, cause error) error {
 	`, row.ID); err != nil {
 		return fmt.Errorf("update recipient tracking failed: %w", err)
 	}
+	if err := w.recordJourneyEventTx(ctx, tx, deliveryjourney.Event{
+		OrganizationID: row.OrganizationID,
+		JobID:          row.ID,
+		Type:           "failed",
+		Source:         "sendwise",
+		SourceEventID:  fmt.Sprintf("failed:%s:%d", row.ID, time.Now().UnixNano()),
+		OccurredAt:     time.Now().UTC(),
+		Reason:         message,
+	}); err != nil {
+		return fmt.Errorf("record failed delivery journey event: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO email_tracking_events
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
@@ -1027,6 +1126,22 @@ func (w *Worker) bounceJob(ctx context.Context, row *jobRow, cause error, bounce
 		WHERE delivery_job_id = $1
 	`, row.ID); err != nil {
 		return fmt.Errorf("update recipient tracking bounced: %w", err)
+	}
+	var journeySMTPCode *int
+	if code, parseErr := strconv.Atoi(smtpCode); parseErr == nil {
+		journeySMTPCode = &code
+	}
+	if err := w.recordJourneyEventTx(ctx, tx, deliveryjourney.Event{
+		OrganizationID: row.OrganizationID,
+		JobID:          row.ID,
+		Type:           "bounced",
+		Source:         "sendwise",
+		SourceEventID:  fmt.Sprintf("bounced:%s:%d", row.ID, time.Now().UnixNano()),
+		OccurredAt:     time.Now().UTC(),
+		SMTPCode:       journeySMTPCode,
+		Reason:         message,
+	}); err != nil {
+		return fmt.Errorf("record bounced delivery journey event: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO email_tracking_events
@@ -1112,6 +1227,17 @@ func (w *Worker) deadLetterJob(ctx context.Context, row *jobRow, reason string, 
 		WHERE delivery_job_id = $1
 	`, row.ID); err != nil {
 		return fmt.Errorf("update recipient tracking dead-lettered: %w", err)
+	}
+	if err := w.recordJourneyEventTx(ctx, tx, deliveryjourney.Event{
+		OrganizationID: row.OrganizationID,
+		JobID:          row.ID,
+		Type:           "failed",
+		Source:         "sendwise",
+		SourceEventID:  fmt.Sprintf("dead-lettered:%s:%d", row.ID, time.Now().UnixNano()),
+		OccurredAt:     time.Now().UTC(),
+		Reason:         reason + ": " + message,
+	}); err != nil {
+		return fmt.Errorf("record dead-letter delivery journey event: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO email_tracking_events
@@ -1702,11 +1828,19 @@ func (w *Worker) maybeCompleteCampaign(ctx context.Context, campaignID, organiza
 func (w *Worker) schedulerLoop(ctx context.Context) {
 	ticker := time.NewTicker(w.cfg.SchedulerInterval)
 	defer ticker.Stop()
+	reconcileInterval := w.cfg.DeliveryJourneyReconcileInterval
+	if reconcileInterval <= 0 {
+		reconcileInterval = time.Minute
+	}
+	journeyTicker := time.NewTicker(reconcileInterval)
+	defer journeyTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-journeyTicker.C:
+			w.reconcileDeliveryJourneys(ctx)
 		case <-ticker.C:
 			observability.QueuePolls.Inc()
 			resumed, err := w.campaigns.RepublishPendingWithStaleTimeout(ctx, 1000, w.cfg.NATSStalePublishTimeout)
@@ -1733,6 +1867,43 @@ func (w *Worker) schedulerLoop(ctx context.Context) {
 				w.logger.Info("campaign queued", "campaign_id", ref.ID, "jobs", count)
 			}
 		}
+	}
+}
+
+func (w *Worker) reconcileDeliveryJourneys(ctx context.Context) {
+	if w.journeyReconciler != nil {
+		results, err := w.journeyReconciler.ReconcileBatch(
+			ctx, w.cfg.DeliveryJourneyReconcileBatch, w.cfg.DeliveryJourneyStuckAfter,
+		)
+		if err != nil {
+			w.logger.Warn("reconcile Stalwart delivery journeys", "error", err)
+		} else if len(results) > 0 {
+			counts := make(map[string]int)
+			for _, result := range results {
+				counts[result.Status]++
+			}
+			w.logger.Info("reconciled Stalwart delivery journeys", "count", len(results), "statuses", counts)
+		}
+	}
+
+	var stuck int64
+	if err := w.pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM campaign_recipient_tracking crt
+		JOIN delivery_jobs dj
+		  ON dj.organization_id = crt.organization_id
+		 AND dj.id = crt.delivery_job_id
+		WHERE dj.status IN ('submitted', 'accepted')
+		  AND crt.journey_status IN ('submitted_to_mail_server', 'relaying')
+		  AND COALESCE(crt.journey_last_stalwart_event_at, crt.accepted_at, dj.updated_at)
+		      <= now() - $1::interval
+	`, fmt.Sprintf("%f seconds", w.cfg.DeliveryJourneyStuckAfter.Seconds())).Scan(&stuck); err != nil {
+		w.logger.Warn("count stuck delivery journeys", "error", err)
+		return
+	}
+	observability.DeliveryJourneyStuckMessages.Set(float64(stuck))
+	if stuck > 0 {
+		w.logger.Warn("Stalwart delivery journeys are stuck without recent outbound events", "count", stuck)
 	}
 }
 

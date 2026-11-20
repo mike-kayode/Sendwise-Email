@@ -14,6 +14,7 @@ import (
 	"github.com/khayode/email-platform/internal/auth"
 	"github.com/khayode/email-platform/internal/campaigns"
 	"github.com/khayode/email-platform/internal/config"
+	"github.com/khayode/email-platform/internal/deliveryjourney"
 	"github.com/khayode/email-platform/internal/httpx"
 	"github.com/khayode/email-platform/internal/kit"
 	"github.com/khayode/email-platform/internal/observability"
@@ -26,6 +27,7 @@ type Server struct {
 	campaigns              *campaigns.Service
 	apiKeys                *auth.Service
 	delivery               *DeliveryHandler
+	journeyReconciler      *deliveryjourney.Reconciler
 	dnsResolver            DNSResolver
 	stalwartDomainHoster   stalwartDomainHoster
 	logger                 *slog.Logger
@@ -53,6 +55,12 @@ func New(
 		dnsResolver:    newDNSResolver(cfg.DNSResolverAddr, cfg.DNSResolverTimeout),
 		logger:         logger,
 		contactLimiter: kit.NewRateLimiter(5, 3),
+	}
+	if cfg.StalwartAdminUsername != "" && cfg.StalwartAdminPassword != "" {
+		server.journeyReconciler = deliveryjourney.NewReconciler(
+			pool, cfg.StalwartManagementURL, cfg.StalwartAdminUsername,
+			cfg.StalwartAdminPassword, cfg.BounceDomain,
+		)
 	}
 	server.stalwartDomainHoster = stalwartDomainProvisionFunc(func(ctx context.Context, domain string) error {
 		return ensureStalwartDomain(ctx, cfg, domain)
@@ -142,6 +150,10 @@ func (s *Server) Handler() http.Handler {
 	))
 	mux.Handle("GET /internal/admin/campaigns/{id}/delivery", kit.Chain(
 		http.HandlerFunc(s.getAdminCampaignDelivery),
+		kit.ServiceAuth(s.cfg.ServiceToken),
+	))
+	mux.Handle("POST /internal/admin/delivery-journey/backfill", kit.Chain(
+		http.HandlerFunc(s.backfillAdminDeliveryJourneys),
 		kit.ServiceAuth(s.cfg.ServiceToken),
 	))
 	mux.Handle("POST /internal/admin/campaigns/{id}/resume-deferred", kit.Chain(
@@ -364,11 +376,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/webhooks/bounce", s.delivery.requireWebhookAuth(s.delivery.bounceWebhook))
 	mux.Handle("POST /api/v1/webhooks/complaint", s.delivery.requireWebhookAuth(s.delivery.complaintWebhook))
 	mux.Handle("POST /api/v1/webhooks/stalwart-feedback", s.delivery.requireWebhookSignature(s.delivery.stalwartFeedbackWebhook))
+	mux.HandleFunc("POST /api/v1/webhooks/stalwart-events", s.delivery.stalwartEventsWebhook)
 
 	mux.Handle("GET /api/v1/analytics/overview", protect(s.analyticsOverview))
 	mux.Handle("GET /api/v1/analytics/campaigns/{id}", protect(s.campaignReport))
 	mux.Handle("GET /api/v1/campaigns/{id}/recipients", protect(s.listCampaignRecipients))
 	mux.Handle("GET /api/v1/campaigns/{id}/recipients/{recipientId}/activity", protect(s.getCampaignRecipientActivity))
+	mux.Handle("GET /api/v1/campaigns/{id}/recipients/{recipientId}/journey", protect(s.getCampaignRecipientJourney))
 	mux.Handle("GET /api/v1/campaigns/{id}/recipients/export", protect(s.exportCampaignRecipients))
 
 	mux.Handle("GET /api/v1/api-keys", protect(s.listAPIKeys, auth.RoleOwner, auth.RoleAdmin))

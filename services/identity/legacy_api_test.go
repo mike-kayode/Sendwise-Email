@@ -342,6 +342,42 @@ func TestHTTPAdminCampaignStopUsesServiceAuthAndMapsConflicts(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminDeliveryJourneyBackfillUsesServiceAuthAndForwardsRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/admin/delivery-journey/backfill" || r.Method != http.MethodPost {
+			t.Errorf("request = %s %s, want delivery journey backfill", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("X-Service-Token") != "service-token" {
+			t.Errorf("service token = %q, want configured token", r.Header.Get("X-Service-Token"))
+		}
+		var body struct {
+			AfterJobID string `json:"after_job_id"`
+			Limit      int    `json:"limit"`
+			DryRun     bool   `json:"dry_run"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode backfill body: %v", err)
+		}
+		if body.AfterJobID != "00000000-0000-4000-8000-000000000001" || body.Limit != 25 || !body.DryRun {
+			t.Errorf("backfill body = %+v, want forwarded cursor, limit, and dry-run", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"counts":{"accepted_final_state_unknown":2},"processed":2,"has_more":true,"dry_run":true}}`))
+	}))
+	defer server.Close()
+	client := NewHTTPLegacyAPIAdminClient(server.URL, "service-token")
+
+	result, err := client.BackfillAdminDeliveryJourneys(
+		context.Background(), "00000000-0000-4000-8000-000000000001", 25, true,
+	)
+	if err != nil {
+		t.Fatalf("BackfillAdminDeliveryJourneys() error = %v", err)
+	}
+	if !strings.Contains(string(result), `"accepted_final_state_unknown":2`) {
+		t.Fatalf("backfill result = %s, want status counts", result)
+	}
+}
+
 func TestHTTPAdminTransactionalMessageSearchUsesServiceAuthAndPagination(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/internal/admin/transactional-messages" || r.Method != http.MethodGet {

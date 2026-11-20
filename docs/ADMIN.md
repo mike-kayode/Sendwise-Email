@@ -216,6 +216,19 @@ Currently implemented security endpoints are:
   — paginated campaign metadata and delivery counts across workspaces. This
   route is available to support_admin and super_admin; it never returns
   campaign subject/body, message IDs, or recipient addresses.
+- Campaign recipient delivery timelines are available to workspace users through
+  `GET /api/v1/campaigns/{id}/recipients/{recipientId}/journey`; event history is
+  tenant-scoped, deduplicated, and does not expose a claim of inbox delivery.
+- The campaign delivery diagnostics panel shows the oldest unresolved messages
+  for that campaign, their last known stage, remote host, raw SMTP/enhanced
+  status codes, error, and the count exceeding the configured stuck threshold.
+- `POST /api/v1/admin/delivery-journey/backfill` — super_admin only, fresh MFA,
+  typed reason, and immutable before/after audit. Each request processes at most
+  1000 submitted jobs and returns `next_cursor`/`has_more`; continue with that
+  cursor to resume. Set `dry_run: true` to inspect counts without changing
+  journey state. Backfill never resends messages. Jobs without recipient
+  tracking are reported as `untracked`; missing Stalwart records become
+  `accepted_final_state_unknown`, never delivered.
 - `GET /api/v1/admin/transactional-messages?search=&limit=50&offset=0`
   — service-owned transactional message metadata search for support_admin and
   super_admin. It returns message/workspace identifiers, status, and timestamp

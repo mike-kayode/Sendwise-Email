@@ -77,6 +77,10 @@ type fakeLegacyAPIAdmin struct {
 	quotaDefaultsInput    json.RawMessage
 	quotaUpdatedBy        string
 	quotaUpdateReason     string
+	backfillResult        json.RawMessage
+	backfillAfterJobID    string
+	backfillLimit         int
+	backfillDryRun        bool
 }
 
 func (f *fakeLegacyAPIAdmin) AdminDomains(_ context.Context, search, status string, nearLimit bool, limit, offset int) ([]AdminSendingDomain, int, error) {
@@ -143,6 +147,14 @@ func (f *fakeLegacyAPIAdmin) ResumeAdminCampaignDeferredJobs(context.Context, st
 
 func (f *fakeLegacyAPIAdmin) ReplayAdminCampaignDeadLetters(context.Context, string) (int64, error) {
 	return 0, f.err
+}
+
+func (f *fakeLegacyAPIAdmin) BackfillAdminDeliveryJourneys(_ context.Context, afterJobID string, limit int, dryRun bool) (json.RawMessage, error) {
+	f.backfillAfterJobID, f.backfillLimit, f.backfillDryRun = afterJobID, limit, dryRun
+	if len(f.backfillResult) == 0 {
+		f.backfillResult = json.RawMessage(`{"counts":{"accepted_final_state_unknown":2},"processed":2,"has_more":false,"dry_run":true}`)
+	}
+	return f.backfillResult, f.err
 }
 
 func (f *fakeLegacyAPIAdmin) SearchAdminTransactionalMessages(_ context.Context, search string, limit, offset int) ([]AdminTransactionalMessage, int, error) {
@@ -1524,6 +1536,60 @@ func TestAdminCampaignStopIsSuperAdminOnlyReasonedAndAudited(t *testing.T) {
 	if len(adminStore.auditRows) != 1 || adminStore.auditRows[0].Action != "admin_campaign_stop_requested" ||
 		adminStore.auditRows[0].TargetID != campaignID || adminStore.auditRows[0].Reason != "Confirmed abuse report" {
 		t.Fatalf("campaign stop audit = %+v", adminStore.auditRows)
+	}
+}
+
+func TestAdminDeliveryJourneyBackfillIsSuperAdminFreshMFAAndAudited(t *testing.T) {
+	handler, baseStore, workspace, _ := newTestHandler(t)
+	adminStore := newAdminTestStore(baseStore)
+	handler.store = adminStore
+	operator := seedVerifiedUser(t, handler, baseStore, workspace, "journey-backfill-admin@example.test")
+	baseStore.usersByID[operator.ID].PlatformRole = PlatformRoleSupportAdmin
+	adminStore.mfa[operator.ID] = adminMFAState{Secret: "configured", Enabled: true}
+	token := createAdminTestSession(t, handler, baseStore, operator.ID)
+	freshMFA := time.Now()
+	for _, session := range baseStore.sessions {
+		if session.UserID == operator.ID {
+			session.AdminMFAVerifiedAt = &freshMFA
+		}
+	}
+	apiClient := &fakeLegacyAPIAdmin{}
+	handler.legacyAPI = apiClient
+	requestBody := `{"after_job_id":"9b2df23a-6c47-4e56-8648-927b1645d408","limit":25,"dry_run":true,"reason":"Review historical delivery states"}`
+	response := adminRequest(t, handler.Routes(), http.MethodPost, "/admin/delivery-journey/backfill", token, requestBody)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("support_admin backfill = %d, want forbidden: %s", response.Code, response.Body.String())
+	}
+	baseStore.usersByID[operator.ID].PlatformRole = PlatformRoleSuperAdmin
+	response = adminRequest(t, handler.Routes(), http.MethodPost, "/admin/delivery-journey/backfill", token, requestBody)
+	if response.Code != http.StatusOK {
+		t.Fatalf("delivery journey backfill = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	if apiClient.backfillAfterJobID != "9b2df23a-6c47-4e56-8648-927b1645d408" ||
+		apiClient.backfillLimit != 25 || !apiClient.backfillDryRun {
+		t.Fatalf("backfill request forwarded incorrectly: %+v", apiClient)
+	}
+	if len(adminStore.auditRows) != 1 {
+		t.Fatalf("backfill audit rows = %d, want 1", len(adminStore.auditRows))
+	}
+	audit := adminStore.auditRows[0]
+	if audit.Action != "admin_delivery_journey_backfill" ||
+		audit.Reason != "Review historical delivery states" ||
+		len(audit.BeforeState) == 0 || len(audit.AfterState) == 0 {
+		t.Fatalf("backfill audit entry missing reason or before/after state: %+v", audit)
+	}
+	if !strings.Contains(response.Body.String(), `"accepted_final_state_unknown":2`) {
+		t.Fatalf("backfill response missing result counts: %s", response.Body.String())
+	}
+	staleMFA := time.Now().Add(-10 * time.Minute)
+	for _, session := range baseStore.sessions {
+		if session.UserID == operator.ID {
+			session.AdminMFAVerifiedAt = &staleMFA
+		}
+	}
+	staleResponse := adminRequest(t, handler.Routes(), http.MethodPost, "/admin/delivery-journey/backfill", token, requestBody)
+	if staleResponse.Code != http.StatusForbidden || len(adminStore.auditRows) != 1 {
+		t.Fatalf("stale MFA backfill = %d, want forbidden without another audit: %s", staleResponse.Code, staleResponse.Body.String())
 	}
 }
 

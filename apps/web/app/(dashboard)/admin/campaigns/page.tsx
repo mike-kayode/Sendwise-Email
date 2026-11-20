@@ -38,6 +38,24 @@ type CampaignDeliveryDiagnostics = {
   status_counts: Record<string, number>;
   common_errors: { error: string; count: number }[];
   oldest_queued_at: string | null;
+  stuck_count: number;
+  oldest_unresolved: {
+    job_id: string;
+    stage: string;
+    last_event_at: string;
+    remote_host: string;
+    smtp_code?: number;
+    enhanced_code: string;
+    last_error: string;
+  }[];
+};
+
+type JourneyBackfillResult = {
+  counts: Record<string, number>;
+  processed: number;
+  next_cursor?: string;
+  has_more: boolean;
+  dry_run: boolean;
 };
 
 const pageSize = 25;
@@ -59,6 +77,11 @@ export default function AdminCampaignsPage() {
   const [deliveryCampaign, setDeliveryCampaign] = useState<AdminCampaign | null>(null);
   const [deliveryReason, setDeliveryReason] = useState("");
   const [deliveryMFACode, setDeliveryMFACode] = useState("");
+  const [backfillReason, setBackfillReason] = useState("");
+  const [backfillMFACode, setBackfillMFACode] = useState("");
+  const [backfillCursor, setBackfillCursor] = useState("");
+  const [backfillPreviewCursor, setBackfillPreviewCursor] = useState<string | null>(null);
+  const [backfillResult, setBackfillResult] = useState<JourneyBackfillResult | null>(null);
   const queryClient = useQueryClient();
   const sessionQuery = useQuery({
     queryKey: ["admin-session"],
@@ -114,6 +137,29 @@ export default function AdminCampaignsPage() {
       await queryClient.invalidateQueries({ queryKey: ["admin-campaigns"] });
     },
   });
+  const backfillMutation = useMutation({
+    mutationFn: async ({ dryRun, afterJobID }: { dryRun: boolean; afterJobID: string }) => {
+      await apiFetch("/admin/mfa/verify", { method: "POST", body: JSON.stringify({ code: backfillMFACode.trim() }) });
+      return apiFetch<{ data: JourneyBackfillResult }>("/admin/delivery-journey/backfill", {
+        method: "POST",
+        body: JSON.stringify({
+          after_job_id: afterJobID,
+          limit: 100,
+          dry_run: dryRun,
+          reason: backfillReason.trim(),
+        }),
+      });
+    },
+    onSuccess: ({ data }, variables) => {
+      setBackfillResult(data);
+      if (variables.dryRun) setBackfillPreviewCursor(variables.afterJobID);
+      else {
+        setBackfillCursor(data.next_cursor ?? "");
+        setBackfillPreviewCursor(null);
+      }
+      setBackfillMFACode("");
+    },
+  });
 
   if (sessionQuery.isLoading) return <p className="text-sm text-slate-500">Checking platform admin access...</p>;
   if (sessionQuery.error instanceof ApiError && sessionQuery.error.code === "admin_forbidden") notFound();
@@ -135,6 +181,40 @@ export default function AdminCampaignsPage() {
   return (
     <div>
       <PageHeader eyebrow={`Platform admin · ${session.platform_role.replace("_", " ")}`} title="Campaigns" description="Privacy-safe campaign status and delivery counts across workspaces." />
+      {session.platform_role === "super_admin" ? (
+        <section className="mb-5 rounded-xl border border-slate-200 bg-white p-4">
+          <h2 className="text-sm font-semibold text-slate-900">Submitted-message journey backfill</h2>
+          <p className="mt-1 text-xs text-slate-600">Reconcile up to 100 submitted jobs per batch against Stalwart. Dry run is read-only. Continue with the returned cursor to resume; no messages are resent.</p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <label className="text-xs font-medium text-slate-700">Required reason
+              <textarea value={backfillReason} onChange={(event) => setBackfillReason(event.target.value)} maxLength={500} rows={2} className="mt-1 w-full rounded-lg border border-slate-200 p-3 text-sm" />
+            </label>
+            <label className="text-xs font-medium text-slate-700">Authenticator or recovery code
+              <input value={backfillMFACode} onChange={(event) => setBackfillMFACode(event.target.value)} autoComplete="one-time-code" className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" />
+            </label>
+          </div>
+          {backfillMutation.error ? <p role="alert" className="mt-3 text-sm text-rose-700">{backfillMutation.error.message}</p> : null}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" onClick={() => backfillMutation.mutate({ dryRun: true, afterJobID: backfillCursor })} disabled={!backfillReason.trim() || !backfillMFACode.trim() || backfillMutation.isPending || backfillPreviewCursor !== null} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-50">
+              {backfillMutation.isPending ? "Working..." : "Preview next batch"}
+            </button>
+            <button type="button" onClick={() => {
+              const afterJobID = backfillPreviewCursor ?? backfillCursor;
+              if (window.confirm("Apply this batch? It records reconciled journey states and never resends messages.")) backfillMutation.mutate({ dryRun: false, afterJobID });
+            }} disabled={!backfillReason.trim() || !backfillMFACode.trim() || backfillMutation.isPending} className="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">
+              Apply next batch
+            </button>
+            <button type="button" onClick={() => { setBackfillCursor(""); setBackfillPreviewCursor(null); setBackfillResult(null); }} className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600 ring-1 ring-slate-200">Restart cursor</button>
+          </div>
+          {backfillResult ? (
+            <div className="mt-3 rounded-lg bg-slate-50 p-3 text-xs text-slate-700">
+              <p>{backfillResult.dry_run ? "Preview" : "Applied"} {backfillResult.processed} jobs · {backfillResult.has_more ? "more batches available" : "complete"}</p>
+              <p className="mt-1">{Object.entries(backfillResult.counts).map(([stage, count]) => `${stage}: ${count.toLocaleString()}`).join(" · ") || "No jobs in this batch."}</p>
+              {backfillResult.next_cursor ? <p className="mt-1 break-all font-mono text-[10px]">Resume cursor: {backfillResult.next_cursor}</p> : null}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
       <form
         className="mb-4 grid gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:grid-cols-2 xl:grid-cols-[1fr_190px_1fr_auto]"
         onSubmit={(event) => {
@@ -282,6 +362,23 @@ export default function AdminCampaignsPage() {
                   ))}
                 </div>
                 <p className="text-xs text-slate-600">Oldest queued job: {timeLabel(deliveryQuery.data.data.oldest_queued_at)}</p>
+                <section className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                  <h3 className="text-sm font-semibold text-amber-950">Stuck messages · {deliveryQuery.data.data.stuck_count.toLocaleString()}</h3>
+                  <p className="mt-1 text-xs text-amber-900">Submitted to Stalwart with no journey update beyond the configured alert threshold. This does not mean the recipient server accepted the message.</p>
+                  {deliveryQuery.data.data.oldest_unresolved.length ? (
+                    <ul className="mt-3 space-y-2">
+                      {deliveryQuery.data.data.oldest_unresolved.map((entry) => (
+                        <li key={entry.job_id} className="break-all border-t border-amber-200 pt-2 text-xs text-amber-950">
+                          <span className="font-medium">{entry.stage}</span> · {timeLabel(entry.last_event_at)}
+                          {entry.remote_host ? <p className="mt-1">Remote host: {entry.remote_host}</p> : null}
+                          {entry.smtp_code || entry.enhanced_code ? <p className="mt-1 font-mono">SMTP {entry.smtp_code ?? "—"} {entry.enhanced_code}</p> : null}
+                          {entry.last_error ? <p className="mt-1">{entry.last_error}</p> : null}
+                          <p className="font-mono text-[10px] text-amber-800">{entry.job_id}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : <p className="mt-2 text-xs text-amber-900">No unresolved messages are currently past the threshold.</p>}
+                </section>
                 <div>
                   <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Common delivery errors</h3>
                   {deliveryQuery.data.data.common_errors.length ? (

@@ -110,6 +110,7 @@ type LegacyAPIAdminClient interface {
 	AdminCampaignDelivery(ctx context.Context, campaignID string) (json.RawMessage, error)
 	ResumeAdminCampaignDeferredJobs(ctx context.Context, campaignID string) (int64, error)
 	ReplayAdminCampaignDeadLetters(ctx context.Context, campaignID string) (int64, error)
+	BackfillAdminDeliveryJourneys(ctx context.Context, afterJobID string, limit int, dryRun bool) (json.RawMessage, error)
 	SearchAdminTransactionalMessages(ctx context.Context, search string, limit, offset int) ([]AdminTransactionalMessage, int, error)
 	AdminOperationalMetrics(ctx context.Context) (AdminOperationalMetrics, error)
 	AdminDomainQuotas(ctx context.Context, domainID string) (json.RawMessage, error)
@@ -607,6 +608,18 @@ func (c *httpLegacyAPIAdminClient) ResumeAdminCampaignDeferredJobs(ctx context.C
 
 func (c *httpLegacyAPIAdminClient) ReplayAdminCampaignDeadLetters(ctx context.Context, campaignID string) (int64, error) {
 	return c.adminCampaignDeliveryAction(ctx, campaignID, "replay-dead-letter", "replayed")
+}
+
+func (c *httpLegacyAPIAdminClient) BackfillAdminDeliveryJourneys(ctx context.Context, afterJobID string, limit int, dryRun bool) (json.RawMessage, error) {
+	body, err := json.Marshal(map[string]any{
+		"after_job_id": afterJobID,
+		"limit":        limit,
+		"dry_run":      dryRun,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode delivery journey backfill request: %w", err)
+	}
+	return c.adminQuotaRequest(ctx, http.MethodPost, "/internal/admin/delivery-journey/backfill", body)
 }
 
 func (c *httpLegacyAPIAdminClient) adminCampaignDeliveryAction(ctx context.Context, campaignID, action, field string) (int64, error) {

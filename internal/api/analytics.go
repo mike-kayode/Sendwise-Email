@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
@@ -174,6 +175,57 @@ func (s *Server) campaignReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	journeyFunnel := make(map[string]int64)
+	journeyRows, err := s.pool.Query(r.Context(), `
+		SELECT journey_status, count(*)::bigint
+		FROM campaign_recipient_tracking
+		WHERE organization_id = $1::uuid AND campaign_id = $2::uuid
+		GROUP BY journey_status
+	`, orgID, campaignID)
+	if err != nil {
+		s.logger.Error("load campaign delivery journey funnel", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load delivery journey funnel.")
+		return
+	}
+	for journeyRows.Next() {
+		var stage string
+		var count int64
+		if err := journeyRows.Scan(&stage, &count); err != nil {
+			journeyRows.Close()
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load delivery journey funnel.")
+			return
+		}
+		journeyFunnel[stage] = count
+	}
+	if err := journeyRows.Err(); err != nil {
+		journeyRows.Close()
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load delivery journey funnel.")
+		return
+	}
+	journeyRows.Close()
+	journeyFunnel["opened"] = uniqueOpens
+	journeyFunnel["clicked"] = uniqueClicks
+	stuckAfter := s.cfg.DeliveryJourneyStuckAfter
+	if stuckAfter <= 0 {
+		stuckAfter = 30 * time.Minute
+	}
+	var stuckCount int64
+	if err := s.pool.QueryRow(r.Context(), `
+		SELECT count(*)::bigint
+		FROM campaign_recipient_tracking crt
+		JOIN delivery_jobs dj
+		  ON dj.organization_id = crt.organization_id AND dj.id = crt.delivery_job_id
+		WHERE crt.organization_id = $1::uuid AND crt.campaign_id = $2::uuid
+		  AND dj.status = 'submitted'
+		  AND crt.journey_status IN ('submitted_to_mail_server', 'relaying')
+		  AND COALESCE(crt.journey_last_stalwart_event_at, crt.accepted_at, dj.updated_at)
+		      <= now() - $3::interval
+	`, orgID, campaignID, fmt.Sprintf("%f seconds", stuckAfter.Seconds())).Scan(&stuckCount); err != nil {
+		s.logger.Error("count stuck campaign delivery journeys", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not count stuck delivery journeys.")
+		return
+	}
+
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"campaign": c,
 		"recipients": map[string]any{
@@ -182,6 +234,10 @@ func (s *Server) campaignReport(w http.ResponseWriter, r *http.Request) {
 		},
 		"events": map[string]any{
 			"by_type": events,
+		},
+		"journey": map[string]any{
+			"funnel": journeyFunnel,
+			"stuck":  stuckCount,
 		},
 		"rates": map[string]float64{
 			"open_rate":      percent(events["opened"], totalRecipients),
@@ -228,6 +284,7 @@ type campaignRecipientRow struct {
 	LastClickedAt            *string `json:"last_clicked_at"`
 	LastActivityAt           *string `json:"last_activity_at"`
 	EngagementClassification string  `json:"engagement_classification"`
+	JourneyStatus            string  `json:"journey_status"`
 }
 
 func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) {
@@ -241,6 +298,11 @@ func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) 
 	opened := strings.TrimSpace(r.URL.Query().Get("opened"))
 	clicked := strings.TrimSpace(r.URL.Query().Get("clicked"))
 	classification := strings.TrimSpace(r.URL.Query().Get("classification"))
+	stage := strings.TrimSpace(r.URL.Query().Get("stage"))
+	if stage != "" && !validJourneyStage(stage) {
+		httpx.Error(w, http.StatusBadRequest, "invalid_stage", "The requested delivery journey stage is invalid.")
+		return
+	}
 	sort := strings.TrimSpace(r.URL.Query().Get("sort"))
 	limit, offset := 25, 0
 	if raw := r.URL.Query().Get("limit"); raw != "" {
@@ -276,12 +338,15 @@ func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) 
 		FROM campaign_recipient_tracking crt
 		JOIN contacts c ON c.id = crt.contact_id
 		WHERE crt.organization_id = $1 AND crt.campaign_id = $2
-		  AND ($3 = '' OR crt.delivery_status = $3)
-		  AND ($4 = '' OR crt.email ILIKE '%' || $4 || '%' OR c.first_name ILIKE '%' || $4 || '%' OR c.last_name ILIKE '%' || $4 || '%')
-		  AND ($5 = '' OR ($5 = 'yes' AND crt.open_count > 0) OR ($5 = 'no' AND crt.open_count = 0))
-		  AND ($6 = '' OR ($6 = 'yes' AND crt.click_count > 0) OR ($6 = 'no' AND crt.click_count = 0))
-		  AND ($7 = '' OR crt.engagement_classification = $7)
-	`, orgID, campaignID, status, search, opened, clicked, classification).Scan(&total); err != nil {
+		  AND ($3::text = '' OR crt.delivery_status = $3::text)
+		  AND ($4::text = '' OR crt.email ILIKE '%' || $4::text || '%' OR c.first_name ILIKE '%' || $4::text || '%' OR c.last_name ILIKE '%' || $4::text || '%')
+		  AND ($5::text = '' OR ($5::text = 'yes' AND crt.open_count > 0) OR ($5::text = 'no' AND crt.open_count = 0))
+		  AND ($6::text = '' OR ($6::text = 'yes' AND crt.click_count > 0) OR ($6::text = 'no' AND crt.click_count = 0))
+		  AND ($7::text = '' OR crt.engagement_classification = $7::text)
+		  AND ($8::text = '' OR crt.journey_status = $8::text
+		       OR ($8::text = 'opened' AND crt.open_count > 0)
+		       OR ($8::text = 'clicked' AND crt.click_count > 0))
+	`, orgID, campaignID, status, search, opened, clicked, classification, stage).Scan(&total); err != nil {
 		s.logger.Error("count campaign recipients", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not count campaign recipients.")
 		return
@@ -294,19 +359,22 @@ func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) 
 		       crt.open_count, crt.first_opened_at::text, crt.last_opened_at::text,
 		       crt.click_count, crt.last_clicked_at::text,
 		       GREATEST(crt.last_opened_at, crt.last_clicked_at)::text,
-		       crt.engagement_classification
+		       crt.engagement_classification, crt.journey_status
 		FROM campaign_recipient_tracking crt
 		JOIN contacts c ON c.id = crt.contact_id
 		WHERE crt.organization_id = $1 AND crt.campaign_id = $2
-		  AND ($3 = '' OR crt.delivery_status = $3)
-		  AND ($4 = '' OR crt.email ILIKE '%' || $4 || '%' OR c.first_name ILIKE '%' || $4 || '%' OR c.last_name ILIKE '%' || $4 || '%')
-		  AND ($5 = '' OR ($5 = 'yes' AND crt.open_count > 0) OR ($5 = 'no' AND crt.open_count = 0))
-		  AND ($6 = '' OR ($6 = 'yes' AND crt.click_count > 0) OR ($6 = 'no' AND crt.click_count = 0))
-		  AND ($7 = '' OR crt.engagement_classification = $7)
+		  AND ($3::text = '' OR crt.delivery_status = $3::text)
+		  AND ($4::text = '' OR crt.email ILIKE '%' || $4::text || '%' OR c.first_name ILIKE '%' || $4::text || '%' OR c.last_name ILIKE '%' || $4::text || '%')
+		  AND ($5::text = '' OR ($5::text = 'yes' AND crt.open_count > 0) OR ($5::text = 'no' AND crt.open_count = 0))
+		  AND ($6::text = '' OR ($6::text = 'yes' AND crt.click_count > 0) OR ($6::text = 'no' AND crt.click_count = 0))
+		  AND ($7::text = '' OR crt.engagement_classification = $7::text)
+		  AND ($8::text = '' OR crt.journey_status = $8::text
+		       OR ($8::text = 'opened' AND crt.open_count > 0)
+		       OR ($8::text = 'clicked' AND crt.click_count > 0))
 		ORDER BY ` + orderBy + `
-		LIMIT $8 OFFSET $9
+		LIMIT $9::integer OFFSET $10::integer
 	`
-	rows, err := s.pool.Query(r.Context(), query, orgID, campaignID, status, search, opened, clicked, classification, limit, offset)
+	rows, err := s.pool.Query(r.Context(), query, orgID, campaignID, status, search, opened, clicked, classification, stage, limit, offset)
 	if err != nil {
 		s.logger.Error("list campaign recipients", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not list campaign recipients.")
@@ -319,7 +387,7 @@ func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) 
 		if err := rows.Scan(&row.RecipientID, &row.Name, &row.Email, &row.DeliveryStatus,
 			&row.QueuedAt, &row.AcceptedAt, &row.DeliveredAt, &row.OpenCount,
 			&row.FirstOpenedAt, &row.LastOpenedAt, &row.ClickCount, &row.LastClickedAt,
-			&row.LastActivityAt, &row.EngagementClassification,
+			&row.LastActivityAt, &row.EngagementClassification, &row.JourneyStatus,
 		); err != nil {
 			s.logger.Error("scan campaign recipient", "error", err)
 			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not list campaign recipients.")
@@ -400,9 +468,21 @@ func (s *Server) exportCampaignRecipients(w http.ResponseWriter, r *http.Request
 		SELECT crt.email, crt.delivery_status, crt.accepted_at, crt.delivered_at,
 		       crt.open_count, crt.first_opened_at, crt.last_opened_at,
 		       crt.click_count, crt.last_clicked_at,
-		       crt.engagement_classification
+		       crt.engagement_classification, crt.journey_status,
+		       COALESCE(last_event.smtp_code::text, ''),
+		       COALESCE(last_event.reason, ''),
+		       COALESCE(last_event.attempt_number, 0),
+		       COALESCE(last_event.remote_mx_host, '')
 		FROM campaign_recipient_tracking crt
-		WHERE crt.organization_id = $1 AND crt.campaign_id = $2
+		LEFT JOIN LATERAL (
+			SELECT smtp_code, reason, attempt_number, remote_mx_host
+			FROM delivery_journey_events
+			WHERE organization_id = crt.organization_id
+			  AND delivery_job_id = crt.delivery_job_id
+			ORDER BY event_timestamp DESC, id DESC
+			LIMIT 1
+		) last_event ON true
+		WHERE crt.organization_id = $1::uuid AND crt.campaign_id = $2::uuid
 		ORDER BY crt.email
 	`, orgID, campaignID)
 	if err != nil {
@@ -413,12 +493,14 @@ func (s *Server) exportCampaignRecipients(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", `attachment; filename="campaign-recipient-tracking.csv"`)
 	writer := csv.NewWriter(w)
-	_ = writer.Write([]string{"recipient_email", "delivery_status", "accepted_at", "delivered_at", "open_count", "first_opened_at", "last_opened_at", "click_count", "last_clicked_at", "engagement_classification"})
+	_ = writer.Write([]string{"recipient_email", "delivery_status", "accepted_at", "delivered_at", "open_count", "first_opened_at", "last_opened_at", "click_count", "last_clicked_at", "engagement_classification", "last_stage", "last_smtp_code", "last_reason", "attempts", "remote_mx_host"})
 	for rows.Next() {
-		var email, status, classification string
+		var email, status, classification, journeyStatus, smtpCode, reason, remoteHost string
 		var accepted, delivered, firstOpen, lastOpen, lastClick *time.Time
 		var opens, clicks int64
-		if err := rows.Scan(&email, &status, &accepted, &delivered, &opens, &firstOpen, &lastOpen, &clicks, &lastClick, &classification); err != nil {
+		var attempts int
+		if err := rows.Scan(&email, &status, &accepted, &delivered, &opens, &firstOpen, &lastOpen, &clicks, &lastClick, &classification,
+			&journeyStatus, &smtpCode, &reason, &attempts, &remoteHost); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not export recipient tracking.")
 			return
 		}
@@ -426,6 +508,7 @@ func (s *Server) exportCampaignRecipients(w http.ResponseWriter, r *http.Request
 			email, status, timeValue(accepted), timeValue(delivered),
 			strconv.FormatInt(opens, 10), timeValue(firstOpen), timeValue(lastOpen),
 			strconv.FormatInt(clicks, 10), timeValue(lastClick), classification,
+			journeyStatus, smtpCode, reason, strconv.Itoa(attempts), remoteHost,
 		})
 	}
 	writer.Flush()

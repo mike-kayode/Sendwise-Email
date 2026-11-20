@@ -210,6 +210,7 @@ func (h *Handler) adminRoutes() http.Handler {
 	mux.Handle("GET /admin/campaigns/{campaignID}/delivery", h.requireAdminMFA(AdminReadCampaigns, http.HandlerFunc(h.getAdminCampaignDelivery)))
 	mux.Handle("POST /admin/campaigns/{campaignID}/resume-deferred", h.requireAdminMFA(AdminManageCampaigns, http.HandlerFunc(h.resumeAdminCampaignDeferredJobs)))
 	mux.Handle("POST /admin/campaigns/{campaignID}/replay-dead-letter", h.requireAdminMFA(AdminManageCampaigns, http.HandlerFunc(h.replayAdminCampaignDeadLetters)))
+	mux.Handle("POST /admin/delivery-journey/backfill", h.requireAdminMFA(AdminManageCampaigns, http.HandlerFunc(h.backfillAdminDeliveryJourneys)))
 	mux.Handle("GET /admin/transactional-messages", h.requireAdminMFA(AdminReadDelivery, http.HandlerFunc(h.searchAdminTransactionalMessages)))
 	mux.Handle("GET /admin/suppressions", h.requireAdminMFA(AdminManageSuppressions, http.HandlerFunc(h.getAdminSuppressions)))
 	mux.Handle("POST /admin/suppressions", h.requireAdminMFA(AdminManageSuppressions, http.HandlerFunc(h.createAdminSuppression)))
@@ -2455,6 +2456,76 @@ func (h *Handler) resumeAdminCampaignDeferredJobs(w http.ResponseWriter, r *http
 
 func (h *Handler) replayAdminCampaignDeadLetters(w http.ResponseWriter, r *http.Request) {
 	h.runAdminCampaignDeliveryAction(w, r, "replay_dead_letter", "replay dead-lettered jobs")
+}
+
+func (h *Handler) backfillAdminDeliveryJourneys(w http.ResponseWriter, r *http.Request) {
+	actor, _ := r.Context().Value(adminActorKey{}).(*adminActor)
+	if !adminMFAIsRecent(actor.session.AdminMFAVerifiedAt, time.Now()) {
+		kit.Error(w, http.StatusForbidden, "admin_reauth_required", "Re-verify your authenticator before backfilling delivery journeys.")
+		return
+	}
+	var request struct {
+		AfterJobID string `json:"after_job_id"`
+		Limit      int    `json:"limit"`
+		DryRun     bool   `json:"dry_run"`
+		Reason     string `json:"reason"`
+	}
+	if err := kit.Decode(w, r, &request); err != nil {
+		kit.Error(w, http.StatusBadRequest, "invalid_backfill_request", "Provide a valid delivery journey backfill request.")
+		return
+	}
+	request.Reason = strings.TrimSpace(request.Reason)
+	if request.Reason == "" || len(request.Reason) > 500 {
+		kit.Error(w, http.StatusBadRequest, "admin_reason_required", "Provide a reason of 1 to 500 characters.")
+		return
+	}
+	if request.Limit == 0 {
+		request.Limit = 100
+	}
+	if request.Limit < 1 || request.Limit > 1000 {
+		kit.Error(w, http.StatusBadRequest, "invalid_backfill_limit", "Backfill limit must be from 1 to 1000.")
+		return
+	}
+	if h.legacyAPI == nil {
+		kit.Error(w, http.StatusServiceUnavailable, "delivery_journey_backfill_unavailable", "Delivery journey backfill is unavailable.")
+		return
+	}
+	result, err := h.legacyAPI.BackfillAdminDeliveryJourneys(
+		r.Context(), request.AfterJobID, request.Limit, request.DryRun,
+	)
+	if err != nil {
+		h.logger.Error("backfill admin delivery journeys", "error", err, "dry_run", request.DryRun)
+		kit.Error(w, http.StatusServiceUnavailable, "delivery_journey_backfill_failed", "Delivery journey backfill could not be completed.")
+		return
+	}
+	before, err := json.Marshal(map[string]any{
+		"after_job_id": request.AfterJobID,
+		"limit":        request.Limit,
+		"dry_run":      request.DryRun,
+	})
+	if err != nil {
+		h.logger.Error("encode delivery journey backfill audit before state", "error", err)
+		kit.Error(w, http.StatusInternalServerError, "delivery_journey_backfill_failed", "Delivery journey backfill could not be audited.")
+		return
+	}
+	after, err := json.Marshal(result)
+	if err != nil {
+		h.logger.Error("encode delivery journey backfill audit after state", "error", err)
+		kit.Error(w, http.StatusInternalServerError, "delivery_journey_backfill_failed", "Delivery journey backfill could not be audited.")
+		return
+	}
+	if err := h.writeAdminAudit(r, actor, "admin_delivery_journey_backfill", "delivery_journey", "submitted", request.Reason, before, after); err != nil {
+		h.logger.Error("audit delivery journey backfill", "error", err)
+		kit.Error(w, http.StatusInternalServerError, "delivery_journey_backfill_failed", "The batch ran but its audit record could not be written.")
+		return
+	}
+	var decoded any
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		h.logger.Error("decode delivery journey backfill result", "error", err)
+		kit.Error(w, http.StatusInternalServerError, "delivery_journey_backfill_failed", "The batch result could not be decoded.")
+		return
+	}
+	kit.JSON(w, http.StatusOK, map[string]any{"data": decoded})
 }
 
 func (h *Handler) runAdminCampaignDeliveryAction(w http.ResponseWriter, r *http.Request, action, label string) {

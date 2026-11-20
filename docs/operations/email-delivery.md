@@ -195,3 +195,69 @@ Track: queue backlog, worker throughput, SMTP connection failures, deferred mess
 hard bounce rate, complaint rate, unsubscribe rate, authentication failures, disk space.
 Alert on: queue growth, worker failure, Stalwart unavailable, database unavailable, high
 bounce/complaint rates, domain authentication failures.
+
+## Recipient delivery journey
+
+Migration `0039_delivery_journey.sql` adds tenant-scoped current journey state and an
+append-only, event-hash-deduplicated timeline per campaign recipient. The API exposes
+`GET /api/v1/campaigns/{id}/recipients/{recipientId}/journey`; campaign reports expose
+stage counts and the stale-submission count, and recipient CSV exports include the last
+stage, SMTP code, reason, attempt count, and remote MX host.
+The migration is forward-only. For an application rollback, revert the application
+image while leaving these additive columns, tables, and status constraints in place;
+do not delete journey events or restore the ambiguous legacy `accepted` label.
+
+The customer UI calls the final positive SMTP result **Accepted by recipient server**.
+That means only that the recipient's mail server accepted the message; it never means
+inbox placement. `submitted_to_mail_server` means Stalwart accepted the SMTP submission.
+Events are correlated by the signed VERP return path, Stalwart span ID, or transport
+Message-ID, and all persisted records are organization scoped.
+
+The pinned Stalwart image emits delivery telemetry as signed JSON batches. Its
+`X-Signature` is Base64 HMAC-SHA256 over the raw request body; this differs from the
+timestamped signature on the inbound DSN endpoint. For the pinned `v1.0.3` build, the
+configured event set includes `delivery.attempt-start`, `delivery.attempt-end`,
+connection/TLS/SMTP failures, `delivery.completed`, `delivery.delivered`,
+`delivery.failed`, `delivery.dsn-success`, `delivery.dsn-temp-fail`,
+`delivery.dsn-perm-fail`, and `queue.rescheduled`.
+
+Configure the Stalwart webhook using the dry-run-by-default script. Do not put
+credentials on the command line or in shell history; supply them as environment
+variables through the operator's secret manager:
+
+```sh
+export STALWART_MANAGEMENT_URL='http://127.0.0.1:8081'
+export STALWART_ADMIN_USERNAME='<operator>'
+export STALWART_ADMIN_PASSWORD='<secret-manager value>'
+export STALWART_EVENTS_WEBHOOK_URL='https://<sendwise-host>/api/v1/webhooks/stalwart-events'
+export WEBHOOK_SECRET='<same secret configured for Sendwise>'
+./scripts/configure-stalwart-events.sh
+./scripts/configure-stalwart-events.sh --apply
+```
+
+The default invocation makes no network request. `--apply` creates or updates the
+matching webhook on the Stalwart JMAP API. Never enable invalid TLS certificates for a
+production endpoint. The Sendwise deploy smoke test verifies that the telemetry route
+rejects an unsigned body and accepts a signed empty test batch without creating data.
+
+The worker's bounded JMAP poller queries queued Stalwart messages by VERP return path
+for stale submissions and updates recipient state from the recipient-specific queue
+entry. `DELIVERY_JOURNEY_RECONCILE_INTERVAL` defaults to `1m`,
+`DELIVERY_JOURNEY_RECONCILE_BATCH` to `100`, and `DELIVERY_JOURNEY_STUCK_AFTER` to
+`30m`. The `DeliveryJourneyStuck` Prometheus warning fires while
+`delivery_journey_stuck_messages` is nonzero. A message absent from Stalwart's queue
+and without a delivery event is recorded as `accepted_final_state_unknown`, never as
+delivered.
+
+The super-admin Campaigns console provides a cursor-resumable historical backfill.
+First run **Preview next batch** to see counts without writes, then **Apply next
+batch** to record those reconciled states. Both operations require fresh MFA and a
+typed reason and are written to the immutable admin audit log. Continue batches using
+the returned cursor; jobs are never republished or resent by this operation. Jobs
+without tracking rows are counted as `untracked`; missing Stalwart queue records
+become `accepted_final_state_unknown`.
+
+The campaign's **Delivery jobs** panel shows the oldest unresolved messages, their
+last known journey stage/error, and the count older than the configured stuck
+threshold. Investigate these with the configured JMAP poller and signed event stream;
+do not use manual SQL updates to fabricate recipient outcomes.

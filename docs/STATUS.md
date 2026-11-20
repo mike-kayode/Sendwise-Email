@@ -753,6 +753,33 @@ $ npm --prefix apps/web run build
 Route table includes /admin/suppressions and /admin/domains/[domainID].
 ```
 
+## Recipient delivery journey implementation status
+
+Migration `0039_delivery_journey.sql` adds a tenant-scoped journey event log and
+current recipient state. The API records campaign send-state transitions, signed
+Stalwart outbound events, inbound campaign DSN/ARF feedback, and recipient opens
+and clicks. The scheduled worker queries Stalwart's pinned-version JMAP
+`x:QueuedMessage/query/get` API for stale submitted messages; absent queue entries
+become `accepted_final_state_unknown`, not delivered. Stage filtering, report
+counts, timeline JSON, customer-language labels, and CSV last-known details are
+implemented. A Prometheus stuck-message gauge and warning rule are included.
+
+The Stalwart webhook setup script is dry-run by default; `--apply` configures the
+matching `x:WebHook` object. Deployment smoke checks exercise unsigned rejection
+and signed acceptance. No production services were accessed or changed.
+
+The super-admin campaign console now includes an MFA- and reason-protected,
+audited, cursor-resumable backfill with dry-run counts and bounded batches.
+Campaign delivery diagnostics list the oldest unresolved messages and stuck
+count. The backfill does not resend jobs; a missing Stalwart record is reported
+as `accepted_final_state_unknown`, and jobs lacking recipient tracking are
+reported as `untracked`.
+
+**Still not complete:** a real-Stalwart integration run, exhaustive coverage of
+every out-of-order telemetry event shape, and a production-like full-browser
+journey have not been verified. No production service was accessed or changed.
+*** End of File
+
 ## Per-domain warm-up override
 
 Migration `0034_domain_warmup_overrides.sql` adds the bounded, expiring

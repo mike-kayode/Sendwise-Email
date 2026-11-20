@@ -48,7 +48,7 @@ fail() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; exit 1; }
 require_tools() {
   local missing=()
   local tool
-  for tool in jq curl docker gzip; do
+  for tool in jq curl docker gzip openssl; do
     if ! command -v "$tool" >/dev/null 2>&1; then
       missing+=("$tool")
     fi
@@ -364,6 +364,22 @@ outbound_smtp_check() {
   fail "smoke check failed: Stalwart could not establish outbound SMTP on $host:25"
 }
 
+delivery_journey_webhook_check() {
+  local endpoint="http://127.0.0.1:8080/api/v1/webhooks/stalwart-events"
+  local payload='{"events":[]}'
+  local unsigned_status signature signed_status
+  unsigned_status="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' \
+    -H 'Content-Type: application/json' --data "$payload" "$endpoint" 2>/dev/null || true)"
+  [ "$unsigned_status" = "401" ] || fail "delivery telemetry webhook accepted unsigned payload (status=$unsigned_status)"
+  [ -n "${WEBHOOK_SECRET:-}" ] || fail "WEBHOOK_SECRET is required for delivery telemetry smoke test"
+  signature="$(printf '%s' "$payload" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -binary | openssl base64 -A)"
+  signed_status="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' \
+    -H 'Content-Type: application/json' -H "X-Signature: $signature" \
+    --data "$payload" "$endpoint" 2>/dev/null || true)"
+  [ "$signed_status" = "204" ] || fail "delivery telemetry webhook rejected signed test event (status=$signed_status)"
+  log "  ok  delivery-journey-webhook-signature"
+}
+
 smoke_tests() {
   log "Running smoke tests against the combined stack..."
   http_check "legacy-api-ready"  "http://127.0.0.1:8080/readyz" "-"
@@ -374,6 +390,7 @@ smoke_tests() {
   http_check "worker-health"     "http://127.0.0.1:9091/healthz" "-"
   http_check "web"               "http://127.0.0.1:3000" "-"
   outbound_smtp_check
+  delivery_journey_webhook_check
   local caddy_status
   caddy_status="$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:80/ || echo 000)"
   case "$caddy_status" in

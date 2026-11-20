@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/khayode/email-platform/internal/httpx"
 )
 
@@ -36,7 +38,17 @@ type adminCampaignDeliveryDiagnostics struct {
 		Error string `json:"error"`
 		Count int    `json:"count"`
 	} `json:"common_errors"`
-	OldestQueuedAt *time.Time `json:"oldest_queued_at"`
+	OldestQueuedAt   *time.Time `json:"oldest_queued_at"`
+	StuckCount       int        `json:"stuck_count"`
+	OldestUnresolved []struct {
+		JobID        string    `json:"job_id"`
+		Stage        string    `json:"stage"`
+		LastEventAt  time.Time `json:"last_event_at"`
+		RemoteHost   string    `json:"remote_host"`
+		SMTPCode     *int      `json:"smtp_code,omitempty"`
+		EnhancedCode string    `json:"enhanced_code"`
+		LastError    string    `json:"last_error"`
+	} `json:"oldest_unresolved"`
 }
 
 func (s *Server) getAdminCampaignDelivery(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +144,131 @@ func (s *Server) getAdminCampaignDelivery(w http.ResponseWriter, r *http.Request
 		return
 	}
 	errorsRows.Close()
+	stuckAfter := s.cfg.DeliveryJourneyStuckAfter
+	if stuckAfter <= 0 {
+		stuckAfter = 30 * time.Minute
+	}
+	if err := s.pool.QueryRow(r.Context(), `
+		SELECT count(*)::int
+		FROM delivery_jobs dj
+		JOIN campaign_recipient_tracking crt
+		  ON crt.organization_id = dj.organization_id
+		 AND crt.delivery_job_id = dj.id
+		WHERE dj.campaign_id = $1::uuid
+		  AND dj.status IN ('submitted', 'accepted')
+		  AND crt.journey_status IN ('submitted_to_mail_server', 'relaying')
+		  AND COALESCE(crt.journey_last_event_at, dj.accepted_at, dj.updated_at)
+		      < now() - $2::interval
+	`, campaignID, fmt.Sprintf("%f seconds", stuckAfter.Seconds())).Scan(&result.StuckCount); err != nil {
+		s.logger.Error("count stuck admin campaign delivery journeys", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+		return
+	}
+	unresolvedRows, err := s.pool.Query(r.Context(), `
+		SELECT dj.id::text, crt.journey_status,
+		       COALESCE(crt.journey_last_event_at, dj.accepted_at, dj.updated_at),
+		       crt.journey_remote_host, crt.journey_smtp_code, crt.journey_enhanced_code,
+		       COALESCE(
+		           NULLIF(dj.last_error, ''),
+		           (SELECT dje.reason
+		            FROM delivery_journey_events dje
+		            WHERE dje.organization_id = dj.organization_id
+		              AND dje.delivery_job_id = dj.id
+		            ORDER BY dje.event_timestamp DESC, dje.id DESC
+		            LIMIT 1),
+		           ''
+		       )
+		FROM delivery_jobs dj
+		JOIN campaign_recipient_tracking crt
+		  ON crt.organization_id = dj.organization_id
+		 AND crt.delivery_job_id = dj.id
+		WHERE dj.campaign_id = $1::uuid
+		  AND dj.status IN ('submitted', 'accepted')
+		  AND crt.journey_status IN ('submitted_to_mail_server', 'relaying')
+		  AND COALESCE(crt.journey_last_event_at, dj.accepted_at, dj.updated_at)
+		      < now() - $2::interval
+		ORDER BY COALESCE(crt.journey_last_event_at, dj.accepted_at, dj.updated_at), dj.id
+		LIMIT 20
+	`, campaignID, fmt.Sprintf("%f seconds", stuckAfter.Seconds()))
+	if err != nil {
+		s.logger.Error("list stuck admin campaign delivery journeys", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+		return
+	}
+	result.OldestUnresolved = make([]struct {
+		JobID        string    `json:"job_id"`
+		Stage        string    `json:"stage"`
+		LastEventAt  time.Time `json:"last_event_at"`
+		RemoteHost   string    `json:"remote_host"`
+		SMTPCode     *int      `json:"smtp_code,omitempty"`
+		EnhancedCode string    `json:"enhanced_code"`
+		LastError    string    `json:"last_error"`
+	}, 0, 20)
+	for unresolvedRows.Next() {
+		var item struct {
+			JobID        string    `json:"job_id"`
+			Stage        string    `json:"stage"`
+			LastEventAt  time.Time `json:"last_event_at"`
+			RemoteHost   string    `json:"remote_host"`
+			SMTPCode     *int      `json:"smtp_code,omitempty"`
+			EnhancedCode string    `json:"enhanced_code"`
+			LastError    string    `json:"last_error"`
+		}
+		var smtpCode pgtype.Int4
+		if err := unresolvedRows.Scan(
+			&item.JobID, &item.Stage, &item.LastEventAt, &item.RemoteHost,
+			&smtpCode, &item.EnhancedCode, &item.LastError,
+		); err != nil {
+			unresolvedRows.Close()
+			s.logger.Error("scan stuck admin campaign delivery journey", "error", err, "campaign_id", campaignID)
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+			return
+		}
+		if smtpCode.Valid {
+			value := int(smtpCode.Int32)
+			item.SMTPCode = &value
+		}
+		result.OldestUnresolved = append(result.OldestUnresolved, item)
+	}
+	if err := unresolvedRows.Err(); err != nil {
+		unresolvedRows.Close()
+		s.logger.Error("iterate stuck admin campaign delivery journeys", "error", err, "campaign_id", campaignID)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not load campaign delivery diagnostics.")
+		return
+	}
+	unresolvedRows.Close()
+	httpx.JSON(w, http.StatusOK, map[string]any{"data": result})
+}
+
+func (s *Server) backfillAdminDeliveryJourneys(w http.ResponseWriter, r *http.Request) {
+	if s.journeyReconciler == nil {
+		httpx.Error(w, http.StatusServiceUnavailable, "reconciliation_unavailable", "Stalwart reconciliation is not configured.")
+		return
+	}
+	var request struct {
+		AfterJobID string `json:"after_job_id"`
+		Limit      int    `json:"limit"`
+		DryRun     bool   `json:"dry_run"`
+	}
+	if err := httpx.Decode(w, r, &request); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid_backfill_request", "Provide a valid delivery journey backfill request.")
+		return
+	}
+	if request.Limit == 0 {
+		request.Limit = 100
+	}
+	if request.Limit < 1 || request.Limit > 1000 {
+		httpx.Error(w, http.StatusBadRequest, "invalid_backfill_limit", "Backfill limit must be from 1 to 1000.")
+		return
+	}
+	result, err := s.journeyReconciler.BackfillBatch(
+		r.Context(), request.AfterJobID, request.Limit, request.DryRun,
+	)
+	if err != nil {
+		s.logger.Error("backfill submitted delivery journeys", "error", err, "dry_run", request.DryRun)
+		httpx.Error(w, http.StatusInternalServerError, "backfill_failed", "Delivery journey backfill could not be completed.")
+		return
+	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"data": result})
 }
 

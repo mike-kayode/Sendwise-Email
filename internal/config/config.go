@@ -14,77 +14,80 @@ import (
 )
 
 type Config struct {
-	Env                            string
-	HTTPAddr                       string
-	WorkerMetricsAddr              string
-	AppBaseURL                     string
-	APIBaseURL                     string
-	TrackingBaseURL                string
-	DatabaseURL                    string
-	RedisURL                       string
-	NATSURL                        string
-	MigrationsDir                  string
-	AutoMigrate                    bool
-	JWTSecret                      string
-	JWTIssuer                      string
-	IdentityURL                    string
-	ServiceToken                   string
-	AccessTokenTTL                 time.Duration
-	SMTPAddr                       string
-	SMTPHost                       string
-	SMTPUsername                   string
-	SMTPPassword                   string
-	SMTPPoolSize                   int
-	SMTPFrom                       string
-	BounceDomain                   string
-	StalwartManagementURL          string
-	StalwartAdminUsername          string
-	StalwartAdminPassword          string
-	DKIMSelector                   string
-	DKIMEncryptionKey              string
-	SPFInclude                     string
-	DNSResolverAddr                string
-	DNSResolverTimeout             time.Duration
-	SendingRate                    int
-	PlatformMaxDomainRate          int
-	MaxDeliveryAttempts            int
-	SchedulerInterval              time.Duration
-	MaxMessageAge                  time.Duration
-	NATSStalePublishTimeout        time.Duration
-	MaxDailyEmails                 int
-	WarmupStartPerDay              int
-	WarmupGrowthFactor             float64
-	MaxBounceRate                  float64
-	MaxComplaintRate               float64
-	DomainConcurrencyLimit         int
-	RecipientDomainRates           map[string]int
-	RecipientDomainDefault         int
-	CORSOrigins                    []string
-	RequireVerifiedDomain          bool
-	MailProvider                   string
-	PlatformFromEmail              string
-	ContactNotifyEmail             string
-	SuperAdminEmails               []string
-	WebhookSecret                  string
-	TransactionalEnabled           bool
-	TransactionalSMTPEnabled       bool
-	TransactionalSMTPHostname      string
-	TransactionalSMTPBindAddress   string
-	TransactionalSMTPStartTLSAddr  string
-	TransactionalSMTPImplicitAddr  string
-	TransactionalSMTPTLSCert       string
-	TransactionalSMTPTLSKey        string
-	TransactionalRetryHours        int
-	TransactionalRequestsPerSecond int
-	TransactionalDailyLimit        int
-	TransactionalMonthlyLimit      int
-	TransactionalMaxRecipients     int
-	TransactionalMaxMessageBytes   int64
-	TransactionalWorkerConcurrency int
-	TransactionalSMTPPoolSize      int
-	TransactionalMaxBounceRate     float64
-	TransactionalMaxComplaintRate  float64
-	TransactionalMinimumSampleSize int
+	Env                              string
+	HTTPAddr                         string
+	WorkerMetricsAddr                string
+	AppBaseURL                       string
+	APIBaseURL                       string
+	TrackingBaseURL                  string
+	DatabaseURL                      string
+	RedisURL                         string
+	NATSURL                          string
+	MigrationsDir                    string
+	AutoMigrate                      bool
+	JWTSecret                        string
+	JWTIssuer                        string
+	IdentityURL                      string
+	ServiceToken                     string
+	AccessTokenTTL                   time.Duration
+	SMTPAddr                         string
+	SMTPHost                         string
+	SMTPUsername                     string
+	SMTPPassword                     string
+	SMTPPoolSize                     int
+	SMTPFrom                         string
+	BounceDomain                     string
+	StalwartManagementURL            string
+	StalwartAdminUsername            string
+	StalwartAdminPassword            string
+	DKIMSelector                     string
+	DKIMEncryptionKey                string
+	SPFInclude                       string
+	DNSResolverAddr                  string
+	DNSResolverTimeout               time.Duration
+	SendingRate                      int
+	PlatformMaxDomainRate            int
+	MaxDeliveryAttempts              int
+	SchedulerInterval                time.Duration
+	MaxMessageAge                    time.Duration
+	NATSStalePublishTimeout          time.Duration
+	DeliveryJourneyReconcileInterval time.Duration
+	DeliveryJourneyStuckAfter        time.Duration
+	DeliveryJourneyReconcileBatch    int
+	MaxDailyEmails                   int
+	WarmupStartPerDay                int
+	WarmupGrowthFactor               float64
+	MaxBounceRate                    float64
+	MaxComplaintRate                 float64
+	DomainConcurrencyLimit           int
+	RecipientDomainRates             map[string]int
+	RecipientDomainDefault           int
+	CORSOrigins                      []string
+	RequireVerifiedDomain            bool
+	MailProvider                     string
+	PlatformFromEmail                string
+	ContactNotifyEmail               string
+	SuperAdminEmails                 []string
+	WebhookSecret                    string
+	TransactionalEnabled             bool
+	TransactionalSMTPEnabled         bool
+	TransactionalSMTPHostname        string
+	TransactionalSMTPBindAddress     string
+	TransactionalSMTPStartTLSAddr    string
+	TransactionalSMTPImplicitAddr    string
+	TransactionalSMTPTLSCert         string
+	TransactionalSMTPTLSKey          string
+	TransactionalRetryHours          int
+	TransactionalRequestsPerSecond   int
+	TransactionalDailyLimit          int
+	TransactionalMonthlyLimit        int
+	TransactionalMaxRecipients       int
+	TransactionalMaxMessageBytes     int64
+	TransactionalWorkerConcurrency   int
+	TransactionalSMTPPoolSize        int
+	TransactionalMaxBounceRate       float64
+	TransactionalMaxComplaintRate    float64
+	TransactionalMinimumSampleSize   int
 }
 
 func Load() (Config, error) {
@@ -133,6 +136,18 @@ func load(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	natsStalePublishTimeout, err := getenvDuration(lookup, "NATS_STALE_PUBLISH_TIMEOUT", 10*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	deliveryJourneyReconcileInterval, err := getenvDuration(lookup, "DELIVERY_JOURNEY_RECONCILE_INTERVAL", time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	deliveryJourneyStuckAfter, err := getenvDuration(lookup, "DELIVERY_JOURNEY_STUCK_AFTER", 30*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	deliveryJourneyReconcileBatch, err := getenvInt(lookup, "DELIVERY_JOURNEY_RECONCILE_BATCH", 100)
 	if err != nil {
 		return Config{}, err
 	}
@@ -232,77 +247,80 @@ func load(lookup func(string) string) (Config, error) {
 	platformFromEmail := getenv(lookup, "PLATFORM_FROM_EMAIL", getenv(lookup, "SMTP_FROM", "hello@pipsleague.com"))
 
 	cfg := Config{
-		Env:                            env,
-		HTTPAddr:                       getenv(lookup, "HTTP_ADDR", ":8080"),
-		WorkerMetricsAddr:              getenv(lookup, "WORKER_METRICS_ADDR", ":9091"),
-		AppBaseURL:                     getenv(lookup, "APP_BASE_URL", "http://localhost:3000"),
-		APIBaseURL:                     getenv(lookup, "API_BASE_URL", "http://localhost:8080"),
-		TrackingBaseURL:                getenv(lookup, "TRACKING_BASE_URL", "http://localhost:8080"),
-		DatabaseURL:                    getenv(lookup, "DATABASE_URL", "postgres://email:email@localhost:5432/email?sslmode=disable"),
-		RedisURL:                       getenv(lookup, "REDIS_URL", "redis://localhost:6379/0"),
-		NATSURL:                        getenv(lookup, "NATS_URL", "nats://localhost:4222"),
-		MigrationsDir:                  getenv(lookup, "MIGRATIONS_DIR", "./migrations"),
-		AutoMigrate:                    autoMigrate,
-		JWTSecret:                      getenv(lookup, "JWT_SECRET", ""),
-		JWTIssuer:                      getenv(lookup, "JWT_ISSUER", "email-platform"),
-		IdentityURL:                    strings.TrimRight(getenv(lookup, "IDENTITY_URL", ""), "/"),
-		ServiceToken:                   strings.TrimSpace(getenv(lookup, "SERVICE_TOKEN", "")),
-		AccessTokenTTL:                 accessTokenTTL,
-		SMTPAddr:                       getenv(lookup, "SMTP_ADDR", "localhost:587"),
-		SMTPHost:                       getenv(lookup, "SMTP_HOST", "localhost"),
-		SMTPUsername:                   getenv(lookup, "SMTP_USERNAME", ""),
-		SMTPPassword:                   getenv(lookup, "SMTP_PASSWORD", ""),
-		SMTPPoolSize:                   smtpPoolSize,
-		SMTPFrom:                       getenv(lookup, "SMTP_FROM", "newsletter@example.com"),
-		BounceDomain:                   strings.ToLower(getenv(lookup, "BOUNCE_DOMAIN", "bounces.sendwise.test")),
-		StalwartManagementURL:          strings.TrimRight(getenv(lookup, "STALWART_MANAGEMENT_URL", "http://127.0.0.1:8081"), "/"),
-		StalwartAdminUsername:          getenv(lookup, "STALWART_ADMIN_USERNAME", ""),
-		StalwartAdminPassword:          getenv(lookup, "STALWART_ADMIN_PASSWORD", ""),
-		DKIMSelector:                   getenv(lookup, "DKIM_SELECTOR", "mail"),
-		DKIMEncryptionKey:              getenv(lookup, "DKIM_ENCRYPTION_KEY", ""),
-		SPFInclude:                     strings.TrimSpace(getenv(lookup, "SPF_INCLUDE", "")),
-		DNSResolverAddr:                getenv(lookup, "DNS_RESOLVER_ADDR", ""),
-		DNSResolverTimeout:             dnsResolverTimeout,
-		SendingRate:                    sendingRate,
-		PlatformMaxDomainRate:          platformMaxDomainRate,
-		MaxDeliveryAttempts:            maxDeliveryAttempts,
-		SchedulerInterval:              schedulerInterval,
-		MaxMessageAge:                  maxMessageAge,
-		NATSStalePublishTimeout:        natsStalePublishTimeout,
-		MaxDailyEmails:                 maxDailyEmails,
-		WarmupStartPerDay:              warmupStartPerDay,
-		WarmupGrowthFactor:             warmupGrowthFactor,
-		MaxBounceRate:                  maxBounceRate,
-		MaxComplaintRate:               maxComplaintRate,
-		DomainConcurrencyLimit:         domainConcurrencyLimit,
-		RecipientDomainRates:           recipientDomainRates,
-		RecipientDomainDefault:         recipientDomainDefault,
-		CORSOrigins:                    splitCSV(getenv(lookup, "CORS_ORIGINS", "http://localhost:3000")),
-		RequireVerifiedDomain:          requireVerifiedDomain,
-		MailProvider:                   strings.ToLower(strings.TrimSpace(getenv(lookup, "MAIL_PROVIDER", "auto"))),
-		PlatformFromEmail:              platformFromEmail,
-		ContactNotifyEmail:             strings.TrimSpace(getenv(lookup, "CONTACT_NOTIFY_EMAIL", "")),
-		SuperAdminEmails:               superAdminEmails,
-		WebhookSecret:                  webhookSecret,
-		TransactionalEnabled:           transactionalEnabled,
-		TransactionalSMTPEnabled:       transactionalSMTPEnabled,
-		TransactionalSMTPHostname:      strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_HOSTNAME", "")),
-		TransactionalSMTPBindAddress:   strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_BIND_ADDRESS", "0.0.0.0")),
-		TransactionalSMTPStartTLSAddr:  strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_STARTTLS_ADDR", net.JoinHostPort(strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_BIND_ADDRESS", "0.0.0.0")), "2587"))),
-		TransactionalSMTPImplicitAddr:  strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_IMPLICIT_TLS_ADDR", net.JoinHostPort(strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_BIND_ADDRESS", "0.0.0.0")), "2465"))),
-		TransactionalSMTPTLSCert:       strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_TLS_CERT", "")),
-		TransactionalSMTPTLSKey:        strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_TLS_KEY", "")),
-		TransactionalRetryHours:        transactionalRetryHours,
-		TransactionalRequestsPerSecond: transactionalRequestsPerSecond,
-		TransactionalDailyLimit:        transactionalDailyLimit,
-		TransactionalMonthlyLimit:      transactionalMonthlyLimit,
-		TransactionalMaxRecipients:     transactionalMaxRecipients,
-		TransactionalMaxMessageBytes:   transactionalMaxMessageBytes,
-		TransactionalWorkerConcurrency: transactionalWorkerConcurrency,
-		TransactionalSMTPPoolSize:      transactionalSMTPPoolSize,
-		TransactionalMaxBounceRate:     transactionalMaxBounceRate,
-		TransactionalMaxComplaintRate:  transactionalMaxComplaintRate,
-		TransactionalMinimumSampleSize: transactionalMinimumSampleSize,
+		Env:                              env,
+		HTTPAddr:                         getenv(lookup, "HTTP_ADDR", ":8080"),
+		WorkerMetricsAddr:                getenv(lookup, "WORKER_METRICS_ADDR", ":9091"),
+		AppBaseURL:                       getenv(lookup, "APP_BASE_URL", "http://localhost:3000"),
+		APIBaseURL:                       getenv(lookup, "API_BASE_URL", "http://localhost:8080"),
+		TrackingBaseURL:                  getenv(lookup, "TRACKING_BASE_URL", "http://localhost:8080"),
+		DatabaseURL:                      getenv(lookup, "DATABASE_URL", "postgres://email:email@localhost:5432/email?sslmode=disable"),
+		RedisURL:                         getenv(lookup, "REDIS_URL", "redis://localhost:6379/0"),
+		NATSURL:                          getenv(lookup, "NATS_URL", "nats://localhost:4222"),
+		MigrationsDir:                    getenv(lookup, "MIGRATIONS_DIR", "./migrations"),
+		AutoMigrate:                      autoMigrate,
+		JWTSecret:                        getenv(lookup, "JWT_SECRET", ""),
+		JWTIssuer:                        getenv(lookup, "JWT_ISSUER", "email-platform"),
+		IdentityURL:                      strings.TrimRight(getenv(lookup, "IDENTITY_URL", ""), "/"),
+		ServiceToken:                     strings.TrimSpace(getenv(lookup, "SERVICE_TOKEN", "")),
+		AccessTokenTTL:                   accessTokenTTL,
+		SMTPAddr:                         getenv(lookup, "SMTP_ADDR", "localhost:587"),
+		SMTPHost:                         getenv(lookup, "SMTP_HOST", "localhost"),
+		SMTPUsername:                     getenv(lookup, "SMTP_USERNAME", ""),
+		SMTPPassword:                     getenv(lookup, "SMTP_PASSWORD", ""),
+		SMTPPoolSize:                     smtpPoolSize,
+		SMTPFrom:                         getenv(lookup, "SMTP_FROM", "newsletter@example.com"),
+		BounceDomain:                     strings.ToLower(getenv(lookup, "BOUNCE_DOMAIN", "bounces.sendwise.test")),
+		StalwartManagementURL:            strings.TrimRight(getenv(lookup, "STALWART_MANAGEMENT_URL", "http://127.0.0.1:8081"), "/"),
+		StalwartAdminUsername:            getenv(lookup, "STALWART_ADMIN_USERNAME", ""),
+		StalwartAdminPassword:            getenv(lookup, "STALWART_ADMIN_PASSWORD", ""),
+		DKIMSelector:                     getenv(lookup, "DKIM_SELECTOR", "mail"),
+		DKIMEncryptionKey:                getenv(lookup, "DKIM_ENCRYPTION_KEY", ""),
+		SPFInclude:                       strings.TrimSpace(getenv(lookup, "SPF_INCLUDE", "")),
+		DNSResolverAddr:                  getenv(lookup, "DNS_RESOLVER_ADDR", ""),
+		DNSResolverTimeout:               dnsResolverTimeout,
+		SendingRate:                      sendingRate,
+		PlatformMaxDomainRate:            platformMaxDomainRate,
+		MaxDeliveryAttempts:              maxDeliveryAttempts,
+		SchedulerInterval:                schedulerInterval,
+		MaxMessageAge:                    maxMessageAge,
+		NATSStalePublishTimeout:          natsStalePublishTimeout,
+		DeliveryJourneyReconcileInterval: deliveryJourneyReconcileInterval,
+		DeliveryJourneyStuckAfter:        deliveryJourneyStuckAfter,
+		DeliveryJourneyReconcileBatch:    deliveryJourneyReconcileBatch,
+		MaxDailyEmails:                   maxDailyEmails,
+		WarmupStartPerDay:                warmupStartPerDay,
+		WarmupGrowthFactor:               warmupGrowthFactor,
+		MaxBounceRate:                    maxBounceRate,
+		MaxComplaintRate:                 maxComplaintRate,
+		DomainConcurrencyLimit:           domainConcurrencyLimit,
+		RecipientDomainRates:             recipientDomainRates,
+		RecipientDomainDefault:           recipientDomainDefault,
+		CORSOrigins:                      splitCSV(getenv(lookup, "CORS_ORIGINS", "http://localhost:3000")),
+		RequireVerifiedDomain:            requireVerifiedDomain,
+		MailProvider:                     strings.ToLower(strings.TrimSpace(getenv(lookup, "MAIL_PROVIDER", "auto"))),
+		PlatformFromEmail:                platformFromEmail,
+		ContactNotifyEmail:               strings.TrimSpace(getenv(lookup, "CONTACT_NOTIFY_EMAIL", "")),
+		SuperAdminEmails:                 superAdminEmails,
+		WebhookSecret:                    webhookSecret,
+		TransactionalEnabled:             transactionalEnabled,
+		TransactionalSMTPEnabled:         transactionalSMTPEnabled,
+		TransactionalSMTPHostname:        strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_HOSTNAME", "")),
+		TransactionalSMTPBindAddress:     strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_BIND_ADDRESS", "0.0.0.0")),
+		TransactionalSMTPStartTLSAddr:    strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_STARTTLS_ADDR", net.JoinHostPort(strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_BIND_ADDRESS", "0.0.0.0")), "2587"))),
+		TransactionalSMTPImplicitAddr:    strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_IMPLICIT_TLS_ADDR", net.JoinHostPort(strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_BIND_ADDRESS", "0.0.0.0")), "2465"))),
+		TransactionalSMTPTLSCert:         strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_TLS_CERT", "")),
+		TransactionalSMTPTLSKey:          strings.TrimSpace(getenv(lookup, "TRANSACTIONAL_SMTP_TLS_KEY", "")),
+		TransactionalRetryHours:          transactionalRetryHours,
+		TransactionalRequestsPerSecond:   transactionalRequestsPerSecond,
+		TransactionalDailyLimit:          transactionalDailyLimit,
+		TransactionalMonthlyLimit:        transactionalMonthlyLimit,
+		TransactionalMaxRecipients:       transactionalMaxRecipients,
+		TransactionalMaxMessageBytes:     transactionalMaxMessageBytes,
+		TransactionalWorkerConcurrency:   transactionalWorkerConcurrency,
+		TransactionalSMTPPoolSize:        transactionalSMTPPoolSize,
+		TransactionalMaxBounceRate:       transactionalMaxBounceRate,
+		TransactionalMaxComplaintRate:    transactionalMaxComplaintRate,
+		TransactionalMinimumSampleSize:   transactionalMinimumSampleSize,
 	}
 
 	switch cfg.MailProvider {
@@ -413,6 +431,12 @@ func load(lookup func(string) string) (Config, error) {
 	}
 	if cfg.NATSStalePublishTimeout <= 0 {
 		return cfg, fmt.Errorf("NATS_STALE_PUBLISH_TIMEOUT must be positive")
+	}
+	if cfg.DeliveryJourneyReconcileInterval <= 0 || cfg.DeliveryJourneyStuckAfter <= 0 {
+		return cfg, fmt.Errorf("delivery journey reconciliation interval and stuck threshold must be positive")
+	}
+	if cfg.DeliveryJourneyReconcileBatch < 1 || cfg.DeliveryJourneyReconcileBatch > 1000 {
+		return cfg, fmt.Errorf("DELIVERY_JOURNEY_RECONCILE_BATCH must be between 1 and 1000")
 	}
 	if cfg.MaxDailyEmails < 1 {
 		return cfg, fmt.Errorf("MAX_DAILY_EMAILS must be at least 1")

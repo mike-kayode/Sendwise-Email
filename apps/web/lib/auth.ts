@@ -277,6 +277,10 @@ export type CampaignReport = {
   campaign?: Campaign;
   recipients: { total: number; by_status: Record<string, number> };
   events: { by_type: Record<string, number> };
+  journey?: {
+    funnel: Record<string, number>;
+    stuck: number;
+  };
   rates: { open_rate: number; click_rate: number; bounce_rate: number; delivered_rate: number };
   summary?: { total_recipients: number; sent: number; delivered: number; unique_opens: number; open_events: number; unique_clicks: number; click_events: number; failed: number; unsubscribes: number; complaints: number };
   top_links: { url: string; clicks: number }[];

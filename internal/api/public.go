@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/khayode/email-platform/internal/delivery"
+	"github.com/khayode/email-platform/internal/deliveryjourney"
 	"github.com/khayode/email-platform/internal/httpx"
 )
 
@@ -276,6 +278,46 @@ func (s *Server) unsubscribe(r *http.Request) (bool, string) {
 	`, claims.OrganizationID, claims.ContactID); err != nil {
 		return false, "We could not record the unsubscribe event."
 	}
+	rows, err := tx.Query(r.Context(), `
+		SELECT delivery_job_id::text
+		FROM campaign_recipient_tracking
+		WHERE organization_id = $1::uuid AND contact_id = $2::uuid
+		ORDER BY delivery_job_id
+	`, claims.OrganizationID, claims.ContactID)
+	if err != nil {
+		s.logger.Error("load recipient journeys for unsubscribe", "error", err)
+		return false, "We could not record the unsubscribe event."
+	}
+	jobIDs := make([]string, 0)
+	for rows.Next() {
+		var jobID string
+		if err := rows.Scan(&jobID); err != nil {
+			rows.Close()
+			s.logger.Error("scan recipient journey for unsubscribe", "error", err)
+			return false, "We could not record the unsubscribe event."
+		}
+		jobIDs = append(jobIDs, jobID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		s.logger.Error("iterate recipient journeys for unsubscribe", "error", err)
+		return false, "We could not record the unsubscribe event."
+	}
+	rows.Close()
+	for _, jobID := range jobIDs {
+		if _, err := deliveryjourney.RecordTx(r.Context(), tx, deliveryjourney.Event{
+			OrganizationID: claims.OrganizationID,
+			JobID:          jobID,
+			Type:           "unsubscribed",
+			Source:         "tracking",
+			SourceEventID:  "unsubscribe:" + token,
+			EventHash:      "unsubscribe:" + token + ":" + jobID,
+			OccurredAt:     time.Now().UTC(),
+		}); err != nil {
+			s.logger.Error("record recipient journey unsubscribe", "delivery_job_id", jobID, "error", err)
+			return false, "We could not record the unsubscribe event."
+		}
+	}
 
 	if err := tx.Commit(r.Context()); err != nil {
 		return false, "We could not process the unsubscribe request. Please try again."
@@ -338,6 +380,8 @@ func (s *Server) trackOpen(w http.ResponseWriter, r *http.Request) {
 	); err != nil {
 		s.logger.Warn("record recipient open event", "error", err)
 	}
+	s.recordTrackingJourneyEvent(ctx, organizationID, deliveryJobID, "opened",
+		fmt.Sprintf("%s:opened:%d", trackingID, time.Now().UnixNano()), classification)
 	if _, err := s.pool.Exec(ctx, `
 		UPDATE campaign_recipient_tracking
 		SET first_opened_at = COALESCE(first_opened_at, now()),
@@ -429,6 +473,8 @@ func (s *Server) trackClick(w http.ResponseWriter, r *http.Request) {
 	); err != nil {
 		s.logger.Warn("record recipient click event", "error", err)
 	}
+	s.recordTrackingJourneyEvent(ctx, organizationID, deliveryJobID, "clicked",
+		fmt.Sprintf("%s:clicked:%d", trackingID, time.Now().UnixNano()), classification)
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO email_tracking_links
 			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,

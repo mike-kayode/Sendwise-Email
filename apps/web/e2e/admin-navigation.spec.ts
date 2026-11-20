@@ -291,3 +291,66 @@ test("support admins get the admin menu without super-admin-only links", async (
   await expect(sidebar.getByRole("link", { name: "Suppressions", exact: true })).toHaveCount(0);
   await expect(sidebar.getByText("Marketing workspace", { exact: true })).toHaveCount(0);
 });
+
+test("super admin previews and applies a resumable delivery journey backfill batch", async ({ page }) => {
+  const requests: Array<{ after_job_id: string; dry_run: boolean; limit: number; reason: string }> = [];
+  const nextCursor = "9b2df23a-6c47-4e56-8648-927b1645d408";
+  await page.addInitScript(() => {
+    const token = "admin-journey-backfill-test-token";
+    localStorage.setItem("access_token", token);
+    localStorage.setItem("auth-storage", JSON.stringify({
+      state: {
+        token,
+        user: { id: "admin-user", name: "Platform Admin", email: "admin@example.test" },
+        organization: { id: "workspace", name: "Test Workspace", slug: "test", role: "owner" },
+        isLoading: false,
+      },
+      version: 0,
+    }));
+  });
+  await page.route("**/api/v1/admin/session", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ platform_role: "super_admin", mfa_verified: true }) }),
+  );
+  await page.route("**/api/v1/admin/campaigns?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: [], pagination: { total: 0, limit: 25, offset: 0 } }),
+    }),
+  );
+  await page.route("**/api/v1/admin/mfa/verify", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ verified: true }) }),
+  );
+  await page.route("**/api/v1/admin/delivery-journey/backfill", async (route) => {
+    const body = route.request().postDataJSON() as { after_job_id: string; dry_run: boolean; limit: number; reason: string };
+    requests.push(body);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: {
+        counts: { accepted_final_state_unknown: 2 },
+        processed: 2,
+        next_cursor: nextCursor,
+        has_more: true,
+        dry_run: body.dry_run,
+      } }),
+    });
+  });
+  page.on("dialog", (dialog) => dialog.accept());
+
+  await page.goto("/admin/campaigns");
+  await page.getByLabel("Required reason").first().fill("Reconcile stale submitted messages");
+  await page.getByLabel("Authenticator or recovery code").first().fill("123456");
+  await page.getByRole("button", { name: "Preview next batch" }).click();
+  await expect(page.getByText(/Preview 2 jobs/)).toBeVisible();
+  await expect(page.getByText(/accepted_final_state_unknown: 2/)).toBeVisible();
+  await expect(page.getByText(`Resume cursor: ${nextCursor}`)).toBeVisible();
+
+  await page.getByLabel("Authenticator or recovery code").first().fill("654321");
+  await page.getByRole("button", { name: "Apply next batch" }).click();
+  await expect(page.getByText(/Applied 2 jobs/)).toBeVisible();
+  expect(requests).toEqual([
+    { after_job_id: "", dry_run: true, limit: 100, reason: "Reconcile stale submitted messages" },
+    { after_job_id: "", dry_run: false, limit: 100, reason: "Reconcile stale submitted messages" },
+  ]);
+});

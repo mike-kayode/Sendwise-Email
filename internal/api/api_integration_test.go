@@ -1070,6 +1070,74 @@ func TestInternalAdminCampaignStopRequiresServiceTokenAndCancelsPendingWork(t *t
 	}
 }
 
+func TestInternalAdminCampaignDeliveryListsStuckJourneyMessages(t *testing.T) {
+	if integrationPool == nil {
+		t.Skip("no database available")
+	}
+	owner := seedIntegrationUser(t,
+		"stuck-journey-admin-"+uuid.NewString()+"@example.test",
+		"stuck-journey-password",
+		"Stuck Journey Owner",
+		"Stuck Journey Workspace",
+	)
+	ctx := context.Background()
+	campaignID, contactID, jobID, recipientID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	email := "stuck-" + uuid.NewString() + "@example.test"
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO contacts (id, organization_id, email, status)
+		VALUES ($1::uuid, $2::uuid, $3::text, 'subscribed')
+	`, contactID, owner.Organization.ID, email); err != nil {
+		t.Fatalf("create stuck-journey contact: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO campaigns (id, organization_id, name, subject, content, status)
+		VALUES ($1::uuid, $2::uuid, 'Stuck journey diagnostics', 'Test', '{}'::jsonb, 'sending')
+	`, campaignID, owner.Organization.ID); err != nil {
+		t.Fatalf("create stuck-journey campaign: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO delivery_jobs
+			(id, organization_id, campaign_id, contact_id, message_id, status, accepted_at, updated_at, last_error)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::text, 'submitted',
+		        now() - interval '2 hours', now() - interval '2 hours', $6::text)
+	`, jobID, owner.Organization.ID, campaignID, contactID, "message-"+jobID+"@example.test", "upstream relay timeout"); err != nil {
+		t.Fatalf("create stuck-journey delivery job: %v", err)
+	}
+	if _, err := integrationPool.Exec(ctx, `
+		INSERT INTO campaign_recipient_tracking
+			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id, tracking_id, email,
+			 journey_status, journey_last_event_at, journey_remote_host, journey_smtp_code, journey_enhanced_code)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::text, $7::text,
+		        'submitted_to_mail_server', now() - interval '2 hours', $8::text, $9::integer, $10::text)
+	`, owner.Organization.ID, campaignID, recipientID, contactID, jobID, "trk_"+jobID, email,
+		"mx.example.test", 451, "4.7.1"); err != nil {
+		t.Fatalf("create stuck-journey tracking row: %v", err)
+	}
+	server := newIntegrationServer(t)
+	request := httptest.NewRequest(http.MethodGet, "/internal/admin/campaigns/"+campaignID+"/delivery", nil)
+	kit.WithServiceToken(request, integrationCfg.ServiceToken)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("campaign delivery diagnostics status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Data adminCampaignDeliveryDiagnostics `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode campaign delivery diagnostics: %v", err)
+	}
+	if result.Data.StuckCount != 1 || len(result.Data.OldestUnresolved) != 1 {
+		t.Fatalf("stuck diagnostics = %+v; want one unresolved journey", result.Data)
+	}
+	entry := result.Data.OldestUnresolved[0]
+	if entry.JobID != jobID || entry.Stage != "submitted_to_mail_server" ||
+		entry.LastError != "upstream relay timeout" || entry.RemoteHost != "mx.example.test" ||
+		entry.SMTPCode == nil || *entry.SMTPCode != 451 || entry.EnhancedCode != "4.7.1" {
+		t.Fatalf("oldest unresolved entry = %+v", entry)
+	}
+}
+
 func TestInternalAdminTransactionalMessageSearchRequiresServiceTokenAndReturnsMetadataOnly(t *testing.T) {
 	if integrationPool == nil {
 		t.Skip("no database available")
@@ -2259,6 +2327,14 @@ func TestStalwartFeedbackHardSoftComplaintIsolationAndIdempotency(t *testing.T) 
 	`, hardJob).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("hard feedback rows = %d, err=%v; want one idempotent event", count, err)
 	}
+	var journeyStatus string
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT journey_status
+		FROM campaign_recipient_tracking
+		WHERE organization_id = $1::uuid AND delivery_job_id = $2::uuid
+	`, owner.Organization.ID, hardJob).Scan(&journeyStatus); err != nil || journeyStatus != "bounced" {
+		t.Fatalf("hard feedback journey status = %q, err=%v; want bounced", journeyStatus, err)
+	}
 	var reason, status string
 	if err := integrationPool.QueryRow(ctx, `
 		SELECT reason FROM suppressions WHERE organization_id = $1 AND lower(email) = lower($2)
@@ -2281,6 +2357,13 @@ func TestStalwartFeedbackHardSoftComplaintIsolationAndIdempotency(t *testing.T) 
 		SELECT count(*) FROM delivery_feedback_ingest WHERE delivery_job_id = $1 AND event_type = 'soft_bounce'
 	`, softJob).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("soft feedback rows = %d, err=%v; want 3", count, err)
+	}
+	if err := integrationPool.QueryRow(ctx, `
+		SELECT journey_status
+		FROM campaign_recipient_tracking
+		WHERE organization_id = $1::uuid AND delivery_job_id = $2::uuid
+	`, owner.Organization.ID, softJob).Scan(&journeyStatus); err != nil || journeyStatus != "deferred_by_recipient" {
+		t.Fatalf("soft feedback journey status = %q, err=%v; want deferred_by_recipient", journeyStatus, err)
 	}
 	if err := integrationPool.QueryRow(ctx, `
 		SELECT reason FROM suppressions WHERE organization_id = $1 AND lower(email) = lower($2)
@@ -3369,9 +3452,9 @@ func TestLegacyTrackingJWTFallbackIntegration(t *testing.T) {
 	}
 	if err := integrationPool.QueryRow(ctx, `
 		INSERT INTO delivery_jobs (organization_id, campaign_id, contact_id, message_id, status)
-		VALUES ($1, $2, $3, 'legacy-tracking@example.test', 'submitted')
+		VALUES ($1, $2, $3, $4, 'submitted')
 		RETURNING id::text
-	`, owner.Organization.ID, campaignID, contactID).Scan(&jobID); err != nil {
+	`, owner.Organization.ID, campaignID, contactID, "legacy-tracking-"+uuid.NewString()+"@example.test").Scan(&jobID); err != nil {
 		t.Fatalf("create legacy tracking job: %v", err)
 	}
 

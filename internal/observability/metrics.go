@@ -56,10 +56,18 @@ var (
 			Help: "Whether the worker SMTP circuit breaker is open.",
 		},
 	)
+
+	DeliveryJourneyStuckMessages = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "delivery_journey_stuck_messages",
+			Help: "Submitted or relaying recipient messages without a recent Stalwart event.",
+		},
+	)
 )
 
 func init() {
-	prometheus.MustRegister(HTTPRequests, HTTPDuration, DeliveryJobs, ProviderFallbacks, QueuePolls, SMTPBreakerOpen)
+	prometheus.MustRegister(HTTPRequests, HTTPDuration, DeliveryJobs, ProviderFallbacks,
+		QueuePolls, SMTPBreakerOpen, DeliveryJourneyStuckMessages)
 }
 
 func MetricsHandler() http.Handler {

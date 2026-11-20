@@ -31,6 +31,18 @@ type RecipientRow = {
   last_clicked_at: string | null;
   last_activity_at: string | null;
   engagement_classification: string;
+  journey_status: string;
+};
+
+type JourneyEvent = {
+  stage: string;
+  timestamp: string;
+  remote_mx_host?: string;
+  smtp_code?: number;
+  enhanced_code?: string;
+  reason?: string;
+  attempt_number?: number;
+  next_retry_at?: string;
 };
 
 type RecipientActivity = {
@@ -60,6 +72,7 @@ export default function CampaignReportPage() {
   const [opened, setOpened] = useState("");
   const [clicked, setClicked] = useState("");
   const [classification, setClassification] = useState("");
+  const [stage, setStage] = useState("");
   const [sort, setSort] = useState("last_activity");
   const [offset, setOffset] = useState(0);
   const [pageInput, setPageInput] = useState("1");
@@ -70,7 +83,7 @@ export default function CampaignReportPage() {
     queryFn: async () => apiFetch<CampaignReport>(`/analytics/campaigns/${id}`),
   });
   const recipientsQuery = useQuery({
-    queryKey: ["campaign-recipients", id, search, status, opened, clicked, classification, sort, offset],
+    queryKey: ["campaign-recipients", id, search, status, opened, clicked, classification, stage, sort, offset],
     queryFn: () => {
       const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset), sort });
       if (search) params.set("search", search);
@@ -78,10 +91,18 @@ export default function CampaignReportPage() {
       if (opened) params.set("opened", opened);
       if (clicked) params.set("clicked", clicked);
       if (classification) params.set("classification", classification);
+      if (stage) params.set("stage", stage);
       return apiFetch<{ data: RecipientRow[]; pagination: { total: number; limit: number; offset: number } }>(
         `/campaigns/${id}/recipients?${params}`,
       );
     },
+  });
+  const journeyQuery = useQuery({
+    queryKey: ["recipient-journey", id, selectedRecipient?.recipient_id],
+    queryFn: () => apiFetch<{ status: string; events: JourneyEvent[] }>(
+      `/campaigns/${id}/recipients/${selectedRecipient!.recipient_id}/journey`,
+    ),
+    enabled: Boolean(selectedRecipient),
   });
   const activityQuery = useQuery({
     queryKey: ["recipient-activity", id, selectedRecipient?.recipient_id],
@@ -124,12 +145,19 @@ export default function CampaignReportPage() {
   const byStatus = report.recipients.by_status;
   const events = report.events.by_type;
   const rates = report.rates;
+  const journeyFunnel = report.journey?.funnel ?? {};
 
   const funnel = [
-    { label: "Recipients", value: recipientTotal },
-    { label: "Submitted", value: byStatus.submitted ?? 0 },
-    { label: "Opened", value: events.opened ?? 0 },
-    { label: "Clicked", value: events.clicked ?? 0 },
+    { label: "Queued", stage: "queued", value: journeyFunnel.queued ?? 0 },
+    { label: "Waiting for Sendwise", stage: "deferred_by_sendwise", value: journeyFunnel.deferred_by_sendwise ?? 0 },
+    { label: "Submitted to mail server", stage: "submitted_to_mail_server", value: journeyFunnel.submitted_to_mail_server ?? 0 },
+    { label: "Accepted by recipient server", stage: "accepted_by_recipient_server", value: journeyFunnel.accepted_by_recipient_server ?? 0 },
+    { label: "Bounced", stage: "bounced", value: journeyFunnel.bounced ?? 0 },
+    { label: "Deferred", stage: "deferred_by_recipient", value: journeyFunnel.deferred_by_recipient ?? 0 },
+    { label: "Expired", stage: "expired", value: journeyFunnel.expired ?? 0 },
+    { label: "Failed", stage: "failed", value: journeyFunnel.failed ?? 0 },
+    { label: "Opened", stage: "opened", value: journeyFunnel.opened ?? 0 },
+    { label: "Clicked", stage: "clicked", value: journeyFunnel.clicked ?? 0 },
   ].map((row) => ({
     ...row,
     percent: recipientTotal ? Math.min((row.value / recipientTotal) * 100, 100) : 0,
@@ -259,12 +287,12 @@ export default function CampaignReportPage() {
         <Card>
           <CardHeader>
             <CardTitle>Delivery funnel</CardTitle>
-            <CardDescription>From recipients to clicks</CardDescription>
+            <CardDescription>Accepted means the recipient’s mail server accepted the message; it does not mean inbox delivery.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {funnel.map((row, index) => (
-              <div key={row.label} className="flex items-center gap-3 text-sm">
-                <span className="w-20 shrink-0 text-slate-600">{row.label}</span>
+                <button key={row.label} type="button" onClick={() => { setOffset(0); setStage(stage === row.stage ? "" : row.stage); }} className={`flex w-full items-center gap-3 rounded text-left text-sm ${stage === row.stage ? "bg-indigo-50" : ""}`}>
+                <span className="w-36 shrink-0 text-slate-600">{row.label}</span>
                 <div className="h-7 flex-1 overflow-hidden rounded bg-slate-100">
                   <div
                     className="flex h-full items-center justify-end rounded bg-indigo-500 px-2 text-[10px] font-medium text-white"
@@ -274,8 +302,9 @@ export default function CampaignReportPage() {
                   </div>
                 </div>
                 <span className="w-16 text-right tabular-nums text-slate-900">{formatNumber(row.value)}</span>
-              </div>
+              </button>
             ))}
+            <p className="pt-2 text-xs text-amber-700">{formatNumber(report.journey?.stuck ?? 0)} messages are still awaiting an update from the mail server.</p>
           </CardContent>
         </Card>
 
@@ -366,6 +395,26 @@ export default function CampaignReportPage() {
               <option value="privacy_proxy">Privacy proxy</option>
               <option value="unknown">Unknown</option>
             </select>
+            <select value={stage} onChange={(event) => { setOffset(0); setStage(event.target.value); }} className="h-9 rounded-lg border border-slate-200 px-3 text-sm">
+              <option value="">All journey stages</option>
+              {[
+                ["queued", "Queued"],
+                ["processing", "Processing"],
+                ["deferred_by_sendwise", "Waiting for Sendwise limit"],
+                ["submitted_to_mail_server", "Submitted to mail server"],
+                ["relaying", "Mail server relaying"],
+                ["accepted_by_recipient_server", "Accepted by recipient server"],
+                ["deferred_by_recipient", "Deferred by recipient server"],
+                ["bounced", "Bounced"],
+                ["expired", "Expired"],
+                ["failed", "Failed"],
+                ["complained", "Complaint"],
+                ["unsubscribed", "Unsubscribed"],
+                ["accepted_final_state_unknown", "Final outcome unknown"],
+                ["opened", "Opened"],
+                ["clicked", "Clicked"],
+              ].map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
             <select value={sort} onChange={(event) => { setOffset(0); setSort(event.target.value); }} className="h-9 rounded-lg border border-slate-200 px-3 text-sm">
               <option value="last_activity">Sort: last activity</option>
               <option value="open_count">Sort: open count</option>
@@ -406,14 +455,17 @@ export default function CampaignReportPage() {
                             <p className="font-medium text-slate-900">{recipient.name || recipient.email}</p>
                             {recipient.name ? <p className="mt-0.5 text-xs text-slate-500">{recipient.email}</p> : null}
                           </Td>
-                          <Td><StatusBadge status={recipient.delivery_status} /></Td>
+                          <Td>
+                            <span className="text-sm text-slate-700">{journeyStageLabel(recipient.journey_status)}</span>
+                            <p className="mt-1 text-[11px] text-slate-400">Legacy status: {recipient.delivery_status}</p>
+                          </Td>
                           <Td className="whitespace-nowrap text-xs">{recipient.delivered_at ? formatDateTime(recipient.delivered_at) : recipient.accepted_at ? `Accepted ${formatDateTime(recipient.accepted_at)}` : "Not confirmed"}</Td>
                           <Td>{formatNumber(recipient.open_count)}</Td>
                           <Td>{formatNumber(recipient.click_count)}</Td>
                           <Td className="whitespace-nowrap text-xs">{recipient.last_activity_at ? formatDateTime(recipient.last_activity_at) : "None"}</Td>
                           <Td className="capitalize text-xs">{recipient.engagement_classification.replaceAll("_", " ")}</Td>
                           <Td className="text-right">
-                            <button type="button" onClick={() => setSelectedRecipient(recipient)} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">View activity</button>
+                            <button type="button" onClick={() => setSelectedRecipient(recipient)} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">View journey</button>
                           </Td>
                         </Tr>
                       ))}
@@ -483,8 +535,49 @@ export default function CampaignReportPage() {
               </ol>
             )
           ) : null}
+          <section className="mt-6 border-t border-slate-200 pt-4">
+            <h3 className="text-sm font-semibold text-slate-900">Delivery journey</h3>
+            <p className="mt-1 text-xs text-slate-500">Acceptance means the recipient’s mail server accepted the message, not that it reached the inbox.</p>
+            {journeyQuery.isLoading ? <p className="mt-3 text-sm text-slate-500">Loading delivery updates...</p> : null}
+            {journeyQuery.error ? <p role="alert" className="mt-3 text-sm text-rose-700">Delivery updates could not be loaded: {journeyQuery.error.message}</p> : null}
+            {journeyQuery.data?.events.length ? (
+              <ol className="mt-4 space-y-3 border-l border-slate-200 pl-4">
+                {journeyQuery.data.events.map((item, index) => (
+                  <li key={`${item.stage}-${item.timestamp}-${index}`} className="relative">
+                    <span className="absolute -left-[21px] top-1 h-2.5 w-2.5 rounded-full bg-indigo-500 ring-4 ring-white" />
+                    <div className="rounded-lg border border-slate-100 p-3">
+                      <p className="text-sm font-semibold text-slate-900">{journeyStageLabel(item.stage)}</p>
+                      <time className="text-xs text-slate-500">{formatDateTime(item.timestamp)}</time>
+                      {item.next_retry_at ? <p className="mt-1 text-xs text-slate-600">Next retry: {formatDateTime(item.next_retry_at)}</p> : null}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            ) : journeyQuery.data ? <p className="mt-3 text-sm text-slate-500">No delivery updates have been recorded yet.</p> : null}
+          </section>
         </DialogContent>
       </Dialog>
     </div>
   );
+}
+
+function journeyStageLabel(stage: string) {
+  const labels: Record<string, string> = {
+    queued: "Queued",
+    processing: "Processing",
+    deferred_by_sendwise: "Waiting for Sendwise sending limit",
+    submitted_to_mail_server: "Submitted to the mail server",
+    relaying: "The mail server is attempting delivery",
+    accepted_by_recipient_server: "Accepted by the recipient's mail server",
+    deferred_by_recipient: "Temporarily deferred by the recipient's mail server",
+    bounced: "Bounced by the recipient's mail server",
+    expired: "Expired in the mail server queue",
+    failed: "Delivery failed",
+    complained: "Marked as spam",
+    unsubscribed: "Unsubscribed",
+    accepted_final_state_unknown: "Final mail-server outcome is unknown",
+    opened: "Opened",
+    clicked: "Link clicked",
+  };
+  return labels[stage] ?? "Delivery status updated";
 }

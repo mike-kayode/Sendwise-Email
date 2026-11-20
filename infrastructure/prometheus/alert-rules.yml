@@ -1,0 +1,11 @@
+groups:
+  - name: sendwise-delivery-journey
+    rules:
+      - alert: DeliveryJourneyStuck
+        expr: delivery_journey_stuck_messages > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Messages have no recent Stalwart delivery update
+          description: '{{ $value }} submitted or relaying recipient messages have exceeded the configured stuck threshold.'

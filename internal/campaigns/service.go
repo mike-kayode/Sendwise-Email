@@ -434,6 +434,20 @@ func (s *Service) Queue(ctx context.Context, campaignID, organizationID string) 
 	`, campaignID, organizationID); err != nil {
 		return 0, fmt.Errorf("create recipient tracking rows: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO delivery_journey_events
+			(organization_id, campaign_id, recipient_id, contact_id, delivery_job_id,
+			 event_type, source, source_event_id, event_timestamp, event_hash)
+		SELECT crt.organization_id, crt.campaign_id, crt.recipient_id, crt.contact_id,
+		       crt.delivery_job_id, 'queued'::text, 'sendwise'::text,
+		       'campaign-queued:' || crt.delivery_job_id::text, now(),
+		       md5(crt.organization_id::text || ':' || crt.delivery_job_id::text || ':journey:queued')
+		FROM campaign_recipient_tracking crt
+		WHERE crt.organization_id = $1::uuid AND crt.campaign_id = $2::uuid
+		ON CONFLICT (organization_id, event_hash) DO NOTHING
+	`, organizationID, campaignID); err != nil {
+		return 0, fmt.Errorf("record queued delivery journey events: %w", err)
+	}
 
 	var recipientCount int
 	if err := tx.QueryRow(ctx,
