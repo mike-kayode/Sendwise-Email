@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Download, Mail, MousePointerClick, Send, Users } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
@@ -50,6 +50,8 @@ type RecipientActivity = {
   automation_type: string;
 };
 
+const pageSize = 25;
+
 export default function CampaignReportPage() {
   const { id } = useParams<{ id: string }>();
   const { toast } = useToast();
@@ -60,6 +62,7 @@ export default function CampaignReportPage() {
   const [classification, setClassification] = useState("");
   const [sort, setSort] = useState("last_activity");
   const [offset, setOffset] = useState(0);
+  const [pageInput, setPageInput] = useState("1");
   const [selectedRecipient, setSelectedRecipient] = useState<RecipientRow | null>(null);
 
   const reportQuery = useQuery({
@@ -69,7 +72,7 @@ export default function CampaignReportPage() {
   const recipientsQuery = useQuery({
     queryKey: ["campaign-recipients", id, search, status, opened, clicked, classification, sort, offset],
     queryFn: () => {
-      const params = new URLSearchParams({ limit: "25", offset: String(offset), sort });
+      const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset), sort });
       if (search) params.set("search", search);
       if (status) params.set("status", status);
       if (opened) params.set("opened", opened);
@@ -87,6 +90,20 @@ export default function CampaignReportPage() {
     ),
     enabled: Boolean(selectedRecipient),
   });
+
+  const totalPages = Math.max(1, Math.ceil((recipientsQuery.data?.pagination.total ?? 0) / pageSize));
+
+  useEffect(() => {
+    setPageInput(String(Math.floor(offset / pageSize) + 1));
+  }, [offset]);
+
+  const goToPage = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const page = Number(pageInput);
+    if (Number.isInteger(page) && page >= 1 && page <= totalPages) {
+      setOffset((page - 1) * pageSize);
+    }
+  };
 
   if (reportQuery.isLoading) {
     return <PageHeader eyebrow="Campaigns" title="Campaign report" description="Loading report..." />;
@@ -403,10 +420,25 @@ export default function CampaignReportPage() {
                     </Tbody>
                   </Table>
                 </div>
-                <div className="mt-4 flex items-center justify-between">
-                  <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 25))} className="rounded-lg px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200 disabled:opacity-40">Previous</button>
-                  <span className="text-xs text-slate-500">{offset + 1}–{Math.min(offset + 25, recipientsQuery.data.pagination.total)} of {recipientsQuery.data.pagination.total}</span>
-                  <button type="button" disabled={offset + 25 >= recipientsQuery.data.pagination.total} onClick={() => setOffset(offset + 25)} className="rounded-lg px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200 disabled:opacity-40">Next</button>
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                  <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))} className="rounded-lg px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200 disabled:opacity-40">Previous</button>
+                  <span className="text-xs text-slate-500">{offset + 1}–{Math.min(offset + pageSize, recipientsQuery.data.pagination.total)} of {recipientsQuery.data.pagination.total}</span>
+                  <form onSubmit={goToPage} className="flex items-center gap-2">
+                    <label htmlFor="recipient-page" className="text-xs text-slate-500">Go to page</label>
+                    <input
+                      id="recipient-page"
+                      type="number"
+                      min={1}
+                      max={totalPages}
+                      step={1}
+                      required
+                      value={pageInput}
+                      onChange={(event) => setPageInput(event.target.value)}
+                      className="h-9 w-16 rounded-lg border border-slate-200 px-2 text-sm"
+                    />
+                    <button type="submit" disabled={recipientsQuery.isFetching} className="rounded-lg px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200 disabled:opacity-40">Go</button>
+                  </form>
+                  <button type="button" disabled={offset + pageSize >= recipientsQuery.data.pagination.total} onClick={() => setOffset(offset + pageSize)} className="rounded-lg px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200 disabled:opacity-40">Next</button>
                 </div>
               </>
             )
