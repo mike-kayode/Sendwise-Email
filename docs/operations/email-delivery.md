@@ -309,27 +309,43 @@ signal; it does not fabricate a terminal outcome.
 
 ### Outbound SMTP egress health
 
-The worker checks outbound TCP port 25 connectivity every
+The `egress-probe` service checks outbound TCP port 25 connectivity every
 `DELIVERY_EGRESS_CHECK_INTERVAL` (default `5m`, timeout
 `DELIVERY_EGRESS_CHECK_TIMEOUT`, default `5s`) to the hosts in
 `DELIVERY_EGRESS_CHECK_HOSTS` (comma-separated `host:port`, default
-`gmail-smtp-in.l.google.com:25,aspmx.l.google.com:25`). Results are stored in
-`delivery_egress_health`, exposed via `GET /api/v1/delivery/egress-health`, and
-included in analytics overview as `egress_health`.
+`gmail-smtp-in.l.google.com:25,outlook-com.olc.protection.outlook.com:25,mta5.am0.yahoodns.net:25`).
+The probe runs with `network_mode: "service:stalwart"` so it shares Stalwart's
+network namespace and measures Stalwart's own outbound path, including the same
+sysctls/NAT path. The worker never probes or pauses sending based on its own
+container network; it only reads `delivery_egress_health` for metrics and the
+optional sending gate.
 
-Metrics on the worker metrics address (`:9091`):
+Hysteresis prevents flapping: status becomes `blocked` only after 2 consecutive
+failed cycles, becomes `ok` after 1 successful cycle, and is `blocked` only when
+all configured probe hosts fail. Results are stored in `delivery_egress_health`,
+exposed via `GET /api/v1/delivery/egress-health`, and included in analytics
+overview as `egress_health`.
+
+`DELIVERY_EGRESS_GATE_ENABLED` (default `true`) is a master switch for the send
+pause. When enabled and status is `blocked`, the scheduler pauses new campaign
+queueing and the worker defers picked jobs with `deferred_by_sendwise`; the
+dashboard shows a visible BLOCKED banner with the last check time. Sends resume
+automatically when checks recover. When disabled, the dashboard and API still
+report egress status, but nothing is paused.
+
+Metrics on the worker metrics address (`:9091`), refreshed by the worker from the
+database:
 
 ```sh
 curl -fsS http://127.0.0.1:9091/metrics | grep delivery_egress
+# or, if curl is unavailable in the image:
+wget -qO- http://127.0.0.1:9091/metrics | grep delivery_egress
 ```
 
 `delivery_egress_blocked` is `1` when egress is blocked and `0` otherwise.
 `delivery_egress_last_check_timestamp_seconds` records the last check time.
 Prometheus alert `DeliveryEgressBlocked` fires at critical severity after 5 minutes
-blocked. While blocked, the scheduler pauses new campaign queueing and the worker
-defers picked jobs with `deferred_by_sendwise`; the dashboard shows a visible
-BLOCKED banner with the last check time. Sends resume automatically when checks
-recover.
+blocked.
 
 ### Safe sending speed defaults
 

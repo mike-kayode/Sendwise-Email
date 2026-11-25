@@ -75,6 +75,26 @@ services:
       - net.ipv4.ip_default_ttl=65
     restart: unless-stopped
 
+  egress-probe:
+    build:
+      context: .
+      target: egress-probe
+    command: ["/usr/local/bin/egress-probe"]
+    network_mode: "service:stalwart"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      stalwart:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-email}:${POSTGRES_PASSWORD:-email}@postgres:5432/${POSTGRES_DB:-email_platform}?sslmode=disable
+      DELIVERY_EGRESS_CHECK_INTERVAL: ${DELIVERY_EGRESS_CHECK_INTERVAL:-5m}
+      DELIVERY_EGRESS_CHECK_TIMEOUT: ${DELIVERY_EGRESS_CHECK_TIMEOUT:-5s}
+      DELIVERY_EGRESS_CHECK_HOSTS: ${DELIVERY_EGRESS_CHECK_HOSTS:-gmail-smtp-in.l.google.com:25,outlook-com.olc.protection.outlook.com:25,mta5.am0.yahoodns.net:25}
+    restart: unless-stopped
+
   minio:
     image: minio/minio:latest
     profiles: ["storage"]
@@ -162,9 +182,10 @@ services:
       DELIVERY_JOURNEY_RECONCILE_BATCH: ${DELIVERY_JOURNEY_RECONCILE_BATCH:-100}
       DELIVERY_JOURNEY_STUCK_AFTER: ${DELIVERY_JOURNEY_STUCK_AFTER:-30m}
       DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS: ${DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS:-}
+      DELIVERY_EGRESS_GATE_ENABLED: ${DELIVERY_EGRESS_GATE_ENABLED:-true}
       DELIVERY_EGRESS_CHECK_INTERVAL: ${DELIVERY_EGRESS_CHECK_INTERVAL:-5m}
       DELIVERY_EGRESS_CHECK_TIMEOUT: ${DELIVERY_EGRESS_CHECK_TIMEOUT:-5s}
-      DELIVERY_EGRESS_CHECK_HOSTS: ${DELIVERY_EGRESS_CHECK_HOSTS:-gmail-smtp-in.l.google.com:25,aspmx.l.google.com:25}
+      DELIVERY_EGRESS_CHECK_HOSTS: ${DELIVERY_EGRESS_CHECK_HOSTS:-gmail-smtp-in.l.google.com:25,outlook-com.olc.protection.outlook.com:25,mta5.am0.yahoodns.net:25}
       MAX_DAILY_EMAILS: ${MAX_DAILY_EMAILS:-10000}
       WARMUP_START_PER_DAY: ${WARMUP_START_PER_DAY:-50}
       WARMUP_GROWTH_FACTOR: ${WARMUP_GROWTH_FACTOR:-1.5}
@@ -259,9 +280,10 @@ services:
       DELIVERY_JOURNEY_RECONCILE_BATCH: ${DELIVERY_JOURNEY_RECONCILE_BATCH:-100}
       DELIVERY_JOURNEY_STUCK_AFTER: ${DELIVERY_JOURNEY_STUCK_AFTER:-30m}
       DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS: ${DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS:-}
+      DELIVERY_EGRESS_GATE_ENABLED: ${DELIVERY_EGRESS_GATE_ENABLED:-true}
       DELIVERY_EGRESS_CHECK_INTERVAL: ${DELIVERY_EGRESS_CHECK_INTERVAL:-5m}
       DELIVERY_EGRESS_CHECK_TIMEOUT: ${DELIVERY_EGRESS_CHECK_TIMEOUT:-5s}
-      DELIVERY_EGRESS_CHECK_HOSTS: ${DELIVERY_EGRESS_CHECK_HOSTS:-gmail-smtp-in.l.google.com:25,aspmx.l.google.com:25}
+      DELIVERY_EGRESS_CHECK_HOSTS: ${DELIVERY_EGRESS_CHECK_HOSTS:-gmail-smtp-in.l.google.com:25,outlook-com.olc.protection.outlook.com:25,mta5.am0.yahoodns.net:25}
       MAX_DAILY_EMAILS: ${MAX_DAILY_EMAILS:-10000}
       WARMUP_START_PER_DAY: ${WARMUP_START_PER_DAY:-50}
       WARMUP_GROWTH_FACTOR: ${WARMUP_GROWTH_FACTOR:-1.5}

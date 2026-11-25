@@ -161,6 +161,17 @@ if [ -n "${DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS:-}" ]; then
   done
 fi
 
+# --- Optional outbound egress sending gate ----------------------------------
+if [ -n "${DELIVERY_EGRESS_GATE_ENABLED:-}" ]; then
+  case "$(printf '%s' "$DELIVERY_EGRESS_GATE_ENABLED" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+    true|false|1|0|yes|no) ;;
+    *)
+      echo "DELIVERY_EGRESS_GATE_ENABLED must be true/false (got '$DELIVERY_EGRESS_GATE_ENABLED')" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 # --- API_BASE_URL must be a real http(s) origin ------------------------------
 case "$API_BASE_URL" in
   http://*|https://*) ;;

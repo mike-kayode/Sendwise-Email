@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -384,10 +383,8 @@ func (w *Worker) process(ctx context.Context, job campaigns.JobPayload) (time.Du
 	defer stopHeartbeat()
 	go w.processingHeartbeat(heartbeatCtx, row.ID)
 	row.Status = "processing"
-	pickedUpAt := time.Now().UTC()
 	w.recordJourneyEvent(ctx, row, "picked_up", "sendwise", "Worker picked up message for delivery", nil, nil, nil)
 	w.recordJourneyEvent(ctx, row, "processing", "sendwise", "", nil, nil, nil)
-	_ = pickedUpAt
 
 	if row.CampaignStatus == "cancelled" || row.CampaignStatus == "failed" {
 		return 0, w.cancelPendingJob(ctx, row, "campaign_"+row.CampaignStatus)
@@ -1860,14 +1857,14 @@ func (w *Worker) schedulerLoop(ctx context.Context) {
 	egressTicker := time.NewTicker(egressInterval)
 	defer egressTicker.Stop()
 
-	w.checkDeliveryEgressHealth(ctx)
+	w.refreshDeliveryEgressHealthMetrics(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-egressTicker.C:
-			w.checkDeliveryEgressHealth(ctx)
+			w.refreshDeliveryEgressHealthMetrics(ctx)
 		case <-journeyTicker.C:
 			w.reconcileDeliveryJourneys(ctx)
 		case <-ticker.C:
@@ -1933,100 +1930,42 @@ func (w *Worker) reconcileDeliveryJourneys(ctx context.Context) {
 	}
 }
 
-type egressHostCheck struct {
-	Host    string `json:"host"`
-	OK      bool   `json:"ok"`
-	Detail  string `json:"detail,omitempty"`
-	LatencyMS int64 `json:"latency_ms,omitempty"`
-}
-
-func (w *Worker) checkDeliveryEgressHealth(ctx context.Context) {
-	hosts := w.cfg.DeliveryEgressCheckHosts
-	if len(hosts) == 0 {
-		hosts = []string{"gmail-smtp-in.l.google.com:25", "aspmx.l.google.com:25"}
-	}
-	timeout := w.cfg.DeliveryEgressCheckTimeout
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
-	checks := make([]egressHostCheck, 0, len(hosts))
-	allBlocked := true
-	anyOK := false
-	for _, host := range hosts {
-		host = strings.TrimSpace(host)
-		if host == "" {
-			continue
-		}
-		start := time.Now()
-		conn, err := net.DialTimeout("tcp", host, timeout)
-		latency := time.Since(start).Milliseconds()
-		check := egressHostCheck{Host: host, LatencyMS: latency}
-		if err != nil {
-			check.OK = false
-			check.Detail = truncateError(err)
-		} else {
-			_ = conn.Close()
-			check.OK = true
-			anyOK = true
-			allBlocked = false
-		}
-		checks = append(checks, check)
-	}
-	if len(checks) == 0 {
-		allBlocked = true
-		anyOK = false
-		checks = append(checks, egressHostCheck{Host: "no-hosts-configured", OK: false, Detail: "no egress check hosts configured"})
-	}
-
-	status := "ok"
-	detail := "outbound SMTP port 25 reachable"
-	if !anyOK && allBlocked {
-		status = "blocked"
-		detail = "outbound SMTP port 25 unreachable on configured public MX hosts"
-	}
-	checksJSON, err := json.Marshal(checks)
+func (w *Worker) refreshDeliveryEgressHealthMetrics(ctx context.Context) {
+	var status string
+	var checkedAt time.Time
+	err := w.pool.QueryRow(ctx, `
+		SELECT status, checked_at
+		FROM delivery_egress_health
+		WHERE id = 1::smallint
+	`).Scan(&status, &checkedAt)
 	if err != nil {
-		w.logger.Warn("marshal egress checks", "error", err)
-		checksJSON = []byte("[]")
+		if !errors.Is(err, pgx.ErrNoRows) {
+			w.logger.Warn("read delivery egress health for metrics", "error", err)
+		}
+		return
 	}
-	now := time.Now().UTC()
-	_, err = w.pool.Exec(ctx, `
-		INSERT INTO delivery_egress_health
-			(id, status, checked_at, last_ok_at, last_blocked_at, detail, checks, updated_at)
-		VALUES (true, $1, $2,
-		        CASE WHEN $1 = 'ok' THEN $2 ELSE NULL END,
-		        CASE WHEN $1 = 'blocked' THEN $2 ELSE NULL END,
-		        $3, $4::jsonb, $2)
-		ON CONFLICT (id) DO UPDATE SET
-			status = EXCLUDED.status,
-			checked_at = EXCLUDED.checked_at,
-			last_ok_at = CASE WHEN EXCLUDED.status = 'ok' THEN EXCLUDED.checked_at ELSE delivery_egress_health.last_ok_at END,
-			last_blocked_at = CASE WHEN EXCLUDED.status = 'blocked' THEN EXCLUDED.checked_at ELSE delivery_egress_health.last_blocked_at END,
-			detail = EXCLUDED.detail,
-			checks = EXCLUDED.checks,
-			updated_at = EXCLUDED.updated_at
-	`, status, now, detail, string(checksJSON))
-	if err != nil {
-		w.logger.Warn("persist delivery egress health", "error", err)
-	}
-
 	if status == "blocked" {
 		observability.DeliveryEgressBlocked.Set(1)
-		w.logger.Warn("delivery egress health check blocked", "status", status, "detail", detail, "checks", string(checksJSON))
 	} else {
 		observability.DeliveryEgressBlocked.Set(0)
-		w.logger.Info("delivery egress health check ok", "status", status, "detail", detail)
 	}
-	observability.DeliveryEgressLastCheckTimestamp.Set(float64(now.Unix()))
+	observability.DeliveryEgressLastCheckTimestamp.Set(float64(checkedAt.Unix()))
+}
+
+func (w *Worker) DeliveryEgressGateBlocked(ctx context.Context) (bool, string) {
+	return w.deliveryEgressBlocked(ctx)
 }
 
 func (w *Worker) deliveryEgressBlocked(ctx context.Context) (bool, string) {
+	if !w.cfg.DeliveryEgressGateEnabled {
+		return false, ""
+	}
 	var status string
 	var detail string
 	err := w.pool.QueryRow(ctx, `
 		SELECT status, COALESCE(detail, '')
 		FROM delivery_egress_health
-		WHERE id = true
+		WHERE id = 1::smallint
 	`).Scan(&status, &detail)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

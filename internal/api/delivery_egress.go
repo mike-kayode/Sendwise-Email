@@ -35,7 +35,7 @@ func (s *Server) loadDeliveryEgressHealth(ctx context.Context) (*egressHealthRes
 	err := s.pool.QueryRow(ctx, `
 		SELECT status, checked_at, last_ok_at, last_blocked_at, COALESCE(detail, ''), COALESCE(checks, '[]'::jsonb)
 		FROM delivery_egress_health
-		WHERE id = true
+		WHERE id = 1::smallint
 	`).Scan(&resp.Status, &resp.CheckedAt, &resp.LastOKAt, &resp.LastBlockedAt, &resp.Detail, &checks)
 	if err != nil {
 		if err == pgx.ErrNoRows {

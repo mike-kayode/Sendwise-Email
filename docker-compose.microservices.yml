@@ -76,6 +76,26 @@ services:
       - ${STALWART_CERTS_DIR:-./secrets/stalwart/certs}:/etc/stalwart/certs:ro
     restart: unless-stopped
 
+  egress-probe:
+    build:
+      context: .
+      target: egress-probe
+    command: ["/usr/local/bin/egress-probe"]
+    network_mode: "service:stalwart"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      stalwart:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-email}:${POSTGRES_PASSWORD:-email}@postgres:5432/${POSTGRES_DB:-email_platform}?sslmode=disable
+      DELIVERY_EGRESS_CHECK_INTERVAL: ${DELIVERY_EGRESS_CHECK_INTERVAL:-5m}
+      DELIVERY_EGRESS_CHECK_TIMEOUT: ${DELIVERY_EGRESS_CHECK_TIMEOUT:-5s}
+      DELIVERY_EGRESS_CHECK_HOSTS: ${DELIVERY_EGRESS_CHECK_HOSTS:-gmail-smtp-in.l.google.com:25,outlook-com.olc.protection.outlook.com:25,mta5.am0.yahoodns.net:25}
+    restart: unless-stopped
+
   minio:
     image: minio/minio:latest
     profiles: ["storage"]
@@ -232,9 +252,10 @@ services:
       IDENTITY_URL: http://identity:8080
       SERVICE_TOKEN: ${SERVICE_TOKEN:?Set SERVICE_TOKEN in .env}
       DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS: ${DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS:-}
+      DELIVERY_EGRESS_GATE_ENABLED: ${DELIVERY_EGRESS_GATE_ENABLED:-true}
       DELIVERY_EGRESS_CHECK_INTERVAL: ${DELIVERY_EGRESS_CHECK_INTERVAL:-5m}
       DELIVERY_EGRESS_CHECK_TIMEOUT: ${DELIVERY_EGRESS_CHECK_TIMEOUT:-5s}
-      DELIVERY_EGRESS_CHECK_HOSTS: ${DELIVERY_EGRESS_CHECK_HOSTS:-gmail-smtp-in.l.google.com:25,aspmx.l.google.com:25}
+      DELIVERY_EGRESS_CHECK_HOSTS: ${DELIVERY_EGRESS_CHECK_HOSTS:-gmail-smtp-in.l.google.com:25,outlook-com.olc.protection.outlook.com:25,mta5.am0.yahoodns.net:25}
     depends_on:
       identity:
         condition: service_started
