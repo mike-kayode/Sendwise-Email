@@ -69,10 +69,6 @@ services:
     volumes:
       - stalwart-data:/opt/stalwart
       - ${STALWART_CERTS_DIR:-./secrets/stalwart/certs}:/etc/stalwart/certs:ro
-    # This host's provider drops NAT-forwarded outbound port-25 traffic unless
-    # Stalwart's packets leave the bridge with the host's effective TTL (64).
-    sysctls:
-      - net.ipv4.ip_default_ttl=65
     restart: unless-stopped
 
   egress-probe:

@@ -80,16 +80,12 @@ docker run --rm --network host --entrypoint sh \
   -c 'timeout 15s openssl s_client -4 -connect gmail-smtp-in.l.google.com:25 -starttls smtp -brief </dev/null'
 ```
 
-If `tcpdump` shows bridge-container SYNs leaving `eth0` without SYN-ACKs, while the
-host-network connection succeeds, the hosting provider may be dropping NAT-forwarded port-25
-traffic because of its packet TTL. The workaround is to set the Stalwart container's
-`net.ipv4.ip_default_ttl` to `65`; Docker's bridge NAT decrements it to `64` on egress. This is
-configured on the `stalwart` service in `docker-compose.yml` and is checked during deployment
-smoke tests. To verify the running container setting:
-
-```sh
-docker compose exec -T stalwart cat /proc/sys/net/ipv4/ip_default_ttl
-```
+If `tcpdump` shows bridge-container SYNs leaving `eth0` without SYN-ACKs while a
+host-network connection succeeds, compare packet TTL before changing container sysctls.
+On this host, containers at the default TTL 64 reached external port 25 in 9 of 9 tests
+while TTL 65 failed in 3 of 9, and Stalwart with TTL 65 stayed blocked for over an hour.
+The `net.ipv4.ip_default_ttl=65` workaround is harmful on this host and must not be set;
+keep Stalwart at the default TTL.
 
 The outbound smoke-test host defaults to `gmail-smtp-in.l.google.com` and can be overridden with
 `OUTBOUND_SMTP_CHECK_HOST`. Set `SKIP_OUTBOUND_SMTP_CHECK=true` only in environments that
