@@ -330,6 +330,11 @@ after that fresh start. The confirmation counter is persisted in
 `delivery_egress_health` (`consecutive_failures`, `unconfirmed_failure`).
 `scripts/sync-stalwart-certs.sh` restarts `egress-probe` after restarting
 Stalwart so the probe rejoins the current namespace after certificate syncs.
+`scripts/deploy.sh` builds and starts `egress-probe` (after Stalwart is up),
+and its smoke test waits for `delivery_egress_health.checked_at` to advance
+within two check intervals (capped). The smoke check is skipped when
+`SKIP_OUTBOUND_SMTP_CHECK=true` and warns, rather than failing, when
+`DELIVERY_EGRESS_GATE_ENABLED=false`.
 
 Staleness is fail-open: if the last reading is older than
 `3 * DELIVERY_EGRESS_CHECK_INTERVAL`, the worker gate, the

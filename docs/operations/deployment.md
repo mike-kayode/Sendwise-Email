@@ -23,6 +23,7 @@ Staging/production config requires verified-domain enforcement, a JWT secret of 
 | Worker | email-platform:worker | Go binary, port 9091 (metrics) |
 | Web | next.js | port 3000 |
 | Caddy | caddy:2-alpine | HTTPS, reverse proxy |
+| Egress probe | email-platform:egress-probe | Outbound SMTP port-25 egress health, shares Stalwart netns |
 | Prometheus/Grafana/Loki | observability profile | metrics, dashboards, logs |
 
 ## Deployment profiles

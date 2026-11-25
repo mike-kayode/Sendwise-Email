@@ -21,7 +21,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-ROLLBACK_SERVICES=(api worker identity workspace gateway web)
+ROLLBACK_SERVICES=(api worker identity workspace gateway web egress-probe)
 ROLLBACK_IMAGE_REFS=()
 ROLLBACK_IMAGE_IDS=()
 ROLLBACK_TAGS=()
@@ -189,7 +189,7 @@ take_backup() {
 }
 
 build_images() {
-  local targets=(migrate identity-db-migrate workspace-db-migrate api worker identity workspace gateway web)
+  local targets=(migrate identity-db-migrate workspace-db-migrate api worker identity workspace gateway web egress-probe)
   if [ "${DEPLOY_BACKFILL:-0}" = "1" ]; then
     targets+=(backfill)
   fi
@@ -324,7 +324,7 @@ start_stack() {
   log "Starting infrastructure (postgres, redis, nats, stalwart)..."
   "${COMPOSE[@]}" up -d --no-deps postgres redis nats stalwart
   log "Starting application services (--no-deps)..."
-  "${COMPOSE[@]}" up -d --no-deps api worker identity workspace gateway web caddy
+  "${COMPOSE[@]}" up -d --no-deps api worker identity workspace gateway web egress-probe caddy
   log "Stack started"
 }
 
@@ -380,6 +380,55 @@ delivery_journey_webhook_check() {
   log "  ok  delivery-journey-webhook-signature"
 }
 
+parse_duration_seconds() {
+  local v="${1:-5m}"
+  case "$v" in
+    ''|*[!0-9smh]*) echo 300 ;;
+    *s) echo "${v%s}" ;;
+    *m) echo $(( ${v%m} * 60 )) ;;
+    *h) echo $(( ${v%h} * 3600 )) ;;
+    *) echo "$v" ;;
+  esac
+}
+
+egress_probe_smoke_check() {
+  local gate_enabled="${DELIVERY_EGRESS_GATE_ENABLED:-true}"
+  local interval_raw="${DELIVERY_EGRESS_CHECK_INTERVAL:-5m}"
+  local interval_seconds max_wait initial checked_at deadline now
+  if [ "${SKIP_OUTBOUND_SMTP_CHECK:-false}" = "true" ]; then
+    log "  skip egress-probe-health (SKIP_OUTBOUND_SMTP_CHECK=true)"
+    return 0
+  fi
+  interval_seconds="$(parse_duration_seconds "$interval_raw")"
+  if [ "$interval_seconds" -lt 1 ] 2>/dev/null; then
+    interval_seconds=300
+  fi
+  max_wait=$((interval_seconds * 2))
+  if [ "$max_wait" -gt 600 ]; then
+    max_wait=600
+  fi
+  log "Checking egress-probe health advances within ${max_wait}s..."
+  initial="$("${COMPOSE[@]}" exec -T postgres psql -U "${POSTGRES_USER:-email}" -d "${POSTGRES_DB:-email}" -Atc \
+    "SELECT COALESCE(to_char(checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '') FROM delivery_egress_health WHERE id = 1::smallint" \
+    2>/dev/null || true)"
+  deadline=$(( $(date +%s) + max_wait ))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    checked_at="$("${COMPOSE[@]}" exec -T postgres psql -U "${POSTGRES_USER:-email}" -d "${POSTGRES_DB:-email}" -Atc \
+      "SELECT COALESCE(to_char(checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '') FROM delivery_egress_health WHERE id = 1::smallint" \
+      2>/dev/null || true)"
+    if [ -n "$checked_at" ] && [ "$checked_at" != "$initial" ]; then
+      log "  ok  egress-probe-health (checked_at=$checked_at)"
+      return 0
+    fi
+    sleep 5
+  done
+  if [ "$gate_enabled" = "false" ]; then
+    log "  warn egress-probe-health did not advance within ${max_wait}s (DELIVERY_EGRESS_GATE_ENABLED=false; not failing)"
+    return 0
+  fi
+  fail "smoke check failed: delivery_egress_health.checked_at did not advance within ${max_wait}s (initial=${initial:-none} last=${checked_at:-none})"
+}
+
 smoke_tests() {
   log "Running smoke tests against the combined stack..."
   http_check "legacy-api-ready"  "http://127.0.0.1:8080/readyz" "-"
@@ -390,6 +439,7 @@ smoke_tests() {
   http_check "worker-health"     "http://127.0.0.1:9091/healthz" "-"
   http_check "web"               "http://127.0.0.1:3000" "-"
   outbound_smtp_check
+  egress_probe_smoke_check
   delivery_journey_webhook_check
   local caddy_status
   caddy_status="$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:80/ || echo 000)"
