@@ -37,9 +37,10 @@ chown 2000:2000 "$DEST/fullchain.pem" "$DEST/privkey.pem"
 chmod 640 "$DEST/fullchain.pem" "$DEST/privkey.pem"
 
 if [ "$changed" -eq 1 ]; then
-  echo "certificate material changed; restarting stalwart"
+  echo "certificate material changed; restarting stalwart and egress-probe"
   cd "$COMPOSE_DIR"
   docker compose -f docker-compose.yml -f docker-compose.microservices.yml restart stalwart
+  docker compose -f docker-compose.yml -f docker-compose.microservices.yml restart egress-probe
 else
   echo "certificate unchanged"
 fi

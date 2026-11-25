@@ -1930,6 +1930,10 @@ func (w *Worker) reconcileDeliveryJourneys(ctx context.Context) {
 	}
 }
 
+func (w *Worker) RefreshDeliveryEgressHealthMetricsForTest(ctx context.Context) {
+	w.refreshDeliveryEgressHealthMetrics(ctx)
+}
+
 func (w *Worker) refreshDeliveryEgressHealthMetrics(ctx context.Context) {
 	var status string
 	var checkedAt time.Time
@@ -1944,7 +1948,12 @@ func (w *Worker) refreshDeliveryEgressHealthMetrics(ctx context.Context) {
 		}
 		return
 	}
-	if status == "blocked" {
+	interval := w.cfg.DeliveryEgressCheckInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	stale := time.Since(checkedAt) > 3*interval
+	if status == "blocked" && !stale {
 		observability.DeliveryEgressBlocked.Set(1)
 	} else {
 		observability.DeliveryEgressBlocked.Set(0)
@@ -1962,16 +1971,24 @@ func (w *Worker) deliveryEgressBlocked(ctx context.Context) (bool, string) {
 	}
 	var status string
 	var detail string
+	var checkedAt time.Time
 	err := w.pool.QueryRow(ctx, `
-		SELECT status, COALESCE(detail, '')
+		SELECT status, COALESCE(detail, ''), checked_at
 		FROM delivery_egress_health
 		WHERE id = 1::smallint
-	`).Scan(&status, &detail)
+	`).Scan(&status, &detail, &checkedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, ""
 		}
 		w.logger.Warn("read delivery egress health", "error", err)
+		return false, ""
+	}
+	interval := w.cfg.DeliveryEgressCheckInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	if time.Since(checkedAt) > 3*interval {
 		return false, ""
 	}
 	return status == "blocked", detail

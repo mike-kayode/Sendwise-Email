@@ -7,6 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 var (
@@ -87,6 +88,10 @@ func init() {
 
 func MetricsHandler() http.Handler {
 	return promhttp.Handler()
+}
+
+func DeliveryEgressBlockedValueForTest() float64 {
+	return testutil.ToFloat64(DeliveryEgressBlocked)
 }
 
 type statusRecorder struct {

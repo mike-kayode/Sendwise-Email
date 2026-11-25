@@ -47,5 +47,14 @@ func (s *Server) loadDeliveryEgressHealth(ctx context.Context) (*egressHealthRes
 		checks = []byte("[]")
 	}
 	resp.Checks = json.RawMessage(checks)
+	interval := s.cfg.DeliveryEgressCheckInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	staleAfter := 3 * interval
+	if resp.CheckedAt == nil || time.Since(*resp.CheckedAt) > staleAfter {
+		resp.Status = "unknown"
+		resp.Detail = "Egress probe not reporting; last reading is stale. Sends are not paused by this gate."
+	}
 	return &resp, nil
 }

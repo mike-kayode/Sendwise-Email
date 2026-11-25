@@ -321,10 +321,25 @@ container network; it only reads `delivery_egress_health` for metrics and the
 optional sending gate.
 
 Hysteresis prevents flapping: status becomes `blocked` only after 2 consecutive
-failed cycles, becomes `ok` after 1 successful cycle, and is `blocked` only when
-all configured probe hosts fail. Results are stored in `delivery_egress_health`,
-exposed via `GET /api/v1/delivery/egress-health`, and included in analytics
-overview as `egress_health`.
+confirmed failed cycles, becomes `ok` after 1 successful cycle, and is `blocked`
+only when all configured probe hosts fail. Because the probe shares Stalwart's
+network namespace, it can lose connectivity when Stalwart restarts. After any
+failed cycle the probe exits non-zero so Docker restarts it into Stalwart's
+current namespace; a failure counts toward `blocked` only when it is seen again
+after that fresh start. The confirmation counter is persisted in
+`delivery_egress_health` (`consecutive_failures`, `unconfirmed_failure`).
+`scripts/sync-stalwart-certs.sh` restarts `egress-probe` after restarting
+Stalwart so the probe rejoins the current namespace after certificate syncs.
+
+Staleness is fail-open: if the last reading is older than
+`3 * DELIVERY_EGRESS_CHECK_INTERVAL`, the worker gate, the
+`GET /api/v1/delivery/egress-health` API, the dashboard, and the worker metrics
+treat the state as `unknown` with a visible "probe not reporting" state. Stale
+readings never pause sends.
+
+Results are stored in `delivery_egress_health`, exposed via
+`GET /api/v1/delivery/egress-health`, and included in analytics overview as
+`egress_health`.
 
 `DELIVERY_EGRESS_GATE_ENABLED` (default `true`) is a master switch for the send
 pause. When enabled and status is `blocked`, the scheduler pauses new campaign

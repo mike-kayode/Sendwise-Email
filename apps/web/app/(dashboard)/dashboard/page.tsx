@@ -164,7 +164,7 @@ export default function DashboardPage() {
         <div className={`mb-5 rounded-xl border px-4 py-3 text-sm ${data.egress_health.status === "blocked" ? "border-rose-200 bg-rose-50 text-rose-900" : data.egress_health.status === "ok" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="font-medium">
-              Outbound SMTP egress: {data.egress_health.status === "blocked" ? "BLOCKED" : data.egress_health.status === "ok" ? "OK" : "UNKNOWN"}
+              Outbound SMTP egress: {data.egress_health.status === "blocked" ? "BLOCKED" : data.egress_health.status === "ok" ? "OK" : "PROBE NOT REPORTING"}
             </p>
             <p className="text-xs opacity-80">
               Last check: {data.egress_health.checked_at ? formatDateTime(data.egress_health.checked_at) : "never"}
