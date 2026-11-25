@@ -127,12 +127,42 @@ func RecordTx(ctx context.Context, tx pgx.Tx, event Event) (bool, error) {
 		return false, fmt.Errorf("insert delivery journey event: %w", err)
 	}
 
-	if event.Type == "opened" || event.Type == "clicked" {
-		return true, nil
-	}
 	attempt := currentAttempt
 	if event.Attempt != nil && *event.Attempt > attempt {
 		attempt = *event.Attempt
+	}
+	if event.Type == "opened" || event.Type == "clicked" {
+		return true, nil
+	}
+	// Timeline-only events: append to history and refresh metadata, but do not
+	// change the recipient's current journey_status to an event-only type.
+	if event.Type == "picked_up" || event.Type == "smtp_attempt" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE campaign_recipient_tracking
+			SET journey_last_event_at = CASE
+			        WHEN journey_last_event_at IS NULL OR $3::timestamptz >= journey_last_event_at
+			        THEN $3::timestamptz ELSE journey_last_event_at END,
+			    journey_next_retry_at = COALESCE($4::timestamptz, journey_next_retry_at),
+			    journey_remote_host = CASE WHEN $5::text = '' THEN journey_remote_host ELSE $5::text END,
+			    journey_smtp_code = COALESCE($6::integer, journey_smtp_code),
+			    journey_enhanced_code = CASE WHEN $7::text = '' THEN journey_enhanced_code ELSE $7::text END,
+			    journey_reason = CASE WHEN $8::text = '' THEN journey_reason ELSE $8::text END,
+			    journey_attempts = GREATEST(journey_attempts, $9::integer),
+			    journey_last_stalwart_event_at = CASE
+			        WHEN $10::boolean THEN GREATEST(
+			            COALESCE(journey_last_stalwart_event_at, $3::timestamptz),
+			            $3::timestamptz
+			        )
+			        ELSE journey_last_stalwart_event_at
+			    END,
+			    updated_at = now()
+			WHERE organization_id = $1::uuid AND delivery_job_id = $2::uuid
+		`, event.OrganizationID, event.JobID, event.OccurredAt, event.NextRetryAt,
+			event.RemoteHost, event.SMTPCode, event.EnhancedCode, event.Reason,
+			attempt, event.Source == "stalwart" || event.Source == "stalwart_webhook"); err != nil {
+			return false, fmt.Errorf("update delivery journey timeline metadata: %w", err)
+		}
+		return true, nil
 	}
 	if shouldAdvance(currentStatus, currentAt, currentAttempt, event) {
 		if _, err := tx.Exec(ctx, `
@@ -156,7 +186,7 @@ func RecordTx(ctx context.Context, tx pgx.Tx, event Event) (bool, error) {
 			WHERE organization_id = $1::uuid AND delivery_job_id = $2::uuid
 		`, event.OrganizationID, event.JobID, event.Type, event.OccurredAt,
 			event.NextRetryAt, event.RemoteHost, event.SMTPCode, event.EnhancedCode,
-			event.Reason, attempt, event.Source == "stalwart"); err != nil {
+			event.Reason, attempt, event.Source == "stalwart" || event.Source == "stalwart_webhook"); err != nil {
 			return false, fmt.Errorf("advance delivery journey status: %w", err)
 		}
 	}
@@ -197,13 +227,13 @@ func rank(status string) int {
 	switch status {
 	case "queued":
 		return 1
-	case "processing":
+	case "picked_up", "processing":
 		return 2
 	case "deferred_by_sendwise":
 		return 3
 	case "submitted_to_mail_server":
 		return 4
-	case "relaying":
+	case "smtp_attempt", "relaying":
 		return 5
 	case "deferred_by_recipient":
 		return 6
@@ -218,8 +248,8 @@ func rank(status string) int {
 
 func validType(eventType string) bool {
 	switch eventType {
-	case "queued", "processing", "deferred_by_sendwise", "submitted_to_mail_server",
-		"relaying", "deferred_by_recipient", "accepted_by_recipient_server",
+	case "queued", "picked_up", "processing", "deferred_by_sendwise", "submitted_to_mail_server",
+		"smtp_attempt", "relaying", "deferred_by_recipient", "accepted_by_recipient_server",
 		"bounced", "expired", "failed", "complained", "unsubscribed",
 		"accepted_final_state_unknown", "opened", "clicked":
 		return true
@@ -230,7 +260,7 @@ func validType(eventType string) bool {
 
 func validSource(source string) bool {
 	switch source {
-	case "sendwise", "stalwart", "dsn", "reconciliation", "backfill", "tracking":
+	case "sendwise", "stalwart", "stalwart_webhook", "dsn", "reconciliation", "backfill", "tracking":
 		return true
 	default:
 		return false

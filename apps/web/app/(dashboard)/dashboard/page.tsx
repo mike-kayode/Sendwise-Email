@@ -21,7 +21,7 @@ import {
   Td,
 } from "@/components/ui/table";
 import { apiFetch } from "@/lib/auth";
-import { formatDate, formatNumber } from "@/lib/utils";
+import { formatDate, formatDateTime, formatNumber } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
 
 type ListResponse<T> = {
@@ -38,12 +38,22 @@ type Campaign = {
   created_at: string;
 };
 
+type EgressHealth = {
+  status: "ok" | "blocked" | "unknown";
+  checked_at?: string | null;
+  last_ok_at?: string | null;
+  last_blocked_at?: string | null;
+  detail?: string;
+  checks?: Array<{ host: string; ok: boolean; detail?: string; latency_ms?: number }>;
+};
+
 type AnalyticsOverview = {
   contacts: number;
   subscribed: number;
   emails_submitted: number;
   open_rate: number;
   click_rate: number;
+  egress_health?: EgressHealth;
 };
 
 function StatCard({
@@ -149,6 +159,24 @@ export default function DashboardPage() {
           </Link>
         }
       />
+
+      {data.egress_health ? (
+        <div className={`mb-5 rounded-xl border px-4 py-3 text-sm ${data.egress_health.status === "blocked" ? "border-rose-200 bg-rose-50 text-rose-900" : data.egress_health.status === "ok" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="font-medium">
+              Outbound SMTP egress: {data.egress_health.status === "blocked" ? "BLOCKED" : data.egress_health.status === "ok" ? "OK" : "UNKNOWN"}
+            </p>
+            <p className="text-xs opacity-80">
+              Last check: {data.egress_health.checked_at ? formatDateTime(data.egress_health.checked_at) : "never"}
+            </p>
+          </div>
+          <p className="mt-1 text-xs opacity-90">
+            {data.egress_health.status === "blocked"
+              ? "New campaign sends are paused automatically until outbound port 25 connectivity recovers."
+              : data.egress_health.detail || "Outbound SMTP port 25 connectivity check status."}
+          </p>
+        </div>
+      ) : null}
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard

@@ -9,3 +9,11 @@ groups:
         annotations:
           summary: Messages have no recent Stalwart delivery update
           description: '{{ $value }} submitted or relaying recipient messages have exceeded the configured stuck threshold.'
+      - alert: DeliveryEgressBlocked
+        expr: delivery_egress_blocked == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Outbound SMTP egress is blocked
+          description: Sendwise cannot open outbound TCP port 25 to configured public MX hosts. New campaign sends are paused until connectivity recovers.

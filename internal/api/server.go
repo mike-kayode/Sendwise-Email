@@ -383,7 +383,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/campaigns/{id}/recipients", protect(s.listCampaignRecipients))
 	mux.Handle("GET /api/v1/campaigns/{id}/recipients/{recipientId}/activity", protect(s.getCampaignRecipientActivity))
 	mux.Handle("GET /api/v1/campaigns/{id}/recipients/{recipientId}/journey", protect(s.getCampaignRecipientJourney))
+	mux.Handle("GET /api/v1/campaigns/{id}/journey/events/export", protect(s.exportCampaignJourneyEvents))
 	mux.Handle("GET /api/v1/campaigns/{id}/recipients/export", protect(s.exportCampaignRecipients))
+	mux.Handle("GET /api/v1/delivery/egress-health", protect(s.getDeliveryEgressHealth))
 
 	mux.Handle("GET /api/v1/api-keys", protect(s.listAPIKeys, auth.RoleOwner, auth.RoleAdmin))
 	mux.Handle("POST /api/v1/api-keys", protect(s.createAPIKey, auth.RoleOwner, auth.RoleAdmin))

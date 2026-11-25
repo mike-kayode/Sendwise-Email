@@ -26,6 +26,17 @@ func TestVerifyStalwartTelemetrySignature(t *testing.T) {
 	}
 }
 
+func TestValidJourneyStageAcceptsDeferredAlias(t *testing.T) {
+	for _, stage := range []string{"deferred", "deferred_by_sendwise", "deferred_by_recipient"} {
+		if !validJourneyStage(stage) {
+			t.Fatalf("validJourneyStage(%q) = false, want true", stage)
+		}
+	}
+	if validJourneyStage("not_a_stage") {
+		t.Fatal("validJourneyStage accepted unknown stage")
+	}
+}
+
 func TestMapStalwartJourneyType(t *testing.T) {
 	now := time.Now().UTC()
 	tests := []struct {
@@ -34,7 +45,8 @@ func TestMapStalwartJourneyType(t *testing.T) {
 		data   map[string]json.RawMessage
 		want   string
 	}{
-		{name: "relay attempt", source: "delivery.attempt-start", want: "relaying"},
+		{name: "smtp attempt", source: "delivery.attempt-start", want: "smtp_attempt"},
+		{name: "delivery completed", source: "delivery.completed", want: "relaying"},
 		{name: "recipient acceptance", source: "delivery.delivered", want: "accepted_by_recipient_server"},
 		{name: "temporary recipient failure", source: "delivery.dsn-temp-fail", want: "deferred_by_recipient"},
 		{name: "permanent recipient failure", source: "delivery.dsn-perm-fail", want: "bounced"},

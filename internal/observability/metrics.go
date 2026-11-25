@@ -63,11 +63,26 @@ var (
 			Help: "Submitted or relaying recipient messages without a recent Stalwart event.",
 		},
 	)
+
+	DeliveryEgressBlocked = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "delivery_egress_blocked",
+			Help: "Whether outbound SMTP port 25 egress checks are blocked (1 blocked, 0 ok).",
+		},
+	)
+
+	DeliveryEgressLastCheckTimestamp = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "delivery_egress_last_check_timestamp_seconds",
+			Help: "Unix timestamp of the last outbound SMTP port 25 egress health check.",
+		},
+	)
 )
 
 func init() {
 	prometheus.MustRegister(HTTPRequests, HTTPDuration, DeliveryJobs, ProviderFallbacks,
-		QueuePolls, SMTPBreakerOpen, DeliveryJourneyStuckMessages)
+		QueuePolls, SMTPBreakerOpen, DeliveryJourneyStuckMessages, DeliveryEgressBlocked,
+		DeliveryEgressLastCheckTimestamp)
 }
 
 func MetricsHandler() http.Handler {

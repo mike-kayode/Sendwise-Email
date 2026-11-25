@@ -15,18 +15,19 @@ import (
 )
 
 type analyticsOverview struct {
-	Contacts      int64   `json:"contacts"`
-	Subscribed    int64   `json:"subscribed"`
-	CampaignsSent int64   `json:"campaigns_sent"`
-	Submitted     int64   `json:"emails_submitted"`
-	Opens         int64   `json:"opens"`
-	Clicks        int64   `json:"clicks"`
-	Bounces       int64   `json:"bounces"`
-	Complaints    int64   `json:"complaints"`
-	Unsubscribes  int64   `json:"unsubscribes"`
-	OpenRate      float64 `json:"open_rate"`
-	ClickRate     float64 `json:"click_rate"`
-	BounceRate    float64 `json:"bounce_rate"`
+	Contacts      int64                 `json:"contacts"`
+	Subscribed    int64                 `json:"subscribed"`
+	CampaignsSent int64                 `json:"campaigns_sent"`
+	Submitted     int64                 `json:"emails_submitted"`
+	Opens         int64                 `json:"opens"`
+	Clicks        int64                 `json:"clicks"`
+	Bounces       int64                 `json:"bounces"`
+	Complaints    int64                 `json:"complaints"`
+	Unsubscribes  int64                 `json:"unsubscribes"`
+	OpenRate      float64               `json:"open_rate"`
+	ClickRate     float64               `json:"click_rate"`
+	BounceRate    float64               `json:"bounce_rate"`
+	EgressHealth  *egressHealthResponse `json:"egress_health,omitempty"`
 }
 
 func (s *Server) analyticsOverview(w http.ResponseWriter, r *http.Request) {
@@ -56,6 +57,11 @@ func (s *Server) analyticsOverview(w http.ResponseWriter, r *http.Request) {
 		result.OpenRate = percent(result.Opens, result.Submitted)
 		result.ClickRate = percent(result.Clicks, result.Submitted)
 		result.BounceRate = percent(result.Bounces, result.Submitted)
+	}
+	if egress, err := s.loadDeliveryEgressHealth(r.Context()); err == nil {
+		result.EgressHealth = egress
+	} else {
+		s.logger.Warn("load delivery egress health for overview", "error", err)
 	}
 
 	httpx.JSON(w, http.StatusOK, result)
@@ -285,6 +291,9 @@ type campaignRecipientRow struct {
 	LastActivityAt           *string `json:"last_activity_at"`
 	EngagementClassification string  `json:"engagement_classification"`
 	JourneyStatus            string  `json:"journey_status"`
+	JourneyReason            string  `json:"journey_reason,omitempty"`
+	IsDelayed                bool    `json:"is_delayed"`
+	DelayedReason            string  `json:"delayed_reason,omitempty"`
 }
 
 func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) {
@@ -332,6 +341,11 @@ func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) 
 	case "last_activity":
 		orderBy = "GREATEST(crt.last_opened_at, crt.last_clicked_at) DESC NULLS LAST"
 	}
+	stuckAfter := s.cfg.DeliveryJourneyStuckAfter
+	if stuckAfter <= 0 {
+		stuckAfter = 30 * time.Minute
+	}
+	stuckAfterInterval := fmt.Sprintf("%f seconds", stuckAfter.Seconds())
 	var total int
 	if err := s.pool.QueryRow(r.Context(), `
 		SELECT count(*)
@@ -344,6 +358,7 @@ func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) 
 		  AND ($6::text = '' OR ($6::text = 'yes' AND crt.click_count > 0) OR ($6::text = 'no' AND crt.click_count = 0))
 		  AND ($7::text = '' OR crt.engagement_classification = $7::text)
 		  AND ($8::text = '' OR crt.journey_status = $8::text
+		       OR ($8::text = 'deferred' AND crt.journey_status IN ('deferred_by_sendwise', 'deferred_by_recipient'))
 		       OR ($8::text = 'opened' AND crt.open_count > 0)
 		       OR ($8::text = 'clicked' AND crt.click_count > 0))
 	`, orgID, campaignID, status, search, opened, clicked, classification, stage).Scan(&total); err != nil {
@@ -359,9 +374,14 @@ func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) 
 		       crt.open_count, crt.first_opened_at::text, crt.last_opened_at::text,
 		       crt.click_count, crt.last_clicked_at::text,
 		       GREATEST(crt.last_opened_at, crt.last_clicked_at)::text,
-		       crt.engagement_classification, crt.journey_status
+		       crt.engagement_classification, crt.journey_status,
+		       COALESCE(crt.journey_reason, ''),
+		       (crt.journey_status IN ('submitted_to_mail_server', 'relaying')
+		        AND COALESCE(crt.journey_last_stalwart_event_at, crt.accepted_at, dj.updated_at, crt.updated_at)
+		            <= now() - $11::interval) AS is_delayed
 		FROM campaign_recipient_tracking crt
 		JOIN contacts c ON c.id = crt.contact_id
+		LEFT JOIN delivery_jobs dj ON dj.id = crt.delivery_job_id
 		WHERE crt.organization_id = $1 AND crt.campaign_id = $2
 		  AND ($3::text = '' OR crt.delivery_status = $3::text)
 		  AND ($4::text = '' OR crt.email ILIKE '%' || $4::text || '%' OR c.first_name ILIKE '%' || $4::text || '%' OR c.last_name ILIKE '%' || $4::text || '%')
@@ -369,12 +389,13 @@ func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) 
 		  AND ($6::text = '' OR ($6::text = 'yes' AND crt.click_count > 0) OR ($6::text = 'no' AND crt.click_count = 0))
 		  AND ($7::text = '' OR crt.engagement_classification = $7::text)
 		  AND ($8::text = '' OR crt.journey_status = $8::text
+		       OR ($8::text = 'deferred' AND crt.journey_status IN ('deferred_by_sendwise', 'deferred_by_recipient'))
 		       OR ($8::text = 'opened' AND crt.open_count > 0)
 		       OR ($8::text = 'clicked' AND crt.click_count > 0))
 		ORDER BY ` + orderBy + `
 		LIMIT $9::integer OFFSET $10::integer
 	`
-	rows, err := s.pool.Query(r.Context(), query, orgID, campaignID, status, search, opened, clicked, classification, stage, limit, offset)
+	rows, err := s.pool.Query(r.Context(), query, orgID, campaignID, status, search, opened, clicked, classification, stage, limit, offset, stuckAfterInterval)
 	if err != nil {
 		s.logger.Error("list campaign recipients", "error", err)
 		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not list campaign recipients.")
@@ -388,10 +409,14 @@ func (s *Server) listCampaignRecipients(w http.ResponseWriter, r *http.Request) 
 			&row.QueuedAt, &row.AcceptedAt, &row.DeliveredAt, &row.OpenCount,
 			&row.FirstOpenedAt, &row.LastOpenedAt, &row.ClickCount, &row.LastClickedAt,
 			&row.LastActivityAt, &row.EngagementClassification, &row.JourneyStatus,
+			&row.JourneyReason, &row.IsDelayed,
 		); err != nil {
 			s.logger.Error("scan campaign recipient", "error", err)
 			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not list campaign recipients.")
 			return
+		}
+		if row.IsDelayed {
+			row.DelayedReason = row.JourneyReason
 		}
 		result = append(result, row)
 	}

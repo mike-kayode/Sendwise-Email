@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -212,7 +213,7 @@ func (h *DeliveryHandler) applyStalwartTelemetryEvent(r *http.Request, event sta
 			OrganizationID: match.OrganizationID,
 			JobID:          match.JobID,
 			Type:           eventType,
-			Source:         "stalwart",
+			Source:         "stalwart_webhook",
 			SourceEventID:  event.ID,
 			OccurredAt:     event.CreatedAt,
 			RemoteHost:     telemetryString(event.Data, "hostname", "remoteHost", "remote_mx_host"),
@@ -257,7 +258,9 @@ func mapStalwartJourneyType(eventType string, data map[string]json.RawMessage, o
 	case "delivery.attempt-start", "delivery.attempt-end", "delivery.connect-error",
 		"delivery.greeting-failed", "delivery.ehlo-rejected", "delivery.mail-from-rejected",
 		"delivery.rcpt-to-rejected", "delivery.rcpt-to-failed", "delivery.message-rejected",
-		"delivery.start-tls-error", "delivery.implicit-tls-error", "delivery.completed":
+		"delivery.start-tls-error", "delivery.implicit-tls-error":
+		return "smtp_attempt", true
+	case "delivery.completed":
 		return "relaying", true
 	case "delivery.delivered", "delivery.dsn-success":
 		return "accepted_by_recipient_server", true
@@ -522,7 +525,7 @@ func validJourneyStage(stage string) bool {
 	case "queued", "processing", "deferred_by_sendwise", "submitted_to_mail_server",
 		"relaying", "deferred_by_recipient", "accepted_by_recipient_server",
 		"bounced", "expired", "failed", "complained", "unsubscribed",
-		"accepted_final_state_unknown":
+		"accepted_final_state_unknown", "deferred":
 		return true
 	default:
 		return false
@@ -536,4 +539,91 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func (s *Server) exportCampaignJourneyEvents(w http.ResponseWriter, r *http.Request) {
+	orgID, campaignID := s.organizationID(r), r.PathValue("id")
+	if _, err := s.loadCampaign(r.Context(), campaignID, orgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			httpx.Error(w, http.StatusNotFound, "campaign_not_found", "Campaign not found.")
+			return
+		}
+		s.logger.Error("load campaign for journey events export", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not export delivery journey events.")
+		return
+	}
+
+	rows, err := s.pool.Query(r.Context(), `
+		SELECT crt.email,
+		       dje.event_timestamp,
+		       dje.event_type,
+		       dje.source,
+		       COALESCE(dje.source_event_id, ''),
+		       COALESCE(dje.remote_mx_host, ''),
+		       COALESCE(dje.smtp_code::text, ''),
+		       COALESCE(dje.smtp_enhanced_code, ''),
+		       COALESCE(dje.reason, ''),
+		       COALESCE(dje.attempt_number::text, ''),
+		       dje.next_retry_at,
+		       COALESCE(dje.metadata::text, '{}')
+		FROM delivery_journey_events dje
+		JOIN campaign_recipient_tracking crt
+		  ON crt.organization_id = dje.organization_id
+		 AND crt.recipient_id = dje.recipient_id
+		WHERE dje.organization_id = $1::uuid
+		  AND dje.campaign_id = $2::uuid
+		ORDER BY crt.email ASC, dje.event_timestamp ASC, dje.id ASC
+	`, orgID, campaignID)
+	if err != nil {
+		s.logger.Error("export delivery journey events", "error", err)
+		httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not export delivery journey events.")
+		return
+	}
+	defer rows.Close()
+
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="campaign-%s-delivery-journey-events.csv"`, campaignID))
+	writer := csv.NewWriter(w)
+	_ = writer.Write([]string{
+		"recipient_email",
+		"event_timestamp_utc",
+		"event_type",
+		"source",
+		"source_event_id",
+		"remote_mx_host",
+		"smtp_code",
+		"smtp_enhanced_code",
+		"reason",
+		"attempt_number",
+		"next_retry_at_utc",
+		"metadata_json",
+	})
+	for rows.Next() {
+		var email, eventType, source, sourceEventID, remoteHost, smtpCode, enhancedCode, reason, attemptNumber, metadata string
+		var eventTimestamp time.Time
+		var nextRetryAt *time.Time
+		if err := rows.Scan(&email, &eventTimestamp, &eventType, &source, &sourceEventID, &remoteHost, &smtpCode, &enhancedCode, &reason, &attemptNumber, &nextRetryAt, &metadata); err != nil {
+			s.logger.Error("scan delivery journey event export row", "error", err)
+			httpx.Error(w, http.StatusInternalServerError, "internal_error", "Could not export delivery journey events.")
+			return
+		}
+		_ = writer.Write([]string{
+			email,
+			eventTimestamp.UTC().Format(time.RFC3339Nano),
+			eventType,
+			source,
+			sourceEventID,
+			remoteHost,
+			smtpCode,
+			enhancedCode,
+			reason,
+			attemptNumber,
+			timeValue(nextRetryAt),
+			metadata,
+		})
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		s.logger.Error("flush delivery journey events CSV", "error", err)
+	}
 }

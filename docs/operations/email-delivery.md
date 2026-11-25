@@ -281,6 +281,80 @@ metrics address (`WORKER_METRICS_ADDR`, default `:9091`):
 curl -fsS http://127.0.0.1:9091/metrics | grep delivery_journey_stuck_messages
 ```
 
+### Delivery timeline and exports
+
+`delivery_journey_events` is append-only. Each event carries a UTC timestamp and a
+source (`sendwise`, `stalwart_webhook`, `reconciliation`, `dsn`, `backfill`, or
+`tracking`). Timeline event types include `queued`, `picked_up`, `processing`,
+`smtp_attempt`, `deferred_by_sendwise`, `submitted_to_mail_server`, `relaying`,
+`deferred_by_recipient`, `accepted_by_recipient_server`, `bounced`, `expired`,
+`failed`, and `accepted_final_state_unknown`. SMTP attempt/deferral events include
+remote MX host, SMTP code, enhanced code, reason, attempt number, and next retry
+time when available from Sendwise or Stalwart telemetry.
+
+The campaign report recipient panel shows the full timeline with full UTC timestamps
+and local time on hover. Campaign-level delivery events can be exported as CSV from:
+
+```sh
+curl -fsS -H "Authorization: Bearer <token>" \
+  "https://<host>/api/v1/campaigns/<campaign-id>/journey/events/export" -o journey-events.csv
+```
+
+### Delayed messages
+
+Recipients in `submitted_to_mail_server` or `relaying` with no recent Stalwart event
+older than `DELIVERY_JOURNEY_STUCK_AFTER` (default `30m`) are shown as **Delayed**
+in the campaign report with the latest Stalwart reason. Delayed is a visibility
+signal; it does not fabricate a terminal outcome.
+
+### Outbound SMTP egress health
+
+The worker checks outbound TCP port 25 connectivity every
+`DELIVERY_EGRESS_CHECK_INTERVAL` (default `5m`, timeout
+`DELIVERY_EGRESS_CHECK_TIMEOUT`, default `5s`) to the hosts in
+`DELIVERY_EGRESS_CHECK_HOSTS` (comma-separated `host:port`, default
+`gmail-smtp-in.l.google.com:25,aspmx.l.google.com:25`). Results are stored in
+`delivery_egress_health`, exposed via `GET /api/v1/delivery/egress-health`, and
+included in analytics overview as `egress_health`.
+
+Metrics on the worker metrics address (`:9091`):
+
+```sh
+curl -fsS http://127.0.0.1:9091/metrics | grep delivery_egress
+```
+
+`delivery_egress_blocked` is `1` when egress is blocked and `0` otherwise.
+`delivery_egress_last_check_timestamp_seconds` records the last check time.
+Prometheus alert `DeliveryEgressBlocked` fires at critical severity after 5 minutes
+blocked. While blocked, the scheduler pauses new campaign queueing and the worker
+defers picked jobs with `deferred_by_sendwise`; the dashboard shows a visible
+BLOCKED banner with the last check time. Sends resume automatically when checks
+recover.
+
+### Safe sending speed defaults
+
+Do not raise sending limits blindly; respect warm-up and recipient-domain/provider
+limits.
+
+- `SENDING_RATE_PER_SECOND` (default `20`): global Sendwise worker send rate. Keep
+  low on new or recovering IPs/domains; increase only after warm-up metrics are
+  healthy.
+- `DOMAIN_CONCURRENCY_LIMIT` (default `10`): per-recipient-domain worker
+  concurrency. Conservative default to avoid provider throttling.
+- `RECIPIENT_DOMAIN_RATE_LIMITS`: use tighter limits for large providers where
+  needed; keep `default` conservative.
+
+Stalwart queue/retry settings should favor quick initial recovery without aggressive
+flooding. Recommended safe starting point: first retries after 1-5 minutes, then
+back off (for example 15m, 30m, 1h, 2h...) up to the configured max message age.
+Do not configure hour-long initial retry gaps for transient 4xx/connection failures.
+Review Stalwart's queue concurrency and retry schedule in Stalwart configuration
+and keep them aligned with Sendwise warm-up and domain limits.
+
+The campaign report shows per-campaign stage summary counts (queued, submitted,
+relaying, deferred, accepted by recipient server, bounced, expired) and refreshes
+automatically.
+
 The super-admin Campaigns console provides a cursor-resumable historical backfill.
 First run **Preview next batch** to see counts without writes, then **Apply next
 batch** to record those reconciled states. Both operations require fresh MFA and a

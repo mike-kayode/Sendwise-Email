@@ -55,3 +55,22 @@ func TestShouldAdvanceJourneyStatus(t *testing.T) {
 }
 
 func intPointer(value int) *int { return &value }
+
+func TestValidTypeAndSourceAcceptTimelineEvents(t *testing.T) {
+	for _, typ := range []string{"picked_up", "smtp_attempt", "deferred_by_recipient"} {
+		if !validType(typ) {
+			t.Fatalf("validType(%q) = false, want true", typ)
+		}
+	}
+	for _, src := range []string{"sendwise", "stalwart_webhook", "reconciliation", "dsn"} {
+		if !validSource(src) {
+			t.Fatalf("validSource(%q) = false, want true", src)
+		}
+	}
+	if validType("not_a_real_type") {
+		t.Fatal("validType accepted unknown type")
+	}
+	if validSource("not_a_real_source") {
+		t.Fatal("validSource accepted unknown source")
+	}
+}

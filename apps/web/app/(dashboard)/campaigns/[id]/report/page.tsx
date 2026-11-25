@@ -32,10 +32,15 @@ type RecipientRow = {
   last_activity_at: string | null;
   engagement_classification: string;
   journey_status: string;
+  journey_reason?: string;
+  is_delayed?: boolean;
+  delayed_reason?: string;
 };
 
 type JourneyEvent = {
   stage: string;
+  source?: string;
+  source_event_id?: string;
   timestamp: string;
   remote_mx_host?: string;
   smtp_code?: number;
@@ -43,6 +48,7 @@ type JourneyEvent = {
   reason?: string;
   attempt_number?: number;
   next_retry_at?: string;
+  metadata?: Record<string, unknown>;
 };
 
 type RecipientActivity = {
@@ -81,6 +87,7 @@ export default function CampaignReportPage() {
   const reportQuery = useQuery({
     queryKey: ["campaign-report", id],
     queryFn: async () => apiFetch<CampaignReport>(`/analytics/campaigns/${id}`),
+    refetchInterval: 30_000,
   });
   const recipientsQuery = useQuery({
     queryKey: ["campaign-recipients", id, search, status, opened, clicked, classification, stage, sort, offset],
@@ -96,6 +103,7 @@ export default function CampaignReportPage() {
         `/campaigns/${id}/recipients?${params}`,
       );
     },
+    refetchInterval: 30_000,
   });
   const journeyQuery = useQuery({
     queryKey: ["recipient-journey", id, selectedRecipient?.recipient_id],
@@ -147,17 +155,15 @@ export default function CampaignReportPage() {
   const rates = report.rates;
   const journeyFunnel = report.journey?.funnel ?? {};
 
+  const deferredCount = (journeyFunnel.deferred_by_sendwise ?? 0) + (journeyFunnel.deferred_by_recipient ?? 0);
   const funnel = [
     { label: "Queued", stage: "queued", value: journeyFunnel.queued ?? 0 },
-    { label: "Waiting for Sendwise", stage: "deferred_by_sendwise", value: journeyFunnel.deferred_by_sendwise ?? 0 },
-    { label: "Submitted to mail server", stage: "submitted_to_mail_server", value: journeyFunnel.submitted_to_mail_server ?? 0 },
+    { label: "Submitted", stage: "submitted_to_mail_server", value: journeyFunnel.submitted_to_mail_server ?? 0 },
+    { label: "Relaying", stage: "relaying", value: journeyFunnel.relaying ?? 0 },
+    { label: "Deferred", stage: "deferred", value: deferredCount },
     { label: "Accepted by recipient server", stage: "accepted_by_recipient_server", value: journeyFunnel.accepted_by_recipient_server ?? 0 },
     { label: "Bounced", stage: "bounced", value: journeyFunnel.bounced ?? 0 },
-    { label: "Deferred", stage: "deferred_by_recipient", value: journeyFunnel.deferred_by_recipient ?? 0 },
     { label: "Expired", stage: "expired", value: journeyFunnel.expired ?? 0 },
-    { label: "Failed", stage: "failed", value: journeyFunnel.failed ?? 0 },
-    { label: "Opened", stage: "opened", value: journeyFunnel.opened ?? 0 },
-    { label: "Clicked", stage: "clicked", value: journeyFunnel.clicked ?? 0 },
   ].map((row) => ({
     ...row,
     percent: recipientTotal ? Math.min((row.value / recipientTotal) * 100, 100) : 0,
@@ -208,6 +214,28 @@ export default function CampaignReportPage() {
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `campaign-${id}-recipient-tracking.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleJourneyEventsExport = async () => {
+    const token = getAccessToken();
+    const headers = new Headers();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const response = await fetch(apiUrl(`/api/v1/campaigns/${id}/journey/events/export`), {
+      credentials: "include",
+      cache: "no-store",
+      headers,
+    });
+    if (!response.ok) {
+      toast({ title: "Export failed", description: "Delivery journey events export could not be downloaded.", variant: "destructive" });
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `campaign-${id}-delivery-journey-events.csv`;
     anchor.click();
     URL.revokeObjectURL(url);
   };
@@ -456,7 +484,17 @@ export default function CampaignReportPage() {
                             {recipient.name ? <p className="mt-0.5 text-xs text-slate-500">{recipient.email}</p> : null}
                           </Td>
                           <Td>
-                            <span className="text-sm text-slate-700">{journeyStageLabel(recipient.journey_status)}</span>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-sm text-slate-700">{journeyStageLabel(recipient.journey_status)}</span>
+                              {recipient.is_delayed ? (
+                                <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800" title={recipient.delayed_reason || "No recent update from the mail server"}>
+                                  Delayed
+                                </span>
+                              ) : null}
+                            </div>
+                            {recipient.is_delayed && recipient.delayed_reason ? (
+                              <p className="mt-1 text-[11px] text-amber-700">{recipient.delayed_reason}</p>
+                            ) : null}
                             <p className="mt-1 text-[11px] text-slate-400">Legacy status: {recipient.delivery_status}</p>
                           </Td>
                           <Td className="whitespace-nowrap text-xs">{recipient.delivered_at ? formatDateTime(recipient.delivered_at) : recipient.accepted_at ? `Accepted ${formatDateTime(recipient.accepted_at)}` : "Not confirmed"}</Td>
@@ -536,8 +574,15 @@ export default function CampaignReportPage() {
             )
           ) : null}
           <section className="mt-6 border-t border-slate-200 pt-4">
-            <h3 className="text-sm font-semibold text-slate-900">Delivery journey</h3>
-            <p className="mt-1 text-xs text-slate-500">Acceptance means the recipient’s mail server accepted the message, not that it reached the inbox.</p>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">Delivery journey</h3>
+                <p className="mt-1 text-xs text-slate-500">Full UTC timestamps are shown; hover a timestamp for local time. Acceptance means the recipient’s mail server accepted the message, not that it reached the inbox.</p>
+              </div>
+              <button type="button" onClick={() => void handleJourneyEventsExport()} className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-700 hover:bg-slate-50">
+                <Download className="h-3.5 w-3.5" /> Export events CSV
+              </button>
+            </div>
             {journeyQuery.isLoading ? <p className="mt-3 text-sm text-slate-500">Loading delivery updates...</p> : null}
             {journeyQuery.error ? <p role="alert" className="mt-3 text-sm text-rose-700">Delivery updates could not be loaded: {journeyQuery.error.message}</p> : null}
             {journeyQuery.data?.events.length ? (
@@ -546,9 +591,18 @@ export default function CampaignReportPage() {
                   <li key={`${item.stage}-${item.timestamp}-${index}`} className="relative">
                     <span className="absolute -left-[21px] top-1 h-2.5 w-2.5 rounded-full bg-indigo-500 ring-4 ring-white" />
                     <div className="rounded-lg border border-slate-100 p-3">
-                      <p className="text-sm font-semibold text-slate-900">{journeyStageLabel(item.stage)}</p>
-                      <time className="text-xs text-slate-500">{formatDateTime(item.timestamp)}</time>
-                      {item.next_retry_at ? <p className="mt-1 text-xs text-slate-600">Next retry: {formatDateTime(item.next_retry_at)}</p> : null}
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-semibold text-slate-900">{journeyStageLabel(item.stage)}</p>
+                        <time className="text-xs text-slate-500" title={formatLocalTimestamp(item.timestamp)}>{formatUtcTimestamp(item.timestamp)}</time>
+                      </div>
+                      <dl className="mt-2 grid gap-x-4 gap-y-1 text-xs text-slate-600 sm:grid-cols-2">
+                        {item.source ? <div><dt className="inline font-medium text-slate-500">Source: </dt><dd className="inline">{formatJourneySource(item.source)}</dd></div> : null}
+                        {typeof item.attempt_number === "number" ? <div><dt className="inline font-medium text-slate-500">Attempt: </dt><dd className="inline">{item.attempt_number}</dd></div> : null}
+                        {item.remote_mx_host ? <div><dt className="inline font-medium text-slate-500">Remote MX: </dt><dd className="inline break-all">{item.remote_mx_host}</dd></div> : null}
+                        {typeof item.smtp_code === "number" ? <div><dt className="inline font-medium text-slate-500">SMTP code: </dt><dd className="inline">{item.smtp_code}{item.enhanced_code ? ` (${item.enhanced_code})` : ""}</dd></div> : null}
+                        {item.next_retry_at ? <div className="sm:col-span-2"><dt className="inline font-medium text-slate-500">Next retry: </dt><dd className="inline"><time title={formatLocalTimestamp(item.next_retry_at)}>{formatUtcTimestamp(item.next_retry_at)}</time></dd></div> : null}
+                      </dl>
+                      {item.reason ? <p className="mt-2 break-words text-xs text-slate-600"><span className="font-medium text-slate-500">Reason: </span>{item.reason}</p> : null}
                     </div>
                   </li>
                 ))}
@@ -561,10 +615,37 @@ export default function CampaignReportPage() {
   );
 }
 
+function formatUtcTimestamp(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+}
+
+function formatLocalTimestamp(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+function formatJourneySource(source: string) {
+  const labels: Record<string, string> = {
+    sendwise: "Sendwise",
+    stalwart: "Stalwart",
+    stalwart_webhook: "Stalwart webhook",
+    reconciliation: "Reconciliation",
+    dsn: "DSN",
+    backfill: "Backfill",
+    tracking: "Tracking",
+  };
+  return labels[source] ?? source;
+}
+
 function journeyStageLabel(stage: string) {
   const labels: Record<string, string> = {
     queued: "Queued",
+    picked_up: "Picked up by worker",
     processing: "Processing",
+    smtp_attempt: "SMTP delivery attempt",
     deferred_by_sendwise: "Waiting for Sendwise sending limit",
     submitted_to_mail_server: "Submitted to the mail server",
     relaying: "The mail server is attempting delivery",

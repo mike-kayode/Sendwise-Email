@@ -55,6 +55,9 @@ type Config struct {
 	DeliveryJourneyStuckAfter         time.Duration
 	DeliveryJourneyReconcileBatch     int
 	DeliveryJourneyLegacyBounceDomains []string
+	DeliveryEgressCheckInterval       time.Duration
+	DeliveryEgressCheckTimeout        time.Duration
+	DeliveryEgressCheckHosts          []string
 	MaxDailyEmails                   int
 	WarmupStartPerDay                int
 	WarmupGrowthFactor               float64
@@ -153,6 +156,15 @@ func load(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	deliveryJourneyLegacyBounceDomains := splitCSV(strings.ToLower(getenv(lookup, "DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS", "")))
+	deliveryEgressCheckInterval, err := getenvDuration(lookup, "DELIVERY_EGRESS_CHECK_INTERVAL", 5*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	deliveryEgressCheckTimeout, err := getenvDuration(lookup, "DELIVERY_EGRESS_CHECK_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	deliveryEgressCheckHosts := splitCSV(getenv(lookup, "DELIVERY_EGRESS_CHECK_HOSTS", "gmail-smtp-in.l.google.com:25,aspmx.l.google.com:25"))
 	maxDailyEmails, err := getenvInt(lookup, "MAX_DAILY_EMAILS", 10000)
 	if err != nil {
 		return Config{}, err
@@ -290,6 +302,9 @@ func load(lookup func(string) string) (Config, error) {
 		DeliveryJourneyStuckAfter:         deliveryJourneyStuckAfter,
 		DeliveryJourneyReconcileBatch:     deliveryJourneyReconcileBatch,
 		DeliveryJourneyLegacyBounceDomains: deliveryJourneyLegacyBounceDomains,
+		DeliveryEgressCheckInterval:       deliveryEgressCheckInterval,
+		DeliveryEgressCheckTimeout:        deliveryEgressCheckTimeout,
+		DeliveryEgressCheckHosts:          deliveryEgressCheckHosts,
 		MaxDailyEmails:                   maxDailyEmails,
 		WarmupStartPerDay:                warmupStartPerDay,
 		WarmupGrowthFactor:               warmupGrowthFactor,
