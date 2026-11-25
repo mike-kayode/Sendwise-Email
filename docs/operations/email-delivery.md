@@ -240,14 +240,46 @@ matching webhook on the Stalwart JMAP API. Never enable invalid TLS certificates
 production endpoint. The Sendwise deploy smoke test verifies that the telemetry route
 rejects an unsigned body and accepts a signed empty test batch without creating data.
 
-The worker's bounded JMAP poller queries queued Stalwart messages by VERP return path
-for stale submissions and updates recipient state from the recipient-specific queue
-entry. `DELIVERY_JOURNEY_RECONCILE_INTERVAL` defaults to `1m`,
-`DELIVERY_JOURNEY_RECONCILE_BATCH` to `100`, and `DELIVERY_JOURNEY_STUCK_AFTER` to
-`30m`. The `DeliveryJourneyStuck` Prometheus warning fires while
-`delivery_journey_stuck_messages` is nonzero. A message absent from Stalwart's queue
-and without a delivery event is recorded as `accepted_final_state_unknown`, never as
-delivered.
+The worker reconciles stale submitted/relaying recipients against Stalwart's JMAP
+queue with one queue snapshot per tick: it pages `x:QueuedMessage/query` and
+`x:QueuedMessage/get`, respects the JMAP session `maxObjectsInGet`, and indexes
+messages by lower-cased VERP `returnPath`. DSN queue messages (`flags.dsn`) are
+counted but ignored for campaign-recipient matching.
+
+Recipient `status` is decoded as either the legacy string form or the tagged object
+form. `@type` mapping is case-insensitive: `Scheduled` -> `relaying`,
+`TemporaryFailure` -> `deferred_by_recipient`, `PermanentFailure` -> `bounced`,
+`Completed` -> `accepted_by_recipient_server` (4xx/5xx SMTP response codes still take
+precedence). Unknown `@type` values or unknown shapes never fail the decode; they
+are recorded as `accepted_final_state_unknown` with the raw `@type`/reason included.
+Field mapping uses `responseHostname`, `responseCode`, `responseEnhanced`, and
+`responseMessage` falling back to `errorMessage`/`errorType`; attempt is
+`retryCount + 1`; next retry is `retryDue`, else message `nextRetry`.
+
+Per-job reconciliation errors are isolated: the worker logs a WARN with job id and a
+short reason, updates `journey_last_reconciled_at` and `journey_attempts` so the job
+goes to the back of the line, and continues the batch. The tick aborts only after 5
+consecutive infrastructure failures (auth/connection/TLS/session/EOF). If the queue
+snapshot is incomplete or errors midway, no job is marked not found. When a complete
+snapshot does not contain the candidate, the job is recorded as
+`accepted_final_state_unknown` with reason
+`"left Stalwart queue; final outcome not reported"`.
+
+Configure reconciliation with `DELIVERY_JOURNEY_RECONCILE_INTERVAL` (default `1m`),
+`DELIVERY_JOURNEY_RECONCILE_BATCH` (default `100`), `DELIVERY_JOURNEY_STUCK_AFTER`
+(default `30m`), and optional `DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS` (comma-
+separated old bounce domains to match after `BOUNCE_DOMAIN` rotation, e.g.
+`bounces.pipsleague.com`).
+
+Each tick emits an INFO log `delivery journey reconciliation tick` with
+`candidates`, `queue_size`, `dsn_in_queue`, `found`, `not_found`, `errors`,
+`stages`, and `duration`. The `DeliveryJourneyStuck` Prometheus warning fires while
+`delivery_journey_stuck_messages` is nonzero. The gauge is exported on the worker
+metrics address (`WORKER_METRICS_ADDR`, default `:9091`):
+
+```sh
+curl -fsS http://127.0.0.1:9091/metrics | grep delivery_journey_stuck_messages
+```
 
 The super-admin Campaigns console provides a cursor-resumable historical backfill.
 First run **Preview next batch** to see counts without writes, then **Apply next

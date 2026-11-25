@@ -145,6 +145,22 @@ for v in "${required[@]}"; do
 done
 [ "$missing" -eq 0 ] || exit 1
 
+# --- Optional delivery journey legacy bounce domains -------------------------
+if [ -n "${DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS:-}" ]; then
+  IFS=',' read -r -a _legacy_bounce_domains <<< "$DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS"
+  for _domain in "${_legacy_bounce_domains[@]}"; do
+    _domain="$(printf '%s' "$_domain" | tr -d '[:space:]')"
+    [ -z "$_domain" ] && continue
+    case "$_domain" in
+      *.*) ;;
+      *)
+        echo "DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS entries must be domain names (got '$_domain')" >&2
+        exit 1
+        ;;
+    esac
+  done
+fi
+
 # --- API_BASE_URL must be a real http(s) origin ------------------------------
 case "$API_BASE_URL" in
   http://*|https://*) ;;

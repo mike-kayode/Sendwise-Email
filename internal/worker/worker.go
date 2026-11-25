@@ -296,6 +296,8 @@ func New(
 		worker.journeyReconciler = deliveryjourney.NewReconciler(
 			pool, cfg.StalwartManagementURL, cfg.StalwartAdminUsername,
 			cfg.StalwartAdminPassword, cfg.BounceDomain,
+			deliveryjourney.WithLogger(logger),
+			deliveryjourney.WithLegacyBounceDomains(cfg.DeliveryJourneyLegacyBounceDomains...),
 		)
 	}
 	return worker
@@ -1872,17 +1874,10 @@ func (w *Worker) schedulerLoop(ctx context.Context) {
 
 func (w *Worker) reconcileDeliveryJourneys(ctx context.Context) {
 	if w.journeyReconciler != nil {
-		results, err := w.journeyReconciler.ReconcileBatch(
+		if _, err := w.journeyReconciler.ReconcileBatch(
 			ctx, w.cfg.DeliveryJourneyReconcileBatch, w.cfg.DeliveryJourneyStuckAfter,
-		)
-		if err != nil {
+		); err != nil {
 			w.logger.Warn("reconcile Stalwart delivery journeys", "error", err)
-		} else if len(results) > 0 {
-			counts := make(map[string]int)
-			for _, result := range results {
-				counts[result.Status]++
-			}
-			w.logger.Info("reconciled Stalwart delivery journeys", "count", len(results), "statuses", counts)
 		}
 	}
 

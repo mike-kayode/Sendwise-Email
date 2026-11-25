@@ -3,6 +3,7 @@ package deliveryjourney
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -103,18 +104,27 @@ func TestStoreRecordDeduplicatesAndEnforcesJourneyOrder(t *testing.T) {
 }
 
 type fixedQueueReader struct {
-	wantReturnPath string
-	wantRecipient  string
-	result         QueueRecipient
-	calls          int
+	snapshot QueueSnapshot
+	err      error
+	calls    int
 }
 
-func (r *fixedQueueReader) LookupRecipient(_ context.Context, returnPath, recipient string) (QueueRecipient, bool, error) {
+func (r *fixedQueueReader) Snapshot(_ context.Context) (QueueSnapshot, error) {
 	r.calls++
-	if returnPath != r.wantReturnPath || recipient != r.wantRecipient {
-		return QueueRecipient{}, false, nil
+	if r.err != nil {
+		return QueueSnapshot{}, r.err
 	}
-	return r.result, true, nil
+	return r.snapshot, nil
+}
+
+func snapshotWithRecipient(returnPath, recipient string, state QueueRecipient) QueueSnapshot {
+	return QueueSnapshot{
+		Complete: true,
+		Messages: []QueueMessage{{
+			ReturnPath: returnPath,
+			Recipients: map[string]QueueRecipient{recipient: state},
+		}},
+	}
 }
 
 func TestReconcilerUsesQueueAndRecordsFinalStatus(t *testing.T) {
@@ -149,14 +159,9 @@ func TestReconcilerUsesQueueAndRecordsFinalStatus(t *testing.T) {
 		t.Fatalf("format reconciliation return path: %v", err)
 	}
 	code := 250
-	reader := &fixedQueueReader{
-		wantReturnPath: returnPath,
-		wantRecipient:  email,
-		result: QueueRecipient{
-			Status: "completed", RemoteHost: "mx.example.test", SMTPCode: &code,
-			Reason: "250 accepted",
-		},
-	}
+	reader := &fixedQueueReader{snapshot: snapshotWithRecipient(returnPath, email, QueueRecipient{
+		Status: "completed", RemoteHost: "mx.example.test", SMTPCode: &code, Reason: "250 accepted",
+	})}
 	reconciler := NewReconcilerWithReader(pool, reader, "bounces.example.test")
 	results, err := reconciler.ReconcileBatch(ctx, 10, time.Minute)
 	if err != nil {
@@ -208,7 +213,7 @@ func TestBackfillBatchSupportsDryRunAndResumesWithoutResending(t *testing.T) {
 	`, token, orgID, campaignID, jobID, contactID, email); err != nil {
 		t.Fatalf("persist backfill token: %v", err)
 	}
-	reader := &fixedQueueReader{wantReturnPath: "never-match", wantRecipient: "never-match"}
+	reader := &fixedQueueReader{snapshot: QueueSnapshot{Complete: true}}
 	reconciler := NewReconcilerWithReader(pool, reader, "bounces.example.test")
 	preview, err := reconciler.BackfillBatch(ctx, "", 1, true)
 	if err != nil {
@@ -274,4 +279,159 @@ func seedJourneyRecipient(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 		}
 	}
 	return orgID, campaignID, contactID, jobID, recipientID
+}
+
+type recordFailStore struct {
+	*Store
+	failJobID string
+}
+
+func (s recordFailStore) Record(ctx context.Context, rec Event) (bool, error) {
+	if rec.JobID == s.failJobID {
+		return false, fmt.Errorf("injected record failure")
+	}
+	return s.Store.Record(ctx, rec)
+}
+
+func TestReconcileBatchContinuesAfterPerJobError(t *testing.T) {
+	pool := testutil.NewPostgres(t)
+	ctx := context.Background()
+	orgID, campaignID, contactID1, jobID1, _ := seedJourneyRecipient(t, ctx, pool)
+	org2, campaign2, contactID2, jobID2, _ := seedJourneyRecipient(t, ctx, pool)
+	_ = org2
+	_ = campaign2
+	email1 := "journey-" + contactID1 + "@example.test"
+	email2 := "journey-" + contactID2 + "@example.test"
+	for _, jobID := range []string{jobID1, jobID2} {
+		if _, err := pool.Exec(ctx, `
+			UPDATE campaign_recipient_tracking
+			SET journey_status = 'submitted_to_mail_server'
+			WHERE delivery_job_id = $1::uuid
+		`, jobID); err != nil {
+			t.Fatalf("set submitted: %v", err)
+		}
+	}
+	mkTok := func(org, campaign, contact, job, email string) string {
+		token, err := delivery.NewVERPToken("journey-test-token", delivery.VERPClaims{WorkspaceID: org, CampaignID: campaign, Recipient: email})
+		if err != nil {
+			t.Fatalf("token: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO delivery_verp_tokens (token, organization_id, campaign_id, delivery_job_id, contact_id, email)
+			VALUES ($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::text)
+		`, token, org, campaign, job, contact, email); err != nil {
+			t.Fatalf("persist token: %v", err)
+		}
+		rp, err := delivery.FormatVERPReturnPath("bounces.example.test", token)
+		if err != nil {
+			t.Fatalf("return path: %v", err)
+		}
+		return rp
+	}
+	rp1 := mkTok(orgID, campaignID, contactID1, jobID1, email1)
+	rp2 := mkTok(org2, campaign2, contactID2, jobID2, email2)
+	reader := &fixedQueueReader{snapshot: QueueSnapshot{Complete: true, Messages: []QueueMessage{
+		{ReturnPath: rp1, Recipients: map[string]QueueRecipient{email1: {Status: "completed"}}},
+		{ReturnPath: rp2, Recipients: map[string]QueueRecipient{email2: {Status: "completed"}}},
+	}}}
+	reconciler := NewReconcilerWithReader(pool, reader, "bounces.example.test", WithStore(recordFailStore{Store: NewStore(pool), failJobID: jobID1}))
+	results, err := reconciler.ReconcileBatch(ctx, 10, time.Minute)
+	if err != nil {
+		t.Fatalf("ReconcileBatch: %v", err)
+	}
+	if len(results) != 1 || results[0].RecipientID == "" {
+		t.Fatalf("results=%+v want one successful job", results)
+	}
+	var status1, status2 string
+	var attempts1 int
+	if err := pool.QueryRow(ctx, `SELECT journey_status, COALESCE(journey_attempts,0) FROM campaign_recipient_tracking WHERE delivery_job_id=$1::uuid`, jobID1).Scan(&status1, &attempts1); err != nil {
+		t.Fatalf("load job1: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT journey_status FROM campaign_recipient_tracking WHERE delivery_job_id=$1::uuid`, jobID2).Scan(&status2); err != nil {
+		t.Fatalf("load job2: %v", err)
+	}
+	if status1 != "submitted_to_mail_server" {
+		t.Fatalf("job1 status=%q want unchanged submitted_to_mail_server", status1)
+	}
+	if attempts1 < 1 {
+		t.Fatalf("job1 attempts=%d want incremented/back-of-line", attempts1)
+	}
+	if status2 != "accepted_by_recipient_server" {
+		t.Fatalf("job2 status=%q want accepted_by_recipient_server", status2)
+	}
+}
+
+func TestReconcileBatchPartialSnapshotMarksNothingNotFound(t *testing.T) {
+	pool := testutil.NewPostgres(t)
+	ctx := context.Background()
+	orgID, campaignID, contactID, jobID, _ := seedJourneyRecipient(t, ctx, pool)
+	email := "journey-" + contactID + "@example.test"
+	if _, err := pool.Exec(ctx, `UPDATE campaign_recipient_tracking SET journey_status='submitted_to_mail_server' WHERE delivery_job_id=$1::uuid`, jobID); err != nil {
+		t.Fatalf("set submitted: %v", err)
+	}
+	token, err := delivery.NewVERPToken("journey-test-token", delivery.VERPClaims{WorkspaceID: orgID, CampaignID: campaignID, Recipient: email})
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO delivery_verp_tokens (token, organization_id, campaign_id, delivery_job_id, contact_id, email)
+		VALUES ($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::text)
+	`, token, orgID, campaignID, jobID, contactID, email); err != nil {
+		t.Fatalf("persist token: %v", err)
+	}
+	reader := &fixedQueueReader{snapshot: QueueSnapshot{Complete: false}}
+	reconciler := NewReconcilerWithReader(pool, reader, "bounces.example.test")
+	_, err = reconciler.ReconcileBatch(ctx, 10, time.Minute)
+	if err == nil {
+		t.Fatal("expected error for incomplete snapshot")
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT journey_status FROM campaign_recipient_tracking WHERE delivery_job_id=$1::uuid`, jobID).Scan(&status); err != nil {
+		t.Fatalf("load status: %v", err)
+	}
+	if status != "submitted_to_mail_server" {
+		t.Fatalf("status=%q want unchanged on partial snapshot", status)
+	}
+}
+
+func TestReconcileBatchIgnoresDSNMessages(t *testing.T) {
+	pool := testutil.NewPostgres(t)
+	ctx := context.Background()
+	orgID, campaignID, contactID, jobID, _ := seedJourneyRecipient(t, ctx, pool)
+	email := "journey-" + contactID + "@example.test"
+	if _, err := pool.Exec(ctx, `UPDATE campaign_recipient_tracking SET journey_status='submitted_to_mail_server' WHERE delivery_job_id=$1::uuid`, jobID); err != nil {
+		t.Fatalf("set submitted: %v", err)
+	}
+	token, err := delivery.NewVERPToken("journey-test-token", delivery.VERPClaims{WorkspaceID: orgID, CampaignID: campaignID, Recipient: email})
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO delivery_verp_tokens (token, organization_id, campaign_id, delivery_job_id, contact_id, email)
+		VALUES ($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::text)
+	`, token, orgID, campaignID, jobID, contactID, email); err != nil {
+		t.Fatalf("persist token: %v", err)
+	}
+	rp, err := delivery.FormatVERPReturnPath("bounces.example.test", token)
+	if err != nil {
+		t.Fatalf("return path: %v", err)
+	}
+	reader := &fixedQueueReader{snapshot: QueueSnapshot{Complete: true, DSNInQueue: 1, Messages: []QueueMessage{
+		{ReturnPath: rp, Flags: QueueFlags{DSN: true}, Recipients: map[string]QueueRecipient{email: {Status: "completed"}}},
+	}}}
+	reconciler := NewReconcilerWithReader(pool, reader, "bounces.example.test")
+	results, err := reconciler.ReconcileBatch(ctx, 10, time.Minute)
+	if err != nil {
+		t.Fatalf("ReconcileBatch: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != "accepted_final_state_unknown" {
+		t.Fatalf("results=%+v want not-found/unknown because DSN ignored", results)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT journey_status FROM campaign_recipient_tracking WHERE delivery_job_id=$1::uuid`, jobID).Scan(&status); err != nil {
+		t.Fatalf("load status: %v", err)
+	}
+	if status != "accepted_final_state_unknown" {
+		t.Fatalf("status=%q want accepted_final_state_unknown", status)
+	}
 }

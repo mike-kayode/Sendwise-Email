@@ -231,6 +231,7 @@ services:
     environment:
       IDENTITY_URL: http://identity:8080
       SERVICE_TOKEN: ${SERVICE_TOKEN:?Set SERVICE_TOKEN in .env}
+      DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS: ${DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS:-}
     depends_on:
       identity:
         condition: service_started

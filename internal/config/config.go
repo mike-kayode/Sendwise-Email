@@ -51,9 +51,10 @@ type Config struct {
 	SchedulerInterval                time.Duration
 	MaxMessageAge                    time.Duration
 	NATSStalePublishTimeout          time.Duration
-	DeliveryJourneyReconcileInterval time.Duration
-	DeliveryJourneyStuckAfter        time.Duration
-	DeliveryJourneyReconcileBatch    int
+	DeliveryJourneyReconcileInterval  time.Duration
+	DeliveryJourneyStuckAfter         time.Duration
+	DeliveryJourneyReconcileBatch     int
+	DeliveryJourneyLegacyBounceDomains []string
 	MaxDailyEmails                   int
 	WarmupStartPerDay                int
 	WarmupGrowthFactor               float64
@@ -151,6 +152,7 @@ func load(lookup func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	deliveryJourneyLegacyBounceDomains := splitCSV(strings.ToLower(getenv(lookup, "DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS", "")))
 	maxDailyEmails, err := getenvInt(lookup, "MAX_DAILY_EMAILS", 10000)
 	if err != nil {
 		return Config{}, err
@@ -284,9 +286,10 @@ func load(lookup func(string) string) (Config, error) {
 		SchedulerInterval:                schedulerInterval,
 		MaxMessageAge:                    maxMessageAge,
 		NATSStalePublishTimeout:          natsStalePublishTimeout,
-		DeliveryJourneyReconcileInterval: deliveryJourneyReconcileInterval,
-		DeliveryJourneyStuckAfter:        deliveryJourneyStuckAfter,
-		DeliveryJourneyReconcileBatch:    deliveryJourneyReconcileBatch,
+		DeliveryJourneyReconcileInterval:  deliveryJourneyReconcileInterval,
+		DeliveryJourneyStuckAfter:         deliveryJourneyStuckAfter,
+		DeliveryJourneyReconcileBatch:     deliveryJourneyReconcileBatch,
+		DeliveryJourneyLegacyBounceDomains: deliveryJourneyLegacyBounceDomains,
 		MaxDailyEmails:                   maxDailyEmails,
 		WarmupStartPerDay:                warmupStartPerDay,
 		WarmupGrowthFactor:               warmupGrowthFactor,

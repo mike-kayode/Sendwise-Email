@@ -236,3 +236,16 @@ func validSource(source string) bool {
 		return false
 	}
 }
+
+func (s *Store) UpdateReconciled(ctx context.Context, organizationID, jobID string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE campaign_recipient_tracking
+		SET journey_last_reconciled_at = now(),
+		    updated_at = now()
+		WHERE organization_id = $1::uuid AND delivery_job_id = $2::uuid
+	`, organizationID, jobID)
+	if err != nil {
+		return fmt.Errorf("mark delivery journey reconciled: %w", err)
+	}
+	return nil
+}
