@@ -265,6 +265,64 @@ snapshot does not contain the candidate, the job is recorded as
 `accepted_final_state_unknown` with reason
 `"left Stalwart queue; final outcome not reported"`.
 
+### Inspecting and purging the Stalwart queue
+
+Use `scripts/stalwart-queue.sh` on the Stalwart host. It accepts only loopback
+management URLs. `STALWART_URL` defaults to `http://127.0.0.1:8080` when
+`STALWART_HOST_NETWORK=true` and `http://127.0.0.1:8081` otherwise. Supply
+`STALWART_ADMIN_USERNAME` and `STALWART_ADMIN_PASSWORD` through the operator's
+secret manager or a non-echoing prompt; the password is written only to a
+mode-0600 temporary curl config and is never printed.
+
+```sh
+export STALWART_HOST_NETWORK=true
+export STALWART_URL=http://127.0.0.1:8080
+read -r -p "Stalwart admin username: " STALWART_ADMIN_USERNAME
+read -r -s -p "Stalwart admin password: " STALWART_ADMIN_PASSWORD
+printf '\n'
+export STALWART_ADMIN_USERNAME STALWART_ADMIN_PASSWORD
+
+./scripts/stalwart-queue.sh list
+./scripts/stalwart-queue.sh purge --return-path-domain bounces.pipsleague.com --older-than 7d
+./scripts/stalwart-queue.sh purge --dsn-only
+./scripts/stalwart-queue.sh purge --dsn-only --apply
+```
+
+`list` reports the total, campaign/DSN counts, recipient status types, the top
+10 recipient domains, age buckets, and return-path domains. Queue details are
+paged using the JMAP session's `maxObjectsInGet`. DSNs are identified by
+`returnPath == "<>"` or `flags.dsn`. Purge is a dry run unless `--apply` is
+present: it reports the match count and at most five sample ids with recipient
+local parts masked. Filters may be combined; a filter is required unless using
+`--all`. The all-queue switch is refused without `--i-understand`, including
+for dry runs:
+
+```sh
+./scripts/stalwart-queue.sh purge --all --i-understand
+./scripts/stalwart-queue.sh purge --all --i-understand --apply
+```
+
+Applied deletions are sent in batches of at most 200, with progress printed
+between requests. The script takes a fresh queue snapshot afterwards and
+reports the number of matching messages remaining; it exits with an error if
+the snapshot was incomplete, any deletion failed, or matching messages remain.
+It requests only `id`, `createdAt`, `returnPath`, `recipients`, and `flags`;
+message bodies and full recipient lists are never displayed. To run its isolated
+fixture test without contacting Stalwart, use
+`scripts/test-stalwart-queue.sh`.
+
+The script makes these JMAP calls:
+
+1. HTTP `GET /jmap/session` to read `maxObjectsInGet`.
+2. HTTP `POST /jmap/` with `x:QueuedMessage/query` to page queue ids, followed
+   by `x:QueuedMessage/get` for each page. The get requests specify only the
+   five properties listed above.
+3. Only for `purge --apply`, `x:QueuedMessage/set` with a `destroy` array of up
+   to 200 ids per request.
+4. After an applied purge, repeats the query/get snapshot calls to verify the
+   remaining matching count. `list` and default dry-run purges never call
+   `x:QueuedMessage/set`.
+
 Configure reconciliation with `DELIVERY_JOURNEY_RECONCILE_INTERVAL` (default `1m`),
 `DELIVERY_JOURNEY_RECONCILE_BATCH` (default `100`), `DELIVERY_JOURNEY_STUCK_AFTER`
 (default `30m`), and optional `DELIVERY_JOURNEY_LEGACY_BOUNCE_DOMAINS` (comma-
