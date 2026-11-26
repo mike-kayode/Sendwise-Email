@@ -17,17 +17,21 @@ Staging/production config requires verified-domain enforcement, a JWT secret of 
 | PostgreSQL | postgres:16-alpine | Primary DB, persistent volume, automated backups |
 | Redis | redis:7-alpine | Cache + rate limiting, appendonly |
 | NATS | nats:2.10-alpine | JetStream, file storage |
-| Stalwart | stalwartlabs/stalwart:latest | SMTP transport, persistent data |
+| Stalwart | pinned Stalwart image | SMTP transport, persistent data |
+| Stalwart admin proxy | email-platform:stalwart-admin-proxy | Host-gateway-only path from bridge containers to loopback JMAP |
 | MinIO | minio/minio:latest | Object storage (images, exports) |
-| API | email-platform:api | Go binary, port 8080 |
+| API | email-platform:api | Go binary, container port 8080; host loopback 18080 with host-network override |
 | Worker | email-platform:worker | Go binary, port 9091 (metrics) |
 | Web | next.js | port 3000 |
 | Caddy | caddy:2-alpine | HTTPS, reverse proxy |
-| Egress probe | email-platform:egress-probe | Outbound SMTP port-25 egress health, shares Stalwart netns |
+| Egress probe | email-platform:egress-probe | Outbound SMTP port-25 egress health on the selected Stalwart network path |
 | Prometheus/Grafana/Loki | observability profile | metrics, dashboards, logs |
 
 ## Deployment profiles
 - `docker compose up -d` — full stack including web, api, worker, caddy.
+- Linux hosts that need SMTP to bypass Docker NAT can opt in to
+  `docker-compose.host-network.yml`; the default Compose topology remains
+  bridge-networked for development.
 - `docker compose --profile observability up -d` — adds Prometheus, Grafana, Loki.
 - `make dev-up` — starts only infra (postgres, redis, nats, stalwart, minio) for local dev.
 
@@ -103,6 +107,98 @@ Before applying migrations, `scripts/deploy.sh` checks for duplicate sending
 domains. The check is non-blocking on a fresh database where the
 `sending_domains` table does not exist, and exits before migrations if it finds
 duplicate ownership that would prevent the unique domain index from applying.
+
+### Host-network Stalwart mode (Linux server only)
+
+The host-network override moves Stalwart's SMTP listeners (25/465/587) and the
+egress probe onto the host network. The Stalwart HTTP/JMAP management listener
+must bind only to `127.0.0.1:8080`. The API's existing loopback publication is
+moved from 8080 to `127.0.0.1:18080` for the Stalwart event webhook, while
+bridge-network API/worker SMTP traffic uses `host.docker.internal:587`. A small
+admin proxy binds only to the Docker host-gateway address on port 18081 and
+forwards to `127.0.0.1:8080`; API and worker management calls use this proxy.
+The host-gateway value defaults to `172.17.0.1`; verify it matches Docker's
+`host-gateway` on the target server and set `DOCKER_HOST_GATEWAY_IP` if it does
+not. The proxy rejects non-private, loopback, and wildcard bind addresses.
+The override uses Compose `!reset`/`!override` merge tags and requires Docker
+Compose v2.24.4 or newer.
+
+Before enabling, check the Linux host's listeners. Ports 25, 465, and 587 must
+be available for Stalwart. Port 8080 is Stalwart's loopback-only admin port;
+the application API moves to loopback port 18080. Port 18081 on the Docker
+host-gateway address is used by the private management proxy. Ports 80/443
+(Caddy), 8082 (Identity), 8083 (Workspace), and 8084 (Gateway) retain their
+existing bindings; transactional SMTP host ports 2465/2587 are also distinct.
+The host API listener formerly on 8080 moves to 18080 to avoid colliding with
+Stalwart admin. IMAP ports 143/993 are retained only when a Stalwart listener
+already uses them; the provisioner removes other non-HTTP listener bindings.
+Check the host before enabling with `sudo ss -ltnp`.
+
+This repository cannot verify the target host's actual listeners; the deploy
+smoke check confirms that Stalwart admin port 8080 is bound exactly to
+`127.0.0.1`. Before switching, inspect the ports involved with:
+
+```sh
+sudo ss -ltnp | grep -E ':(25|465|587|8080|143|993|18080|18081)\b'
+```
+
+Enable the mode in the server's protected `.env`:
+
+```dotenv
+STALWART_HOST_NETWORK=true
+DOCKER_HOST_GATEWAY_IP=172.17.0.1
+```
+
+Confirm the gateway address (normally `172.17.0.1`) with
+`docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}'`,
+then apply the override to both existing Compose files:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.microservices.yml \
+  -f docker-compose.host-network.yml config
+```
+
+For first activation, back up Stalwart's data and stop the API container
+currently occupying loopback port 8080, the worker, and the egress probe. The
+provisioner uses the current bridge-mode admin endpoint, writes the loopback-only
+listener setting as its final JMAP operation, then recreates Stalwart and the
+probe with the host override. This prevents starting host-network Stalwart with
+an unreviewed wildcard admin binding:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.microservices.yml \
+  -f docker-compose.host-network.yml stop api worker egress-probe
+set -a; . ./.env; set +a
+STALWART_HOST_NETWORK=true STALWART_URL=http://127.0.0.1:8081 \
+  ./scripts/provision-stalwart.sh --live
+STALWART_HOST_NETWORK=true ./scripts/configure-stalwart-events.sh --apply
+STALWART_HOST_NETWORK=true ./scripts/deploy.sh
+```
+
+The event webhook URL defaults to
+`http://127.0.0.1:18080/api/v1/webhooks/stalwart-events` in host-network mode
+and retains the HMAC signature key. `scripts/deploy.sh` automatically includes
+the override when `STALWART_HOST_NETWORK=true`, builds the admin proxy, checks
+the admin listener is loopback-only, and runs its normal smoke checks. Do not
+expose port 8080 or 18081 on public interfaces.
+
+Rollback networking by setting `STALWART_HOST_NETWORK=false` (or removing the
+setting), then remove the proxy and recreate the original bridge-network
+services without the override. Stalwart must be recreated, not merely
+restarted, to leave host networking:
+
+```sh
+# Set STALWART_HOST_NETWORK=false in .env before running these commands.
+docker compose -f docker-compose.yml -f docker-compose.microservices.yml \
+  -f docker-compose.host-network.yml rm -sf stalwart-admin-proxy
+docker compose -f docker-compose.yml -f docker-compose.microservices.yml \
+  up -d --force-recreate stalwart api worker egress-probe
+```
+
+The next normal `scripts/deploy.sh` run uses the default bridge configuration.
+
+The host-network override is Linux-specific; Docker Desktop does not provide
+the same host-network semantics as a Linux deployment host.
 
 ## Backups and restore
 - PostgreSQL: configure `pg_dump` to persistent/object storage and schedule it daily; point-in-time recovery via WAL archiving. No backup job is currently included in Compose.

@@ -12,6 +12,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/api ./cmd/api \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/migrate ./cmd/migrate \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/backfill ./cmd/backfill \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/egress-probe ./cmd/egress-probe \
+ && CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/stalwart-admin-proxy ./cmd/stalwart-admin-proxy \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/identity ./services/identity/cmd/identity \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/workspace ./services/workspace/cmd/workspace \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/gateway ./services/gateway/cmd/gateway
@@ -49,6 +50,10 @@ ENTRYPOINT ["backfill"]
 FROM base AS egress-probe
 COPY --from=build /out/egress-probe /usr/local/bin/egress-probe
 ENTRYPOINT ["egress-probe"]
+
+FROM base AS stalwart-admin-proxy
+COPY --from=build /out/stalwart-admin-proxy /usr/local/bin/stalwart-admin-proxy
+ENTRYPOINT ["stalwart-admin-proxy"]
 
 FROM base AS identity
 COPY --from=build /out/identity /usr/local/bin/identity

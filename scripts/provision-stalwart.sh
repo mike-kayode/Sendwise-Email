@@ -6,6 +6,10 @@ cd "$ROOT"
 
 mode=local
 dry_run=0
+host_network=0
+case "${STALWART_HOST_NETWORK:-false}" in
+  true|1|yes) host_network=1 ;;
+esac
 for arg in "$@"; do
   case "$arg" in
     --local) mode=local ;;
@@ -24,12 +28,20 @@ fail() {
   exit 1
 }
 
+if [[ "$host_network" -eq 1 && "$mode" != "live" ]]; then
+  fail "host-network Stalwart provisioning requires --live so the loopback-only admin binding is applied before host networking starts"
+fi
+
 for tool in docker curl jq openssl; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
 done
 
 if [[ "$mode" == "live" ]]; then
-  : "${STALWART_URL:?Set STALWART_URL}"
+  if [[ "$host_network" -eq 1 ]]; then
+    STALWART_URL="${STALWART_URL:-http://127.0.0.1:8081}"
+  else
+    : "${STALWART_URL:?Set STALWART_URL}"
+  fi
   : "${STALWART_ADMIN_USERNAME:?Set STALWART_ADMIN_USERNAME}"
   : "${STALWART_ADMIN_PASSWORD:?Set STALWART_ADMIN_PASSWORD}"
   : "${STALWART_HOSTNAME:?Set STALWART_HOSTNAME}"
@@ -43,7 +55,11 @@ else
   : "${STALWART_DOMAIN:?Set STALWART_DOMAIN}"
   : "${STALWART_SUBMIT_PASSWORD:?Set STALWART_SUBMIT_PASSWORD}"
   : "${STALWART_ADMIN_PASSWORD:?Set STALWART_ADMIN_PASSWORD}"
-  STALWART_URL="${STALWART_URL:-http://127.0.0.1:8081}"
+  if [[ "$host_network" -eq 1 ]]; then
+    STALWART_URL="${STALWART_URL:-http://127.0.0.1:8081}"
+  else
+    STALWART_URL="${STALWART_URL:-http://127.0.0.1:8081}"
+  fi
   STALWART_HOSTNAME="${STALWART_HOSTNAME:-mail.${STALWART_DOMAIN}}"
   STALWART_ADMIN_USERNAME="${STALWART_ADMIN_USERNAME:-admin}"
   STALWART_SUBMIT_USERNAME="${STALWART_SUBMIT_USERNAME:-noreply}"
@@ -80,6 +96,9 @@ if [[ "$dry_run" -eq 1 ]]; then
     "$STALWART_HOSTNAME" "$STALWART_DOMAIN" "$STALWART_DOMAIN"
   printf 'Would configure authenticated STARTTLS on %s, implicit TLS on %s, a 10-thread outbound queue, and 5 delivery attempts.\n' \
     "$STALWART_PORT_587" "$STALWART_PORT_465"
+  if [[ "$host_network" -eq 1 ]]; then
+    printf 'Would bind SMTP on port 25 and the management listener only on 127.0.0.1:8080; preserve existing IMAP 143/993 listeners and remove other public listeners.\n'
+  fi
   if [[ "$mode" == "live" ]]; then
     printf 'Would install the mounted certificate from %s and restart the running Stalwart service.\n' "$STALWART_CERTS_DIR"
   else
@@ -128,10 +147,14 @@ certificate_covers_hostname() {
 }
 
 compose() {
+  local files=(-f "$ROOT/docker-compose.yml" -f "$ROOT/docker-compose.microservices.yml")
+  if [[ "$host_network" -eq 1 ]]; then
+    files+=(-f "$ROOT/docker-compose.host-network.yml")
+  fi
   if [[ -n "${STALWART_COMPOSE_PROJECT:-}" ]]; then
-    docker compose --project-name "$STALWART_COMPOSE_PROJECT" "$@"
+    docker compose --project-name "$STALWART_COMPOSE_PROJECT" "${files[@]}" "$@"
   else
-    docker compose "$@"
+    docker compose "${files[@]}" "$@"
   fi
 }
 
@@ -164,7 +187,13 @@ request() {
 }
 
 restart_stalwart() {
-  compose restart stalwart >/dev/null || fail "could not restart the Stalwart service"
+  if [[ "$host_network" -eq 1 ]]; then
+    compose up -d --force-recreate stalwart egress-probe >/dev/null ||
+      fail "could not recreate Stalwart with the host-network override"
+    STALWART_URL="http://127.0.0.1:8080"
+  else
+    compose restart stalwart >/dev/null || fail "could not restart the Stalwart service"
+  fi
 }
 
 method_result() {
@@ -187,6 +216,23 @@ load_session() {
   account_id="$(jq -r '.primaryAccounts["urn:stalwart:jmap"] // empty' "$session_file")"
   [[ -n "$account_id" ]] || fail "Stalwart session did not expose its configuration account"
 }
+
+if [[ "$host_network" -eq 1 ]]; then
+  stalwart_container="$(compose ps -q stalwart)"
+  [[ -n "$stalwart_container" ]] || fail "Stalwart must already be running in bridge mode for safe host-network provisioning"
+  network_mode="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$stalwart_container" 2>/dev/null)" ||
+    fail "could not inspect the current Stalwart network mode"
+  case "$network_mode" in
+    host)
+      [[ "$STALWART_URL" != "http://127.0.0.1:8081" ]] ||
+        STALWART_URL="http://127.0.0.1:8080"
+      ;;
+    *)
+      [[ "$STALWART_URL" != "http://127.0.0.1:8080" ]] ||
+        fail "Stalwart is still in bridge mode; use STALWART_URL=http://127.0.0.1:8081 for the safe transition"
+      ;;
+  esac
+fi
 
 if [[ "$mode" == "local" ]]; then
   STALWART_RECOVERY_ADMIN="${STALWART_RECOVERY_ADMIN:-${STALWART_ADMIN_USERNAME}:${STALWART_ADMIN_PASSWORD}}"
@@ -337,6 +383,101 @@ configure_listener() {
 configure_listener "sendwise-submission" "587" false
 configure_listener "sendwise-implicit" "465" true
 
+configure_mta_listener() {
+  local listener_response listener_id listener_result
+  request "x:NetworkListener/get" '{"ids":null}'
+  listener_response="$(method_result "x:NetworkListener/get")"
+  listener_id="$(jq -r '.list[]? | select((.protocol // "" | ascii_downcase) == "smtp" and
+    any((.bind // {}) | keys[]; endswith(":25"))) | .id' <<<"$listener_response" | head -n 1)"
+  if [[ -n "$listener_id" ]]; then
+    request "x:NetworkListener/set" "$(jq -cn --arg id "$listener_id" \
+      '{update:{($id):{protocol:"smtp",bind:{"[::]:25":true},useTls:true,implicitTls:false}}}')"
+  else
+    request "x:NetworkListener/set" '{"create":{"#sendwise-mta":{
+      name:"sendwise-mta",protocol:"smtp",bind:{"[::]:25":true},useTls:true,implicitTls:false
+    }}}'
+  fi
+  listener_result="$(method_result "x:NetworkListener/set")"
+  if [[ "$(jq '(.notCreated // {}) + (.notUpdated // {}) | length' <<<"$listener_result")" -gt 0 ]]; then
+    fail "Stalwart could not configure its SMTP port-25 listener"
+  fi
+}
+
+configure_management_listener() {
+  local listener_response listener_ids listener_id listener_result keep=1
+  request "x:NetworkListener/get" '{"ids":null}'
+  listener_response="$(method_result "x:NetworkListener/get")"
+  listener_ids="$(jq -r '.list[]? | select((.protocol // "" | ascii_downcase) == "http") | .id' \
+    <<<"$listener_response")"
+  if [[ -z "$listener_ids" ]]; then
+    request "x:NetworkListener/set" '{"create":{"#sendwise-management":{
+      name:"sendwise-management",protocol:"http",bind:{"127.0.0.1:8080":true}
+    }}}'
+    listener_result="$(method_result "x:NetworkListener/set")"
+    if [[ "$(jq '(.notCreated // {}) | length' <<<"$listener_result")" -gt 0 ]]; then
+      fail "Stalwart could not create its loopback-only management listener"
+    fi
+    return
+  fi
+  while IFS= read -r listener_id; do
+    [[ -n "$listener_id" ]] || continue
+    if [[ "$keep" -eq 1 ]]; then
+      request "x:NetworkListener/set" "$(jq -cn --arg id "$listener_id" \
+        '{update:{($id):{protocol:"http",bind:{"127.0.0.1:8080":true}}}}')"
+      keep=0
+    else
+      request "x:NetworkListener/set" "$(jq -cn --arg id "$listener_id" '{destroy:[$id]}')"
+    fi
+    listener_result="$(method_result "x:NetworkListener/set")"
+    if [[ "$(jq '(.notUpdated // {}) + (.notDestroyed // {}) | length' <<<"$listener_result")" -gt 0 ]]; then
+      fail "Stalwart could not restrict management listeners to 127.0.0.1:8080"
+    fi
+  done <<<"$listener_ids"
+}
+
+if [[ "$host_network" -eq 1 ]]; then
+  configure_mta_listener
+
+  restrict_public_listener_ports() {
+    local listener_response listener_id listener_protocol bind_json allowed_bind result
+    request "x:NetworkListener/get" '{"ids":null}'
+    listener_response="$(method_result "x:NetworkListener/get")"
+    while IFS=$'\t' read -r listener_id listener_protocol bind_json; do
+      [[ -n "$listener_id" ]] || continue
+      [[ "$listener_protocol" != "http" ]] || continue
+      allowed_bind="$(jq -cn --argjson bind "$bind_json" \
+        'def private_host($host):
+           ($host == "localhost" or $host == "[::1]" or
+            ($host | startswith("127.")) or ($host | startswith("10.")) or
+            ($host | startswith("192.168.")) or
+            ($host | test("^172\\.(1[6-9]|2[0-9]|3[01])\\.")) or
+            ($host | startswith("[fc")) or ($host | startswith("[fd")));
+         $bind | with_entries(
+           .key as $endpoint |
+           ($endpoint | sub(":[0-9]+$"; "")) as $host |
+           select(($endpoint | test(":(25|143|465|587|993)$")) or private_host($host))
+         )')"
+      if [[ "$allowed_bind" == "{}" ]]; then
+        request "x:NetworkListener/set" "$(jq -cn --arg id "$listener_id" \
+          '{destroy:[$id]}')"
+        result="$(method_result "x:NetworkListener/set")"
+        if [[ "$(jq '(.notDestroyed // {}) | length' <<<"$result")" -gt 0 ]]; then
+          fail "Stalwart could not disable an unapproved public listener"
+        fi
+      elif [[ "$allowed_bind" != "$bind_json" ]]; then
+        request "x:NetworkListener/set" "$(jq -cn --arg id "$listener_id" --argjson bind "$allowed_bind" \
+          '{update:{($id):{bind:$bind}}}')"
+        result="$(method_result "x:NetworkListener/set")"
+        if [[ "$(jq '(.notUpdated // {}) | length' <<<"$result")" -gt 0 ]]; then
+          fail "Stalwart could not restrict a public listener to the approved SMTP/IMAP ports"
+        fi
+      fi
+    done < <(jq -r '.list[]? |
+      [.id, (.protocol // "" | ascii_downcase), ((.bind // {}) | tojson)] | @tsv' <<<"$listener_response")
+  }
+  restrict_public_listener_ports
+fi
+
 if [[ "$mode" == "live" ]]; then
   certificate_text="$(openssl x509 -in "$STALWART_CERTS_DIR/fullchain.pem" -noout -text 2>/dev/null)" ||
     fail "could not read mounted TLS certificate"
@@ -413,6 +554,9 @@ if [[ "$(jq '(.notCreated // {}) + (.notUpdated // {}) | length' <<<"$settings_r
   fail "Stalwart could not set its default hostname and mail domain"
 fi
 
+if [[ "$host_network" -eq 1 ]]; then
+  configure_management_listener
+fi
 restart_stalwart
 load_session
 tls_ready=0

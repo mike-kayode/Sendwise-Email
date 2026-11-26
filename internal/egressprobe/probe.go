@@ -38,8 +38,7 @@ func (c *Checker) SetDialFn(fn func(network, address string, timeout time.Durati
 }
 
 // RunCheck probes configured MX hosts and persists egress health. It returns
-// true when the cycle failed and the caller should exit non-zero so Docker
-// restarts the probe into Stalwart's current network namespace.
+// true when every configured host failed during this cycle.
 func (c *Checker) RunCheck(ctx context.Context) bool {
 	hosts := c.cfg.DeliveryEgressCheckHosts
 	if len(hosts) == 0 {
@@ -115,7 +114,7 @@ func (c *Checker) RunCheck(ctx context.Context) bool {
 	case c.freshStart && !prevUnconfirmed:
 		status = "unknown"
 		unconfirmedFailure = true
-		detail = "outbound SMTP port 25 check failed; probe restarting to confirm Stalwart network namespace"
+		detail = "outbound SMTP port 25 check failed; waiting for the next interval to confirm"
 	default:
 		consecutiveFailures = prevFailures + 1
 		unconfirmedFailure = true

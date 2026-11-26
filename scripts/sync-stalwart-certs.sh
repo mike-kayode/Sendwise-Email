@@ -13,6 +13,14 @@ PROJECT="${STALWART_CADDY_VOLUME:-email-platform_caddy-data}"
 HOSTNAME="${STALWART_HOSTNAME:-mail.pipsleague.com}"
 DEST="${STALWART_CERTS_DIR:-/opt/email-platform/secrets/stalwart/certs}"
 COMPOSE_DIR="${STALWART_COMPOSE_DIR:-/opt/email-platform}"
+HOST_NETWORK="${STALWART_HOST_NETWORK:-}"
+if [ -z "$HOST_NETWORK" ] && [ -f "$COMPOSE_DIR/.env" ]; then
+  HOST_NETWORK="$(sed -n 's/^STALWART_HOST_NETWORK=//p' "$COMPOSE_DIR/.env" | tail -n 1)"
+fi
+COMPOSE=(docker compose -f "$COMPOSE_DIR/docker-compose.yml" -f "$COMPOSE_DIR/docker-compose.microservices.yml")
+case "$HOST_NETWORK" in
+  true|1|yes) COMPOSE+=(-f "$COMPOSE_DIR/docker-compose.host-network.yml") ;;
+esac
 
 cert_root="$(docker volume inspect "$PROJECT" --format '{{ .Mountpoint }}' 2>/dev/null)/caddy/certificates"
 src_dir="$(find "$cert_root" -maxdepth 2 -type d -name "$HOSTNAME" 2>/dev/null | head -n 1 || true)"
@@ -39,8 +47,8 @@ chmod 640 "$DEST/fullchain.pem" "$DEST/privkey.pem"
 if [ "$changed" -eq 1 ]; then
   echo "certificate material changed; restarting stalwart and egress-probe"
   cd "$COMPOSE_DIR"
-  docker compose -f docker-compose.yml -f docker-compose.microservices.yml restart stalwart
-  docker compose -f docker-compose.yml -f docker-compose.microservices.yml restart egress-probe
+  "${COMPOSE[@]}" restart stalwart
+  "${COMPOSE[@]}" restart egress-probe
 else
   echo "certificate unchanged"
 fi

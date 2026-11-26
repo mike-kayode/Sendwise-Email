@@ -17,10 +17,22 @@ for tool in curl jq openssl; do
   command -v "$tool" >/dev/null 2>&1 || { printf 'ERROR: %s is required\n' "$tool" >&2; exit 1; }
 done
 
-: "${STALWART_MANAGEMENT_URL:?Set STALWART_MANAGEMENT_URL}"
+host_network=0
+case "${STALWART_HOST_NETWORK:-false}" in
+  true|1|yes) host_network=1 ;;
+esac
+if [ "$host_network" -eq 1 ]; then
+  STALWART_URL="${STALWART_URL:-http://127.0.0.1:8080}"
+  [ "$STALWART_URL" != "http://127.0.0.1:8081" ] ||
+    STALWART_URL="http://127.0.0.1:8080"
+  STALWART_MANAGEMENT_URL="$STALWART_URL"
+  STALWART_EVENTS_WEBHOOK_URL="http://127.0.0.1:18080/api/v1/webhooks/stalwart-events"
+else
+  : "${STALWART_MANAGEMENT_URL:?Set STALWART_MANAGEMENT_URL}"
+  : "${STALWART_EVENTS_WEBHOOK_URL:?Set STALWART_EVENTS_WEBHOOK_URL}"
+fi
 : "${STALWART_ADMIN_USERNAME:?Set STALWART_ADMIN_USERNAME}"
 : "${STALWART_ADMIN_PASSWORD:?Set STALWART_ADMIN_PASSWORD}"
-: "${STALWART_EVENTS_WEBHOOK_URL:?Set STALWART_EVENTS_WEBHOOK_URL}"
 : "${WEBHOOK_SECRET:?Set WEBHOOK_SECRET}"
 
 events_json='{"delivery.attempt-start":true,"delivery.attempt-end":true,"delivery.connect-error":true,"delivery.greeting-failed":true,"delivery.ehlo-rejected":true,"delivery.mail-from-rejected":true,"delivery.rcpt-to-rejected":true,"delivery.rcpt-to-failed":true,"delivery.message-rejected":true,"delivery.start-tls-error":true,"delivery.implicit-tls-error":true,"delivery.completed":true,"delivery.delivered":true,"delivery.failed":true,"delivery.dsn-success":true,"delivery.dsn-temp-fail":true,"delivery.dsn-perm-fail":true,"queue.rescheduled":true}'

@@ -47,8 +47,11 @@ SMTP acceptance alone never equals successful inbox delivery. Bounce/complaint e
 processed as separate events and update `message_events` and `suppressions`.
 
 ## Stalwart configuration (development starting point)
-`infrastructure/docker-compose.yml` runs `stalwartlabs/stalwart:latest` on hostname
-`mail.localhost`, ports 25/465/587/8080. This is a local starting point only. Production requires:
+`docker-compose.yml` runs the pinned Stalwart image on hostname `mail.localhost`
+with SMTP ports 25/465/587 and its management listener on 8080. Development
+uses the default bridge-network Compose setup. On Linux hosts where Docker NAT
+blocks outbound SMTP, use the separate `docker-compose.host-network.yml`
+override described in the deployment runbook.
 
 - A static public IP.
 - Confirmed outbound port 25 access (verify with the hosting provider).
@@ -81,11 +84,12 @@ docker run --rm --network host --entrypoint sh \
 ```
 
 If `tcpdump` shows bridge-container SYNs leaving `eth0` without SYN-ACKs while a
-host-network connection succeeds, compare packet TTL before changing container sysctls.
-On this host, containers at the default TTL 64 reached external port 25 in 9 of 9 tests
-while TTL 65 failed in 3 of 9, and Stalwart with TTL 65 stayed blocked for over an hour.
-The `net.ipv4.ip_default_ttl=65` workaround is harmful on this host and must not be set;
-keep Stalwart at the default TTL.
+host-network connection succeeds, compare packet TTL before changing container
+sysctls. On this host, containers at the default TTL 64 reached external port 25
+in 9 of 9 tests while TTL 65 failed in 3 of 9, and Stalwart with TTL 65 stayed
+blocked for over an hour. The `net.ipv4.ip_default_ttl=65` workaround is harmful
+on this host and must not be set. Enable the host-network Compose override
+instead of changing TTL or other sysctls.
 
 The outbound smoke-test host defaults to `gmail-smtp-in.l.google.com` and can be overridden with
 `OUTBOUND_SMTP_CHECK_HOST`. Set `SKIP_OUTBOUND_SMTP_CHECK=true` only in environments that
@@ -310,22 +314,22 @@ The `egress-probe` service checks outbound TCP port 25 connectivity every
 `DELIVERY_EGRESS_CHECK_TIMEOUT`, default `5s`) to the hosts in
 `DELIVERY_EGRESS_CHECK_HOSTS` (comma-separated `host:port`, default
 `gmail-smtp-in.l.google.com:25,outlook-com.olc.protection.outlook.com:25,mta5.am0.yahoodns.net:25`).
-The probe runs with `network_mode: "service:stalwart"` so it shares Stalwart's
-network namespace and measures Stalwart's own outbound path, including the same
-sysctls/NAT path. The worker never probes or pauses sending based on its own
-container network; it only reads `delivery_egress_health` for metrics and the
-optional sending gate.
+In default Compose mode the probe shares Stalwart's network namespace. With
+`docker-compose.host-network.yml`, both Stalwart and the probe use host
+networking, so the probe measures the same outbound route without Docker bridge
+NAT. The worker never probes or pauses sending based on its own container
+network; it only reads `delivery_egress_health` for metrics and the optional
+sending gate.
 
 Hysteresis prevents flapping: status becomes `blocked` only after 2 consecutive
 confirmed failed cycles, becomes `ok` after 1 successful cycle, and is `blocked`
-only when all configured probe hosts fail. Because the probe shares Stalwart's
-network namespace, it can lose connectivity when Stalwart restarts. After any
-failed cycle the probe exits non-zero so Docker restarts it into Stalwart's
-current namespace; a failure counts toward `blocked` only when it is seen again
-after that fresh start. The confirmation counter is persisted in
-`delivery_egress_health` (`consecutive_failures`, `unconfirmed_failure`).
+only when all configured probe hosts fail. In bridge mode the probe's
+confirmation state is persisted in `delivery_egress_health`
+(`consecutive_failures`, `unconfirmed_failure`). The probe stays running after
+failures and checks again at the configured interval (normally 5 minutes); it
+does not restart-loop while outbound SMTP is blocked.
 `scripts/sync-stalwart-certs.sh` restarts `egress-probe` after restarting
-Stalwart so the probe rejoins the current namespace after certificate syncs.
+Stalwart.
 `scripts/deploy.sh` builds and starts `egress-probe` (after Stalwart is up),
 and its smoke test waits for `delivery_egress_health.checked_at` to advance
 within two check intervals (capped). The smoke check is skipped when

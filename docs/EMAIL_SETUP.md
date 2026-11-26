@@ -94,7 +94,9 @@ responsibility; rerun the provisioner after renewal.
 ## Live server runbook
 
 Run these steps on the mail server, never from a developer's workstation pointed
-at production. The management API is published only on `127.0.0.1:8081`.
+at production. In default bridge mode the management API is published only on
+`127.0.0.1:8081`; host-network mode binds Stalwart's admin listener directly to
+`127.0.0.1:8080` and is documented in [the deployment runbook](operations/deployment.md#host-network-stalwart-mode-linux-server-only).
 
 1. Back up the Stalwart data volume and install a valid certificate/key pair in
    the mounted certificate directory. Set the SMTP bind address to `0.0.0.0`
@@ -136,10 +138,12 @@ at production. The management API is published only on `127.0.0.1:8081`.
    ```
 
    This sets the server hostname and platform domain, provisions
-   `noreply@example.com`, configures authenticated STARTTLS on 587 and implicit
-   TLS on 465, installs the mounted certificate, and applies explicit remote
+   `noreply@example.com`, configures SMTP on port 25, authenticated STARTTLS on
+   587 and implicit TLS on 465, installs the mounted certificate, and applies explicit remote
    queue concurrency/retry limits. It preserves any other hosted tenant
-   domains and existing DKIM signatures. The script prints the active platform DKIM
+   domains and existing DKIM signatures. In host-network mode it binds the
+   management listener only to loopback and retains existing IMAP 143/993
+   listeners, if any. The script prints the active platform DKIM
    TXT record alongside the MX, SPF, DMARC and PTR values to publish.
 5. Publish the exact records from the script. Add an A/AAAA record for
    `mail.example.com`; MX, SPF, DKIM and DMARC are domain-specific and must not
@@ -203,9 +207,12 @@ test exercises this policy with an arbitrary local part at a hosted tenant
 domain.
 
 The API uses `STALWART_MANAGEMENT_URL`, `STALWART_ADMIN_USERNAME`, and
-`STALWART_ADMIN_PASSWORD` to manage verified domains. In Compose, the API uses
-the private service address `http://stalwart:8080`; a host-run API uses
-`http://127.0.0.1:8081`. The admin API remains unpublished outside loopback.
+`STALWART_ADMIN_PASSWORD` to manage verified domains. In default Compose, the
+API uses `http://stalwart:8080`; a host-run API uses `http://127.0.0.1:8081`.
+With the optional Linux host-network override, the Stalwart listener binds only
+to `127.0.0.1:8080`, and bridge-network API/worker calls use the private
+host-gateway admin proxy at `http://host.docker.internal:18081`. The admin
+listener itself is never published on a public interface.
 
 An isolated local Stalwart integration test registers through Identity, probes
 EHLO/STARTTLS/AUTH, reads the verification message from the real Stalwart

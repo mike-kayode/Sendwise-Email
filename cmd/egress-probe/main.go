@@ -39,10 +39,7 @@ func main() {
 	)
 
 	checker := egressprobe.NewChecker(pool, cfg, logger)
-	if checker.RunCheck(ctx) {
-		logger.Warn("delivery egress probe exiting after failed cycle to refresh Stalwart network namespace")
-		os.Exit(1)
-	}
+	checker.RunCheck(ctx)
 	ticker := time.NewTicker(cfg.DeliveryEgressCheckInterval)
 	defer ticker.Stop()
 	for {
@@ -51,10 +48,7 @@ func main() {
 			logger.Info("delivery egress probe stopped")
 			return
 		case <-ticker.C:
-			if checker.RunCheck(ctx) {
-				logger.Warn("delivery egress probe exiting after failed cycle to refresh Stalwart network namespace")
-				os.Exit(1)
-			}
+			checker.RunCheck(ctx)
 		}
 	}
 }

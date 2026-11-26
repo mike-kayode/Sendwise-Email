@@ -1,0 +1,48 @@
+name: email-platform
+
+services:
+  stalwart:
+    network_mode: host
+    ports: !reset []
+
+  egress-probe:
+    network_mode: host
+    ports: !reset []
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-email}:${POSTGRES_PASSWORD:-email}@127.0.0.1:5432/${POSTGRES_DB:-email_platform}?sslmode=disable
+
+  stalwart-admin-proxy:
+    build:
+      context: .
+      target: stalwart-admin-proxy
+    network_mode: host
+    environment:
+      LISTEN_ADDR: ${DOCKER_HOST_GATEWAY_IP:-172.17.0.1}:18081
+    depends_on:
+      stalwart:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    environment:
+      SMTP_ADDR: host.docker.internal:587
+      SMTP_HOST: ${STALWART_HOSTNAME:?Set STALWART_HOSTNAME}
+      STALWART_MANAGEMENT_URL: http://host.docker.internal:18081
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      stalwart-admin-proxy:
+        condition: service_started
+    ports: !override
+      - "127.0.0.1:18080:8080"
+
+  worker:
+    environment:
+      SMTP_ADDR: host.docker.internal:587
+      SMTP_HOST: ${STALWART_HOSTNAME:?Set STALWART_HOSTNAME}
+      STALWART_MANAGEMENT_URL: http://host.docker.internal:18081
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      stalwart-admin-proxy:
+        condition: service_started

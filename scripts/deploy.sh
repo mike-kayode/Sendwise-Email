@@ -93,6 +93,15 @@ if [ "$USE_ENV_LOCAL" -eq 1 ] && [ -f "$ROOT/.env.local" ]; then
 fi
 set +a
 
+HOST_NETWORK_ENABLED=0
+case "${STALWART_HOST_NETWORK:-false}" in
+  true|1|yes)
+    HOST_NETWORK_ENABLED=1
+    COMPOSE+=(-f "$ROOT/docker-compose.host-network.yml")
+    ROLLBACK_SERVICES+=(stalwart-admin-proxy)
+    ;;
+esac
+
 APP_ENV_VALUE="${APP_ENV:-development}"
 ENVIRONMENT="${ENVIRONMENT_ARG:-$APP_ENV_VALUE}"
 
@@ -190,6 +199,9 @@ take_backup() {
 
 build_images() {
   local targets=(migrate identity-db-migrate workspace-db-migrate api worker identity workspace gateway web egress-probe)
+  if [ "$HOST_NETWORK_ENABLED" -eq 1 ]; then
+    targets+=(stalwart-admin-proxy)
+  fi
   if [ "${DEPLOY_BACKFILL:-0}" = "1" ]; then
     targets+=(backfill)
   fi
@@ -321,10 +333,19 @@ run_domain_duplicate_check() {
 }
 
 start_stack() {
+  if [ "$HOST_NETWORK_ENABLED" -eq 1 ]; then
+    log "Host-network mode enabled; stopping the legacy API binding on 127.0.0.1:8080..."
+    "${COMPOSE[@]}" stop api >/dev/null
+  fi
   log "Starting infrastructure (postgres, redis, nats, stalwart)..."
   "${COMPOSE[@]}" up -d --no-deps postgres redis nats stalwart
+  if [ "$HOST_NETWORK_ENABLED" -eq 1 ]; then
+    log "Starting the host-gateway-only Stalwart admin proxy..."
+    "${COMPOSE[@]}" up -d --no-deps stalwart-admin-proxy
+  fi
   log "Starting application services (--no-deps)..."
-  "${COMPOSE[@]}" up -d --no-deps api worker identity workspace gateway web egress-probe caddy
+  local services=(api worker identity workspace gateway web egress-probe caddy)
+  "${COMPOSE[@]}" up -d --no-deps "${services[@]}"
   log "Stack started"
 }
 
@@ -365,7 +386,11 @@ outbound_smtp_check() {
 }
 
 delivery_journey_webhook_check() {
-  local endpoint="http://127.0.0.1:8080/api/v1/webhooks/stalwart-events"
+  local api_port=8080
+  if [ "$HOST_NETWORK_ENABLED" -eq 1 ]; then
+    api_port=18080
+  fi
+  local endpoint="http://127.0.0.1:$api_port/api/v1/webhooks/stalwart-events"
   local payload='{"events":[]}'
   local unsigned_status signature signed_status
   unsigned_status="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' \
@@ -378,6 +403,34 @@ delivery_journey_webhook_check() {
     --data "$payload" "$endpoint" 2>/dev/null || true)"
   [ "$signed_status" = "204" ] || fail "delivery telemetry webhook rejected signed test event (status=$signed_status)"
   log "  ok  delivery-journey-webhook-signature"
+}
+
+host_network_admin_bind_check() {
+  [ "$HOST_NETWORK_ENABLED" -eq 1 ] || return 0
+  command -v ss >/dev/null 2>&1 || fail "ss is required to verify loopback-only Stalwart admin binding in host-network mode"
+  local addresses address count=0
+  addresses="$(ss -H -ltn 'sport = :8080' | awk '{print $4}')"
+  [ -n "$addresses" ] || fail "Stalwart admin port 8080 is not listening; run scripts/provision-stalwart.sh with STALWART_HOST_NETWORK=true"
+  while IFS= read -r address; do
+    [ -n "$address" ] || continue
+    count=$((count + 1))
+    if [ "$address" != "127.0.0.1:8080" ]; then
+      fail "unsafe Stalwart admin binding on $address; host-network mode requires exactly 127.0.0.1:8080"
+    fi
+  done <<<"$addresses"
+  [ "$count" -gt 0 ] || fail "could not verify Stalwart admin binding on 127.0.0.1:8080"
+  log "  ok  stalwart-admin-loopback-only"
+}
+
+host_network_admin_proxy_check() {
+  [ "$HOST_NETWORK_ENABLED" -eq 1 ] || return 0
+  local gateway="${DOCKER_HOST_GATEWAY_IP:-172.17.0.1}" status
+  status="$(curl -sS -o /dev/null -w '%{http_code}' -m 5 \
+    "http://$gateway:18081/jmap/session" 2>/dev/null || true)"
+  case "$status" in
+    2*|401|403) log "  ok  stalwart-admin-proxy" ;;
+    *) fail "host-network Stalwart admin proxy is unreachable or unhealthy (status=$status, host-gateway=$gateway:18081)" ;;
+  esac
 }
 
 parse_duration_seconds() {
@@ -431,7 +484,13 @@ egress_probe_smoke_check() {
 
 smoke_tests() {
   log "Running smoke tests against the combined stack..."
-  http_check "legacy-api-ready"  "http://127.0.0.1:8080/readyz" "-"
+  local api_host_port=8080
+  if [ "$HOST_NETWORK_ENABLED" -eq 1 ]; then
+    api_host_port=18080
+  fi
+  host_network_admin_bind_check
+  host_network_admin_proxy_check
+  http_check "legacy-api-ready"  "http://127.0.0.1:$api_host_port/readyz" "-"
   http_check "identity-ready"    "http://127.0.0.1:8082/readyz" "-"
   http_check "workspace-ready"   "http://127.0.0.1:8083/readyz" "-"
   # Gateway readiness must prove every upstream, including legacy, is reachable.
